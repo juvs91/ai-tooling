@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "WebFetch(domain:docs.z.ai)",
+      "WebFetch(domain:karim.touma.io)",
+      "WebFetch(domain:claudelog.com)",
+      "WebFetch(domain:hboon.com)"
+    ]
+  },
+  "model": "opus"
+}

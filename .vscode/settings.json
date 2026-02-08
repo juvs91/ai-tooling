@@ -1,0 +1,14 @@
+{
+    "files.exclude": {
+        "**/.git": true,
+        "**/.svn": true,
+        "**/.hg": true,
+        "**/.DS_Store": true,
+        "**/Thumbs.db": true,
+        ".mule": true
+    },
+    "claudeCode.terminalEnvironment": {
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:8082",
+        "ANTHROPIC_AUTH_TOKEN": "dummy"
+    }
+}

@@ -1,0 +1,18 @@
+[
+  {
+    "key": "cmd+shift+enter",
+    "command": "workbench.action.tasks.runTask",
+    "args": "AI: cc-chat (REPL liviano)"
+  },
+  {
+    "key": "cmd+shift+a",
+    "command": "workbench.action.tasks.runTask",
+    "args": "AI: Scan archivo actual -> ai-notes/*.analysis.md"
+  },
+  {
+    "key": "cmd+shift+p",
+    "command": "workbench.action.tasks.runTask",
+    "args": "AI: Plan desde ai-notes/AI_CONTEXT.md -> AI_PLAN.md"
+  }
+]
+

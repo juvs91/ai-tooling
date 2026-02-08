@@ -1,0 +1,33 @@
+#!/bin/bash
+# cc-switch: Alterna entre configuraciones de Claude Code
+# Usage: cc-switch <mode>
+#   modes: opus | sonnet | zai
+
+CLAUDE_DIR="$(cd "$(dirname "$0")/.." && pwd)/.claude"
+TARGET="$CLAUDE_DIR/settings.local.json"
+
+case "$1" in
+  opus)
+    cp "$CLAUDE_DIR/opus.settings.json" "$TARGET"
+    echo "Switched to Opus (direct Anthropic)"
+    ;;
+  sonnet)
+    cp "$CLAUDE_DIR/sonnet.settings.json" "$TARGET"
+    echo "Switched to Sonnet (direct Anthropic)"
+    ;;
+  zai)
+    cp "$CLAUDE_DIR/test.settings.local.json" "$TARGET"
+    echo "Switched to Z.AI proxy (localhost:8083)"
+    ;;
+  *)
+    echo "Usage: cc-switch <opus|sonnet|zai>"
+    echo ""
+    echo "  opus   - Claude Opus 4.6 directo (tareas grandes)"
+    echo "  sonnet - Claude Sonnet 4.5 directo (tareas medianas)"
+    echo "  zai    - Z.AI GLM-4.7 via proxy (barato)"
+    exit 1
+    ;;
+esac
+
+# Reload VS Code window
+code --command workbench.action.reloadWindow 2>/dev/null && echo "VS Code reloaded" || echo "Reinicia VS Code manualmente (Cmd+Shift+P > Reload Window)"

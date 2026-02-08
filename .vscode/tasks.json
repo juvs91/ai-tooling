@@ -1,0 +1,40 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AI: cc-chat (REPL liviano)",
+      "type": "shell",
+      "command": "cc-chat",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "focus": true }
+    },
+    {
+      "label": "AI: Scan archivo actual -> ai-notes/*.analysis.md",
+      "type": "shell",
+      "command": "cc-scan \"${file}\"",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "focus": true }
+    },
+    {
+      "label": "AI: Plan desde ai-notes/AI_CONTEXT.md -> AI_PLAN.md",
+      "type": "shell",
+      "command": "cc-plan",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "focus": true }
+    },
+    {
+      "label": "AI: Activar perfil LOCAL (swap settings.json)",
+      "type": "shell",
+      "command": "cc-profile local",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "focus": true }
+    },
+    {
+      "label": "AI: Activar perfil CLOUD (swap settings.json)",
+      "type": "shell",
+      "command": "cc-profile cloud",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "focus": true }
+    }
+  ]
+}

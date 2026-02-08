@@ -1,0 +1,22 @@
+services:
+  proxy_local:
+    image: ghcr.io/1rgs/claude-code-proxy:main
+    restart: unless-stopped
+    env_file:
+      - profile-envs/local.env
+    ports:
+      - "8082:8082"
+    volumes:
+      - ./server.py:/app/server.py
+    command: uvicorn server:app --host 0.0.0.0 --port 8082 --reload
+
+  proxy_cloud:
+    image: ghcr.io/1rgs/claude-code-proxy:main
+    restart: unless-stopped
+    env_file:
+      - profile-envs/cloud.openai.env
+    ports:
+      - "8083:8082"
+    volumes:
+      - ./server.py:/app/server.py
+    command: uvicorn server:app --host 0.0.0.0 --port 8082 --reload

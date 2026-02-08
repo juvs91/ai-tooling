@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "WebFetch(domain:docs.z.ai)",
+      "WebFetch(domain:karim.touma.io)",
+      "WebFetch(domain:claudelog.com)",
+      "WebFetch(domain:hboon.com)"
+    ]
+  },
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8083"
+  }
+}

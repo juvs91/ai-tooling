@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- ai-tooling: symlink-safe repo root discovery ---
+resolve_self() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$1" <<'PY'
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+PY
+    return 0
+  fi
+  local p="$1"
+  while [ -L "$p" ]; do
+    local next
+    next="$(readlink "$p")"
+    case "$next" in
+      /*) p="$next" ;;
+      *) p="$(cd "$(dirname "$p")" && pwd)/$next" ;;
+    esac
+  done
+  echo "$p"
+}
+
+SELF="$(resolve_self "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/_cc-lib.sh"
+ROOT_DIR="$(cc_repo_dir)"
+# -----------------------------------------------
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8082}"
+export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-dummy}"
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+
+# Reduce ruido extra (telemetría/eventos)
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+
+exec claude

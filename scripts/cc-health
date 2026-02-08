@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cc-health: Check proxy health status
+# Usage: cc-health [--json] [--port PORT]
+
+PORT="${PROXY_PORT:-8082}"
+JSON_OUTPUT=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      JSON_OUTPUT=true
+      shift
+      ;;
+    --port)
+      PORT="$2"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: cc-health [--json] [--port PORT]"
+      echo ""
+      echo "Options:"
+      echo "  --json    Output raw JSON response"
+      echo "  --port    Proxy port (default: 8082 or PROXY_PORT env)"
+      exit 0
+      ;;
+    *)
+      echo "[cc-health] Unknown option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+HEALTH_URL="http://localhost:${PORT}/health"
+
+# Check if proxy is running
+if ! response=$(curl -s -w "\n%{http_code}" "${HEALTH_URL}" 2>/dev/null); then
+  echo "[cc-health] ERROR: Cannot connect to proxy at ${HEALTH_URL}" >&2
+  echo "[cc-health] Is the proxy running? Try: cc-proxy-up" >&2
+  exit 1
+fi
+
+# Extract HTTP code and body
+http_code=$(echo "$response" | tail -n1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" != "200" ]]; then
+  echo "[cc-health] ERROR: Proxy returned HTTP ${http_code}" >&2
+  echo "$body" >&2
+  exit 1
+fi
+
+if $JSON_OUTPUT; then
+  echo "$body"
+else
+  # Pretty print key info
+  status=$(echo "$body" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+  provider=$(echo "$body" | grep -o '"provider":"[^"]*"' | cut -d'"' -f4)
+  timestamp=$(echo "$body" | grep -o '"timestamp":"[^"]*"' | cut -d'"' -f4)
+
+  echo "[cc-health] ✅ Proxy healthy"
+  echo "  Status:    ${status}"
+  echo "  Provider:  ${provider}"
+  echo "  Timestamp: ${timestamp}"
+  echo "  Endpoint:  ${HEALTH_URL}"
+fi

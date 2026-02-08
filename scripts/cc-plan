@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- ai-tooling: symlink-safe repo root discovery ---
+resolve_self() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$1" <<'PY'
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+PY
+    return 0
+  fi
+  local p="$1"
+  while [ -L "$p" ]; do
+    local next
+    next="$(readlink "$p")"
+    case "$next" in
+      /*) p="$next" ;;
+      *) p="$(cd "$(dirname "$p")" && pwd)/$next" ;;
+    esac
+  done
+  echo "$p"
+}
+
+SELF="$(resolve_self "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/_cc-lib.sh"
+ROOT_DIR="$(cc_repo_dir)"
+# -----------------------------------------------
+
+CTX="ai-notes/AI_CONTEXT.md"
+OUT="ai-notes/AI_PLAN.md"
+TPL="templates/AI_PLAN.template.md"
+
+# Parse arguments
+USE_CLOUD=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --cloud)
+      USE_CLOUD="--cloud"
+      ;;
+    -h|--help)
+      echo "Usage: cc-plan [--cloud]"
+      echo
+      echo "Options:"
+      echo "  --cloud   Use cloud API directly (bypass local proxy)"
+      echo
+      echo "Lee ai-notes/AI_CONTEXT.md y genera ai-notes/AI_PLAN.md (tools OFF)."
+      echo "Si falta info, escribe ## MISSING_INFO con 1 pregunta y STOP."
+      echo
+      echo "Outputs:"
+      echo "  ai-notes/AI_PLAN.md"
+      exit 0
+      ;;
+  esac
+done
+
+if [[ ! -f "$CTX" ]]; then
+  echo "ERROR: falta $CTX" >&2
+  echo "Crea primero el context pack con ticket + scans + guardrails." >&2
+  exit 1
+fi
+
+# Prompt hardening (local: tools OFF)
+INSTR=$'Genera ai-notes/AI_PLAN.md basado SOLO en ai-notes/AI_CONTEXT.md (y el template si existe).\n\nRESTRICCIONES DURAS:\n- PROHIBIDO inventar comandos, rutas, archivos, flags o outputs.\n- SOLO puedes referenciar comandos/paths que estén explícitamente listados en ai-notes/AI_CONTEXT.md.\n- No ejecutes nada. No uses herramientas.\n\nSI FALTA INFO PARA PLANEAR SIN INVENTAR:\n- Escribe al inicio: "## MISSING_INFO" con UNA sola pregunta.\n- STOP: no escribas plan ni otras secciones.\n\nSI HAY INFO SUFICIENTE:\n- Sigue el template (si existe) y deja STATUS: DRAFT y Reviewed-by: <pendiente>.\n- Haz pasos atómicos numerados y validaciones concretas usando SOLO comandos/paths del contexto.\n'
+
+# Prepend template (si existe) + separador + contexto
+{
+  if [[ -f "$TPL" ]]; then
+    cat "$TPL"
+    echo
+    echo "---"
+    echo
+  fi
+  cat "$CTX"
+# shellcheck disable=SC2086
+} | cc-chat $USE_CLOUD "$INSTR" > "$OUT"
+
+echo "✅ plan -> $OUT"
+echo "🧭 Siguiente: revisa $OUT. Para cloud: cambia a STATUS: REVIEWED y agrega Reviewed-by: <nombre>."

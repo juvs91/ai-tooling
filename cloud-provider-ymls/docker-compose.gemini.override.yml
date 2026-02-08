@@ -1,0 +1,4 @@
+services:
+  proxy_cloud:
+    env_file:
+      - profile-envs/cloud.gemini.env

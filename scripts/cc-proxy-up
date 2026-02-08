@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  cc-proxy-up [path-to-override.yml]
+
+Env vars:
+  PROFILE_ENV=profile-envs/cloud.groq.env   # (optional) force provider profile env_file
+  HOST_SERVER=./vendor/claude-code-proxy/server.py   # (optional) local path to server.py
+  CONTAINER_SERVER=/claude-code-proxy/server.py      # (optional) path inside container
+  ENABLE_RELOAD=1|0  (default 1)
+  BIND_PORT=8083     (optional) override proxy_cloud port mapping (host->8082)
+
+Examples:
+  cc-proxy-up
+  PROFILE_ENV=profile-envs/cloud.groq.env cc-proxy-up docker-compose.cloud.override.yml
+  HOST_SERVER=./vendor/claude-code-proxy/server.py cc-proxy-up docker-compose.cloud.override.yml
+USAGE
+}
+
+# --- symlink-safe repo root discovery ---
+resolve_self() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$1" <<'PY'
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+PY
+    return 0
+  fi
+  local p="$1"
+  while [ -L "$p" ]; do
+    local next
+    next="$(readlink "$p")"
+    case "$next" in
+      /*) p="$next" ;;
+      *) p="$(cd "$(dirname "$p")" && pwd)/$next" ;;
+    esac
+  done
+  echo "$p"
+}
+
+SELF="$(resolve_self "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/_cc-lib.sh"
+ROOT_DIR="$(cc_repo_dir)"
+cd "$ROOT_DIR"
+# -----------------------------------------------
+
+OVERRIDE="${1:-docker-compose.cloud.override.yml}"
+case "${OVERRIDE}" in
+  -h|--help) usage; exit 0;;
+esac
+
+if [[ ! -f docker-compose.yml ]]; then
+  echo "ERROR: missing docker-compose.yml (run inside repo)" >&2
+  exit 2
+fi
+if [[ ! -f "$OVERRIDE" ]]; then
+  echo "ERROR: override file not found: $OVERRIDE" >&2
+  exit 2
+fi
+
+# Defaults (can be set in root .env or exported)
+HOST_SERVER="${HOST_SERVER:-./vendor/claude-code-proxy/server.py}"
+CONTAINER_SERVER="${CONTAINER_SERVER:-/claude-code-proxy/server.py}"
+ENABLE_RELOAD="${ENABLE_RELOAD:-1}"
+BIND_PORT="${BIND_PORT:-8083}"
+
+if [[ ! -f "$HOST_SERVER" ]]; then
+  echo "ERROR: HOST_SERVER not found: $HOST_SERVER" >&2
+  exit 2
+fi
+
+TMP_OVERRIDE="$(mktemp -t cc-proxy-dev-override.XXXXXX.yml)"
+trap 'rm -f "$TMP_OVERRIDE"' EXIT
+
+# Build a tiny override that ALWAYS:
+# - adds global .env
+# - optionally forces profile env_file (PROFILE_ENV)
+# - mounts server.py
+# - enables reload
+{
+  echo "services:"
+  echo "  proxy_cloud:"
+
+  # Always include global env flags
+  echo "    env_file:"
+  echo "      - ./.env"
+
+  # If PROFILE_ENV is set, force it (it will override previous env_file keys)
+  if [[ -n "${PROFILE_ENV:-}" ]]; then
+    echo "      - ${PROFILE_ENV}"
+  fi
+
+  # Mount server.py to container
+  echo "    volumes:"
+  echo "      - ./vendor/claude-code-proxy:/claude-code-proxy"
+
+
+  # Optional: also mount entire vendor folder if you prefer (uncomment)
+  # echo "      - ./vendor/claude-code-proxy:/claude-code-proxy"
+
+  # Hot reload
+  if [[ "$ENABLE_RELOAD" == "1" ]]; then
+    echo "    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload"
+  fi
+
+  # Optional: override port mapping (handy if you run multiple)
+  echo "    ports:"
+  echo "      - \"${BIND_PORT}:8082\""
+} > "$TMP_OVERRIDE"
+
+echo "Using override: $OVERRIDE"
+echo "Global env: ./.env"
+if [[ -n "${PROFILE_ENV:-}" ]]; then
+  echo "Profile env forced: $PROFILE_ENV"
+else
+  echo "Profile env: (from $OVERRIDE)"
+fi
+echo "Mount: $HOST_SERVER -> $CONTAINER_SERVER"
+echo "Reload: $ENABLE_RELOAD"
+echo "Port: $BIND_PORT -> 8082"
+
+docker compose -f docker-compose.yml -f "$OVERRIDE" -f "$TMP_OVERRIDE" up -d --force-recreate proxy_cloud
+docker ps --format "table {{.Names}}\t{{.Ports}}"
