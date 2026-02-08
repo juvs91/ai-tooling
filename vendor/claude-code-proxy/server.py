@@ -2,19 +2,20 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 import os
 import json
+import time
 import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
-import litellm
 from litellm import token_counter
-
+from utils.utils import cached_token_count, store_token_count, scale_tokens
 from proxy.proxy import apply_policy_and_routing, run_messages
-from llm.converters import convert_litellm_to_anthropic, convert_anthropic_to_litellm
-from llm.schemas import MessagesRequest, TokenCountRequest, TokenCountResponse
+from llm.converters import convert_litellm_to_anthropic
+from llm.schemas import MessagesRequest, TokenCountRequest, TokenCountResponse, ProviderConfig
 from llm.streaming import handle_streaming
 from router.model_mapper import map_claude_alias_to_target
 from router.llm_router import classify_intent, get_last_user_text, _regex_fallback_intent
+from utils.metrics import metrics, RequestLog
 load_dotenv()
 logger = logging.getLogger(__name__)
 app = FastAPI()
@@ -37,6 +38,11 @@ PREFERRED_PROVIDER = os.environ.get("PREFERRED_PROVIDER", "openai").lower()
 SMALL_MODEL = os.environ.get("SMALL_MODEL", "cc-local:chat")
 BIG_MODEL = os.environ.get("BIG_MODEL", SMALL_MODEL)
 BUILDING_MODEL = os.environ.get("BUILDING_MODEL", BIG_MODEL)
+
+# Context window scaling: Claude Code assumes 200K. If your model has a smaller
+# window, set MODEL_CONTEXT_WINDOW so token counts are scaled proportionally.
+# Set to 0 to disable scaling (pass through raw counts).
+MODEL_CONTEXT_WINDOW = int(os.environ.get("MODEL_CONTEXT_WINDOW", "0"))
 
 # Intent classifier config - use a cheap model (e.g. deepseek-chat)
 # Format: "provider/model" e.g. "openai/deepseek-chat"
@@ -61,6 +67,36 @@ if CLASSIFIER_MODEL:
     )
 else:
     logger.info("[startup] Intent classifier: regex fallback (CLASSIFIER_MODEL not set)")
+
+# Fallback provider chain (FALLBACK_1_*, FALLBACK_2_*, ... FALLBACK_9_*)
+def _load_fallback_providers() -> list[ProviderConfig]:
+    providers = []
+    for n in range(1, 10):
+        prefix = f"FALLBACK_{n}_"
+        provider = os.environ.get(f"{prefix}PROVIDER", "").strip()
+        api_key = os.environ.get(f"{prefix}API_KEY", "").strip()
+        if not provider or not api_key:
+            break  # stop at first gap
+        providers.append(ProviderConfig(
+            name=f"fallback_{n}",
+            provider_prefix=provider,
+            api_key=api_key,
+            base_url=os.environ.get(f"{prefix}BASE_URL", "").strip() or None,
+            big_model=os.environ.get(f"{prefix}BIG_MODEL", "").strip(),
+            small_model=os.environ.get(f"{prefix}SMALL_MODEL", "").strip() or os.environ.get(f"{prefix}BIG_MODEL", "").strip(),
+            building_model=os.environ.get(f"{prefix}BUILDING_MODEL", "").strip() or None,
+            context_window=int(os.environ.get(f"{prefix}CONTEXT_WINDOW", "0")),
+        ))
+    return providers
+
+FALLBACK_PROVIDERS = _load_fallback_providers()
+if FALLBACK_PROVIDERS:
+    logger.info(
+        "[startup] Fallback chain: %s",
+        " → ".join(p.name + "(" + p.provider_prefix + "/" + p.big_model + ")" for p in FALLBACK_PROVIDERS),
+    )
+else:
+    logger.info("[startup] No fallback providers configured")
 
 @app.post("/v1/messages")
 async def create_message(request: MessagesRequest, raw_request: Request):
@@ -99,7 +135,10 @@ async def create_message(request: MessagesRequest, raw_request: Request):
         except ValueError as e:
             raise HTTPException(status_code=413, detail=str(e))
 
-        is_stream, out = await run_messages(
+        t0 = time.monotonic()
+        original_model = getattr(request, "original_model", "") or ""
+
+        is_stream, out, provider_used = await run_messages(
             request_obj=request,
             openai_api_key=OPENAI_API_KEY,
             openai_base_url=OPENAI_BASE_URL,
@@ -108,14 +147,49 @@ async def create_message(request: MessagesRequest, raw_request: Request):
             use_vertex_auth=USE_VERTEX_AUTH,
             vertex_project=VERTEX_PROJECT,
             vertex_location=VERTEX_LOCATION,
+            fallback_providers=FALLBACK_PROVIDERS or None,
+            intent=intent,
         )
 
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+
         if is_stream:
-            
-            return StreamingResponse(handle_streaming(out, request), media_type="text/event-stream")
+            # For streaming, record metrics with tokens=0 (actual counts come from SSE)
+            metrics.record(RequestLog(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                intent=intent,
+                model_requested=original_model,
+                model_used=request.model,
+                provider=provider_used,
+                input_tokens=0,
+                output_tokens=0,
+                latency_ms=elapsed_ms,
+                is_fallback=provider_used != "primary",
+                is_stream=True,
+            ))
+            return StreamingResponse(handle_streaming(out, request, model_context_window=MODEL_CONTEXT_WINDOW), media_type="text/event-stream")
 
         # non-stream: convertir respuesta a Anthropic
-        anthropic_response = convert_litellm_to_anthropic(out, request)
+        anthropic_response = convert_litellm_to_anthropic(out, request, model_context_window=MODEL_CONTEXT_WINDOW)
+
+        # Extract tokens from non-streaming response
+        input_tokens = getattr(anthropic_response, "usage", None)
+        in_tok = input_tokens.input_tokens if input_tokens else 0
+        out_tok = input_tokens.output_tokens if input_tokens else 0
+
+        metrics.record(RequestLog(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            intent=intent,
+            model_requested=original_model,
+            model_used=request.model,
+            provider=provider_used,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            latency_ms=elapsed_ms,
+            is_fallback=provider_used != "primary",
+            is_stream=False,
+        ))
+
         return anthropic_response
 
     except HTTPException:
@@ -175,18 +249,26 @@ async def count_tokens_endpoint(request: TokenCountRequest):
                 if text_parts:
                     litellm_messages.append({"role": msg.role, "content": "\n".join(text_parts)})
 
-        # Count tokens using LiteLLM
-        try:
-            input_tokens = token_counter(
-                model=target_model,
-                messages=litellm_messages
-            )
-        except Exception:
-            # Fallback: approximate using bytes heuristic (6 bytes ~ 1 token)
-            total_chars = sum(len(str(m.get("content", ""))) for m in litellm_messages)
-            input_tokens = max(1, total_chars // 4)  # ~4 chars per token for English
+        # Check token count cache first
+        system_text_for_cache = litellm_messages[0]["content"] if litellm_messages and litellm_messages[0]["role"] == "system" else None
+        cached = cached_token_count(litellm_messages, target_model, system_text_for_cache)
+        if cached is not None:
+            metrics.cache_hits += 1
+            input_tokens = cached
+        else:
+            metrics.cache_misses += 1
+            try:
+                input_tokens = token_counter(
+                    model=target_model,
+                    messages=litellm_messages
+                )
+            except Exception:
+                # Fallback: approximate using bytes heuristic
+                total_chars = sum(len(str(m.get("content", ""))) for m in litellm_messages)
+                input_tokens = max(1, total_chars // 4)
+            store_token_count(litellm_messages, target_model, input_tokens, system_text_for_cache)
 
-        return TokenCountResponse(input_tokens=input_tokens)
+        return TokenCountResponse(input_tokens=scale_tokens(input_tokens, MODEL_CONTEXT_WINDOW))
 
     except Exception as e:
         logger.error(f"Token counting error: {e}")
@@ -211,4 +293,20 @@ async def health_check():
             "base_url": CLASSIFIER_BASE_URL,
             "timeout_s": CLASSIFIER_TIMEOUT,
         },
+        "fallbacks": [
+            {"name": f.name, "provider": f.provider_prefix, "big": f.big_model}
+            for f in FALLBACK_PROVIDERS
+        ],
     }
+
+
+@app.get("/api/stats")
+async def get_stats():
+    """Aggregated proxy metrics: request counts, latency, fallback rate, cache hits."""
+    return metrics.get_stats()
+
+
+@app.get("/api/logs")
+async def get_logs(n: int = 50):
+    """Recent request logs (up to 200). Use ?n=100 to control count."""
+    return metrics.get_recent(min(n, 200))

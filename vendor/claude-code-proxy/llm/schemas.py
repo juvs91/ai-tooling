@@ -1,8 +1,34 @@
 # llm/schemas.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pydantic import BaseModel, field_validator
 from typing import List, Dict, Any, Optional, Union, Literal
+
+
+# ---------- Provider fallback chain ----------
+@dataclass
+class ProviderConfig:
+    """Configuration for a single LLM provider (primary or fallback)."""
+    name: str                        # "primary", "fallback_1", etc.
+    provider_prefix: str             # "openai", "gemini", "anthropic"
+    api_key: str
+    big_model: str
+    small_model: str
+    base_url: str | None = None
+    building_model: str | None = None
+    context_window: int = 0
+
+    def get_litellm_model(self, intent: str) -> str:
+        """Return litellm-style 'prefix/model' string for the given intent."""
+        building = self.building_model or self.big_model
+        if intent == "CHAT" and self.small_model != self.big_model:
+            model = self.small_model
+        elif intent == "BUILDING" and building != self.big_model:
+            model = building
+        else:
+            model = self.big_model
+        return f"{self.provider_prefix}/{model}"
 
 # ---------- Anthropic-style content blocks ----------
 class ContentBlockText(BaseModel):

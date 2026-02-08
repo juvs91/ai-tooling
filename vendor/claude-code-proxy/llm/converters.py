@@ -1,9 +1,12 @@
 # llm/converters.py
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
+from utils.utils import scale_tokens
 from typing import Any, Dict, List, Optional, Union
+from json_repair import repair_json
 
 from llm.schemas import MessagesRequest, MessagesResponse, Usage
 
@@ -132,6 +135,47 @@ def clean_gemini_schema(schema: Any) -> Any:
         if cleaned.get("type") is None and "properties" in cleaned:
             cleaned["type"] = "object"
     return cleaned
+
+
+# ── Gemini Schema Memoization ────────────────────────────────────────
+_gemini_schema_cache: dict[str, Any] = {}
+
+
+def clean_gemini_schema_cached(schema: Any) -> Any:
+    """Memoized wrapper around clean_gemini_schema."""
+    key = hashlib.sha256(json.dumps(schema, sort_keys=True).encode()).hexdigest()[:16]
+    if key not in _gemini_schema_cache:
+        _gemini_schema_cache[key] = clean_gemini_schema(schema)
+    return _gemini_schema_cache[key]
+
+
+# ── Tool Definition Conversion Cache ─────────────────────────────────
+_tool_conversion_cache: dict[str, dict] = {}
+
+
+def _convert_tool_cached(tool_dict: dict, is_gemini: bool) -> dict:
+    """Convert Anthropic tool dict to OpenAI format with memoization."""
+    name = tool_dict["name"]
+    input_schema = tool_dict.get("input_schema", {}) or {}
+    schema_str = json.dumps(input_schema, sort_keys=True)
+    key = f"{name}:{'g' if is_gemini else 'o'}:{hashlib.sha256(schema_str.encode()).hexdigest()[:16]}"
+
+    if key in _tool_conversion_cache:
+        return _tool_conversion_cache[key]
+
+    if is_gemini:
+        input_schema = clean_gemini_schema_cached(input_schema)
+
+    converted = {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": tool_dict.get("description", "") or "",
+            "parameters": input_schema,
+        },
+    }
+    _tool_conversion_cache[key] = converted
+    return converted
 
 
 def _system_to_text(system: Any) -> str:
@@ -433,29 +477,13 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     if anthropic_request.top_k is not None:
         litellm_request["top_k"] = anthropic_request.top_k
 
-    # tools -> OpenAI function tools
+    # tools -> OpenAI function tools (cached per tool name + schema hash)
     if anthropic_request.tools:
-        openai_tools = []
         is_gemini_model = anthropic_request.model.startswith("gemini/")
-
+        openai_tools = []
         for tool in anthropic_request.tools:
             tool_dict = tool.model_dump() if hasattr(tool, "model_dump") else (tool.dict() if hasattr(tool, "dict") else dict(tool))
-            input_schema = tool_dict.get("input_schema", {}) or {}
-
-            if is_gemini_model:
-                input_schema = clean_gemini_schema(input_schema)
-
-            openai_tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool_dict["name"],
-                        "description": tool_dict.get("description", "") or "",
-                        "parameters": input_schema,
-                    },
-                }
-            )
-
+            openai_tools.append(_convert_tool_cached(tool_dict, is_gemini_model))
         litellm_request["tools"] = openai_tools
 
     # tool_choice (Anthropic-style) -> OpenAI
@@ -475,7 +503,7 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     return litellm_request
 
 
-def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], original_request: MessagesRequest) -> MessagesResponse:
+def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], original_request: MessagesRequest, model_context_window: int = 0) -> MessagesResponse:
     """
     LiteLLM(OpenAI-ish) response -> Anthropic /v1/messages response object
     """
@@ -530,7 +558,16 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
                 try:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError:
-                    arguments = {"raw": arguments}
+                    try:
+                        
+                        repaired = repair_json(arguments, return_objects=True)
+                        if isinstance(repaired, dict):
+                            arguments = repaired
+                            print(f"[json-repair] Repaired tool_call arguments for {name}")
+                        else:
+                            arguments = {"raw": arguments}
+                    except Exception:
+                        arguments = {"raw": arguments}
 
             content.append(
                 {"type": "tool_use", "id": tool_id, "name": name, "input": arguments}
@@ -555,6 +592,7 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
     if not content:
         content.append({"type": "text", "text": ""})
 
+    
     return MessagesResponse(
         id=response_id,
         model=original_request.model,
@@ -562,5 +600,8 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
         content=content,
         stop_reason=stop_reason,
         stop_sequence=None,
-        usage=Usage(input_tokens=prompt_tokens, output_tokens=completion_tokens),
+        usage=Usage(
+            input_tokens=scale_tokens(prompt_tokens, model_context_window),
+            output_tokens=scale_tokens(completion_tokens, model_context_window),
+        ),
     )

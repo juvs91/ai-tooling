@@ -8,6 +8,11 @@ from utils.utils import (
     approx_tokens_from_bytes,
     ensure_system_note,
     normalize_tool_choice,
+    scale_tokens,
+    cached_token_count,
+    store_token_count,
+    _hash_content,
+    _token_count_cache,
 )
 
 
@@ -179,3 +184,73 @@ class TestNormalizeToolChoice:
         tools = [{"name": "Read"}]
         result = normalize_tool_choice(choice, tools)
         assert result == {"type": "auto"}
+
+
+class TestScaleTokens:
+    """Tests for scale_tokens function."""
+
+    def test_no_scaling_when_zero_window(self):
+        assert scale_tokens(1000, 0) == 1000
+
+    def test_no_scaling_when_window_equals_assumed(self):
+        assert scale_tokens(1000, 200_000) == 1000
+
+    def test_no_scaling_when_window_larger_than_assumed(self):
+        assert scale_tokens(1000, 300_000) == 1000
+
+    def test_scales_for_128k_window(self):
+        # 1000 * (200000 / 131072) = 1525
+        assert scale_tokens(1000, 131072) == 1525
+
+    def test_scales_for_32k_window(self):
+        # 1000 * (200000 / 32768) = 6103
+        assert scale_tokens(1000, 32768) == 6103
+
+    def test_zero_tokens_stays_zero(self):
+        assert scale_tokens(0, 131072) == 0
+
+    def test_negative_window_no_scaling(self):
+        assert scale_tokens(1000, -1) == 1000
+
+
+class TestTokenCountCache:
+    """Tests for token count cache functions."""
+
+    def setup_method(self):
+        _token_count_cache.clear()
+
+    def test_cache_miss_returns_none(self):
+        msgs = [{"role": "user", "content": "hello"}]
+        assert cached_token_count(msgs, "openai/glm-4.7") is None
+
+    def test_store_then_hit(self):
+        msgs = [{"role": "user", "content": "hello"}]
+        store_token_count(msgs, "openai/glm-4.7", 42)
+        assert cached_token_count(msgs, "openai/glm-4.7") == 42
+
+    def test_different_model_is_cache_miss(self):
+        msgs = [{"role": "user", "content": "hello"}]
+        store_token_count(msgs, "openai/glm-4.7", 42)
+        assert cached_token_count(msgs, "openai/deepseek-chat") is None
+
+    def test_different_messages_is_cache_miss(self):
+        store_token_count([{"role": "user", "content": "hello"}], "m", 10)
+        assert cached_token_count([{"role": "user", "content": "bye"}], "m") is None
+
+    def test_hash_is_deterministic(self):
+        msgs = [{"role": "user", "content": "test"}]
+        h1 = _hash_content(msgs, "model_a", "sys")
+        h2 = _hash_content(msgs, "model_a", "sys")
+        assert h1 == h2
+
+    def test_eviction_at_max(self):
+        from utils.utils import _TOKEN_CACHE_MAX
+        for i in range(_TOKEN_CACHE_MAX + 10):
+            store_token_count([{"n": i}], "m", i)
+        assert len(_token_count_cache) <= _TOKEN_CACHE_MAX
+
+    def test_system_param_affects_hash(self):
+        msgs = [{"role": "user", "content": "hello"}]
+        store_token_count(msgs, "m", 10, system="sys_a")
+        assert cached_token_count(msgs, "m", system="sys_b") is None
+        assert cached_token_count(msgs, "m", system="sys_a") == 10

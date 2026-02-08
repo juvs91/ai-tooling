@@ -1,5 +1,8 @@
 # app/utils/utils.py
 from __future__ import annotations
+
+import hashlib
+import json
 from typing import Any, Optional, Set, Tuple
 
 def parse_allowlist(raw: str) -> Set[str]:
@@ -27,6 +30,18 @@ def parse_allowlist(raw: str) -> Set[str]:
 def approx_tokens_from_bytes(b: bytes) -> int:
     # heurística rápida (6 bytes ~ 1 token aprox)
     return max(1, len(b) // 6)
+
+_CLAUDE_ASSUMED_CONTEXT = 200_000
+
+def scale_tokens(raw_count: int, model_context_window: int) -> int:
+    """
+    Scale a raw token count so Claude Code's internal heuristics
+    (which assume a 200K context window) trigger at the right time.
+    If model_context_window is 0 or >= 200K, returns the raw count unchanged.
+    """
+    if model_context_window <= 0 or model_context_window >= _CLAUDE_ASSUMED_CONTEXT:
+        return raw_count
+    return int(raw_count * (_CLAUDE_ASSUMED_CONTEXT / model_context_window))
 
 def ensure_system_note(request_obj: Any, note: str, system_content_cls: Any = None) -> None:
     """
@@ -119,3 +134,27 @@ def normalize_tool_choice(tool_choice: Optional[dict], kept_tools: Optional[list
         return tool_choice
 
     return {"type": "auto"}
+
+
+# ── Token Count Cache ────────────────────────────────────────────────
+
+_token_count_cache: dict[str, int] = {}
+_TOKEN_CACHE_MAX = 256
+
+
+def _hash_content(messages: list, model: str, system: str | None = None) -> str:
+    content = json.dumps({"m": messages, "s": system, "model": model}, sort_keys=True, default=str)
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def cached_token_count(messages: list, model: str, system: str | None = None) -> int | None:
+    key = _hash_content(messages, model, system)
+    return _token_count_cache.get(key)
+
+
+def store_token_count(messages: list, model: str, count: int, system: str | None = None):
+    key = _hash_content(messages, model, system)
+    if len(_token_count_cache) >= _TOKEN_CACHE_MAX:
+        oldest = next(iter(_token_count_cache))
+        del _token_count_cache[oldest]
+    _token_count_cache[key] = count

@@ -4,8 +4,31 @@ from __future__ import annotations
 import json
 import uuid
 
+from utils.utils import scale_tokens
+from json_repair import repair_json
 
-async def handle_streaming(response_generator, original_request):
+
+def _compute_repair_suffix(accumulated: str, tool_index: int) -> str | None:
+    """Try to repair truncated JSON and return the suffix to append, or None."""
+    if not accumulated:
+        return None
+    try:
+        json.loads(accumulated)
+        return None  # already valid
+    except json.JSONDecodeError:
+        try:
+            repaired_str = repair_json(accumulated)
+            json.loads(repaired_str)  # validate repair
+            suffix = repaired_str[len(accumulated):]
+            if suffix:
+                print(f"[json-repair] Streaming: appended repair suffix for tool index {tool_index}")
+                return suffix
+        except Exception:
+            print(f"[json-repair] Streaming: repair failed for tool index {tool_index}")
+    return None
+
+
+async def handle_streaming(response_generator, original_request, model_context_window: int = 0):
     """
     Convierte el stream de LiteLLM (delta OpenAI-ish) a SSE Anthropic-like.
     """
@@ -42,6 +65,7 @@ async def handle_streaming(response_generator, original_request):
         output_tokens = 0
         has_sent_stop_reason = False
         last_tool_index = 0
+        tool_args_buffer: dict[int, str] = {}  # tool index -> accumulated args JSON
 
         async for chunk in response_generator:
             try:
@@ -122,6 +146,10 @@ async def handle_streaming(response_generator, original_request):
                             arguments = getattr(function, "arguments", "") if function else ""
 
                         if arguments:
+                            # accumulate for post-hoc JSON repair
+                            if last_tool_index not in tool_args_buffer:
+                                tool_args_buffer[last_tool_index] = ""
+                            tool_args_buffer[last_tool_index] += arguments
                             # send raw partial_json (Anthropic-style)
                             yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': last_tool_index, 'delta': {'type': 'input_json_delta', 'partial_json': arguments}})}\n\n"
 
@@ -129,9 +157,12 @@ async def handle_streaming(response_generator, original_request):
                 if finish_reason and not has_sent_stop_reason:
                     has_sent_stop_reason = True
 
-                    # close tool blocks
+                    # close tool blocks (with JSON repair attempt)
                     if tool_index is not None:
                         for i in range(1, last_tool_index + 1):
+                            suffix = _compute_repair_suffix(tool_args_buffer.get(i, ""), i)
+                            if suffix:
+                                yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': i, 'delta': {'type': 'input_json_delta', 'partial_json': suffix}})}\n\n"
                             yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': i})}\n\n"
 
                     # close text block if still open
@@ -146,7 +177,7 @@ async def handle_streaming(response_generator, original_request):
                     elif finish_reason == "tool_calls":
                         stop_reason = "tool_use"
 
-                    yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None}, 'usage': {'output_tokens': output_tokens}})}\n\n"
+                    yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None}, 'usage': {'output_tokens': scale_tokens(output_tokens, model_context_window)}})}\n\n"
                     yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
                     yield "data: [DONE]\n\n"
                     return
@@ -159,10 +190,13 @@ async def handle_streaming(response_generator, original_request):
         if not has_sent_stop_reason:
             if tool_index is not None:
                 for i in range(1, last_tool_index + 1):
+                    suffix = _compute_repair_suffix(tool_args_buffer.get(i, ""), i)
+                    if suffix:
+                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': i, 'delta': {'type': 'input_json_delta', 'partial_json': suffix}})}\n\n"
                     yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': i})}\n\n"
             if not text_block_closed:
                 yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-            yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': output_tokens}})}\n\n"
+            yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': scale_tokens(output_tokens, model_context_window)}})}\n\n"
             yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
             yield "data: [DONE]\n\n"
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Optional, Tuple
 
 import litellm
+import os
 
 from utils.utils import (
     approx_tokens_from_bytes,
@@ -25,7 +26,7 @@ _DEFAULT_GUARD = (
 
 def _load_guard_system() -> str:
     """Load guardrails from file if GUARDRAILS_FILE is set, otherwise use default."""
-    import os
+    
     gf = os.environ.get("GUARDRAILS_FILE", "").strip()
     if gf and os.path.isfile(gf):
         try:
@@ -188,6 +189,52 @@ def apply_policy_and_routing(
 
     return approx_tokens, dropped
 
+async def _call_provider(request_obj: Any, litellm_request: dict) -> Tuple[bool, Any]:
+    """Execute a single litellm call. For streaming, validates the first chunk."""
+    if getattr(request_obj, "stream", False):
+        gen = await litellm.acompletion(**litellm_request)
+        # Consume first chunk to validate the connection before committing
+        first_chunk = await gen.__anext__()
+
+        async def _chain(first, rest):
+            yield first
+            async for chunk in rest:
+                yield chunk
+
+        return True, _chain(first_chunk, gen)
+
+    resp = litellm.completion(**litellm_request)
+    return False, resp
+
+
+def _inject_credentials(
+    litellm_request: dict,
+    *,
+    model: str,
+    openai_api_key: str,
+    openai_base_url: Optional[str],
+    anthropic_api_key: Optional[str],
+    gemini_api_key: Optional[str],
+    use_vertex_auth: bool,
+    vertex_project: str,
+    vertex_location: str,
+) -> None:
+    """Inject provider credentials into a litellm request dict (primary path)."""
+    if model.startswith("openai/"):
+        litellm_request["api_key"] = openai_api_key
+        if openai_base_url:
+            litellm_request["api_base"] = openai_base_url
+    elif model.startswith("gemini/"):
+        if use_vertex_auth:
+            litellm_request["vertex_project"] = vertex_project
+            litellm_request["vertex_location"] = vertex_location
+            litellm_request["custom_llm_provider"] = "vertex_ai"
+        else:
+            litellm_request["api_key"] = gemini_api_key
+    else:
+        litellm_request["api_key"] = anthropic_api_key
+
+
 async def run_messages(
     *,
     request_obj: Any,
@@ -198,39 +245,56 @@ async def run_messages(
     use_vertex_auth: bool,
     vertex_project: str,
     vertex_location: str,
-) -> Tuple[bool, Any]:
+    fallback_providers: list | None = None,
+    intent: str = "CHAT",
+) -> Tuple[bool, Any, str]:
     """
-    Returns: (is_streaming, response_or_generator)
+    Returns: (is_streaming, response_or_generator, provider_name)
+    Tries primary provider first, then fallbacks sequentially.
+    For streaming, validates the first chunk before committing.
     """
-    litellm_request = convert_anthropic_to_litellm(request_obj)
+    # --- Primary provider (uses model already set by apply_policy_and_routing) ---
     model = str(getattr(request_obj, "model", "") or "")
+    litellm_request = convert_anthropic_to_litellm(request_obj)
+    _inject_credentials(
+        litellm_request, model=model,
+        openai_api_key=openai_api_key, openai_base_url=openai_base_url,
+        anthropic_api_key=anthropic_api_key, gemini_api_key=gemini_api_key,
+        use_vertex_auth=use_vertex_auth, vertex_project=vertex_project,
+        vertex_location=vertex_location,
+    )
 
-    if model.startswith("openai/"):
-        litellm_request["api_key"] = openai_api_key
-        if openai_base_url:
-            litellm_request["api_base"] = openai_base_url
+    if not fallback_providers:
+        is_stream, out = await _call_provider(request_obj, litellm_request)
+        return is_stream, out, "primary"
 
-    # credenciales por prefijo
-    if str(request_obj.model).startswith("openai/"):
-        litellm_request["api_key"] = openai_api_key
-        if openai_base_url:
-            litellm_request["api_base"] = openai_base_url
+    # --- With fallback chain ---
+    try:
+        is_stream, out = await _call_provider(request_obj, litellm_request)
+        return is_stream, out, "primary"
+    except Exception as primary_err:
+        print(f"[fallback] primary failed: {primary_err}")
 
-    elif str(request_obj.model).startswith("gemini/"):
-        if use_vertex_auth:
-            litellm_request["vertex_project"] = vertex_project
-            litellm_request["vertex_location"] = vertex_location
-            litellm_request["custom_llm_provider"] = "vertex_ai"
-        else:
-            litellm_request["api_key"] = gemini_api_key
+    errors = [f"primary: {primary_err}"]
+    original_model = getattr(request_obj, "original_model", None) or model
 
-    else:
-        litellm_request["api_key"] = anthropic_api_key
+    for provider in fallback_providers:
+        try:
+            request_obj.model = provider.get_litellm_model(intent)
+            fb_request = convert_anthropic_to_litellm(request_obj)
+            fb_request["api_key"] = provider.api_key
+            if provider.base_url:
+                fb_request["api_base"] = provider.base_url
 
-    if getattr(request_obj, "stream", False):
-        gen = await litellm.acompletion(**litellm_request)
-        return True, gen
+            print(f"[fallback] trying {provider.name}: model={request_obj.model}")
+            is_stream, out = await _call_provider(request_obj, fb_request)
+            return is_stream, out, provider.name
+        except Exception as e:
+            print(f"[fallback] {provider.name} failed: {e}")
+            errors.append(f"{provider.name}: {e}")
+            continue
 
-    resp = litellm.completion(**litellm_request)
-    return False, resp
+    # Restore original model for error reporting
+    request_obj.model = original_model
+    raise Exception(f"All providers failed: {'; '.join(errors)}")
 

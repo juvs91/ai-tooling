@@ -13,6 +13,10 @@ from llm.converters import (
     _convert_message_blocks,
     _tool_result_content_to_str,
     convert_anthropic_to_litellm,
+    _convert_tool_cached,
+    _tool_conversion_cache,
+    clean_gemini_schema_cached,
+    _gemini_schema_cache,
 )
 from llm.schemas import (
     MessagesRequest,
@@ -420,3 +424,115 @@ class TestConvertAnthropicToLitellm:
         assert msgs[1]["tool_call_id"] == "toolu_1"
         assert msgs[2]["role"] == "tool"
         assert msgs[2]["tool_call_id"] == "toolu_2"
+
+
+# ── JSON Repair in streaming (_compute_repair_suffix) ────────────────
+
+from llm.streaming import _compute_repair_suffix
+
+
+class TestComputeRepairSuffix:
+    """Tests for the streaming JSON repair helper."""
+
+    def test_valid_json_returns_none(self):
+        assert _compute_repair_suffix('{"path": "/tmp/test.py"}', 1) is None
+
+    def test_empty_string_returns_none(self):
+        assert _compute_repair_suffix("", 1) is None
+
+    def test_missing_closing_brace_returns_suffix(self):
+        result = _compute_repair_suffix('{"path": "/tmp/test.py"', 1)
+        assert result is not None
+        assert "}" in result
+
+    def test_repair_suffix_produces_valid_json(self):
+        truncated = '{"path": "/tmp/test.py"'
+        suffix = _compute_repair_suffix(truncated, 1)
+        assert suffix is not None
+        full = truncated + suffix
+        parsed = json.loads(full)
+        assert parsed["path"] == "/tmp/test.py"
+
+    def test_totally_invalid_returns_none(self):
+        assert _compute_repair_suffix("not json at all <<<>>>", 1) is None
+
+    def test_missing_value_quote(self):
+        # e.g. {"command": "ls -la} — missing closing quote + brace
+        truncated = '{"command": "ls -la'
+        suffix = _compute_repair_suffix(truncated, 1)
+        if suffix:
+            full = truncated + suffix
+            parsed = json.loads(full)
+            assert "ls -la" in parsed["command"]
+
+
+# ── Tool Conversion Cache ─────────────────────────────────────────────
+
+
+class TestConvertToolCached:
+    """Tests for _convert_tool_cached memoization."""
+
+    def setup_method(self):
+        _tool_conversion_cache.clear()
+
+    def test_returns_correct_format(self):
+        tool = {"name": "Read", "description": "Read files", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}}
+        result = _convert_tool_cached(tool, is_gemini=False)
+        assert result["type"] == "function"
+        assert result["function"]["name"] == "Read"
+        assert result["function"]["description"] == "Read files"
+        assert result["function"]["parameters"]["type"] == "object"
+
+    def test_cache_hit_returns_same_object(self):
+        tool = {"name": "Read", "description": "Read", "input_schema": {"type": "object"}}
+        r1 = _convert_tool_cached(tool, is_gemini=False)
+        r2 = _convert_tool_cached(tool, is_gemini=False)
+        assert r1 is r2  # same object from cache
+
+    def test_different_schema_different_cache_entry(self):
+        tool_a = {"name": "Read", "description": "Read", "input_schema": {"type": "object", "properties": {"a": {"type": "string"}}}}
+        tool_b = {"name": "Read", "description": "Read", "input_schema": {"type": "object", "properties": {"b": {"type": "integer"}}}}
+        r1 = _convert_tool_cached(tool_a, is_gemini=False)
+        r2 = _convert_tool_cached(tool_b, is_gemini=False)
+        assert r1 is not r2
+
+    def test_gemini_flag_creates_separate_entry(self):
+        tool = {"name": "Read", "description": "Read", "input_schema": {"type": "object"}}
+        r1 = _convert_tool_cached(tool, is_gemini=False)
+        r2 = _convert_tool_cached(tool, is_gemini=True)
+        assert r1 is not r2
+
+    def test_populates_cache(self):
+        tool = {"name": "TestTool", "description": "test", "input_schema": {"type": "object"}}
+        _convert_tool_cached(tool, is_gemini=False)
+        assert len(_tool_conversion_cache) == 1
+
+
+# ── Gemini Schema Memoization ─────────────────────────────────────────
+
+
+class TestCleanGeminiSchemaCached:
+    """Tests for clean_gemini_schema_cached memoization."""
+
+    def setup_method(self):
+        _gemini_schema_cache.clear()
+
+    def test_returns_cleaned_schema(self):
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": False}
+        result = clean_gemini_schema_cached(schema)
+        assert "additionalProperties" not in result
+        assert result["properties"]["a"]["type"] == "string"
+
+    def test_cache_hit_returns_same_object(self):
+        schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
+        r1 = clean_gemini_schema_cached(schema)
+        r2 = clean_gemini_schema_cached(schema)
+        assert r1 is r2
+
+    def test_different_schemas_cached_separately(self):
+        s1 = {"type": "object", "properties": {"a": {"type": "string"}}}
+        s2 = {"type": "object", "properties": {"b": {"type": "integer"}}}
+        r1 = clean_gemini_schema_cached(s1)
+        r2 = clean_gemini_schema_cached(s2)
+        assert r1 is not r2
+        assert len(_gemini_schema_cache) == 2
