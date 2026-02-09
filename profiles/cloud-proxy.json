@@ -1,8 +1,0 @@
-{
-  "alwaysThinkingEnabled": false,
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8083",
-    "ANTHROPIC_AUTH_TOKEN": "dummy",
-    "ANTHROPIC_API_KEY": ""
-  }
-}

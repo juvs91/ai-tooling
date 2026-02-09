@@ -8,15 +8,15 @@ TARGET="$CLAUDE_DIR/settings.local.json"
 
 case "$1" in
   opus)
-    cp "$CLAUDE_DIR/opus.settings.json" "$TARGET"
+    cp "$CLAUDE_DIR/opus.settings.local.json" "$TARGET"
     echo "Switched to Opus (direct Anthropic)"
     ;;
   sonnet)
-    cp "$CLAUDE_DIR/sonnet.settings.json" "$TARGET"
+    cp "$CLAUDE_DIR/sonnet.settings.local.json" "$TARGET"
     echo "Switched to Sonnet (direct Anthropic)"
     ;;
   zai)
-    cp "$CLAUDE_DIR/test.settings.local.json" "$TARGET"
+    cp "$CLAUDE_DIR/proxy.settings.local.json" "$TARGET"
     echo "Switched to Z.AI proxy (localhost:8083)"
     ;;
   *)

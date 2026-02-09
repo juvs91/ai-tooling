@@ -4,30 +4,77 @@
 - ALWAYS read `ai-notes/AI_LEARNING.md` at the start of every session (if it exists)
 - ALWAYS read `templates/GUARDRAILS.template.md` for the full policy
 
-## Guardrails (enforced)
-- Do NOT execute agent/tools if `ai-notes/AI_PLAN.md` does not exist or does not contain `STATUS: REVIEWED`
+## Guardrails
 - Do NOT guess or fabricate file paths, commands, or outputs
 - Do NOT dump large outputs into chat — write everything to `ai-notes/`
-- Local mode = text only (scan/plan/validation, $0). Cloud mode = execution with tools (on-demand)
 
 ## Feedback Loop
 - At the end of every session, update `ai-notes/AI_LEARNING.md` with:
   - Technical decisions made and why
   - Errors encountered and how they were resolved
   - Patterns that worked or failed
-- Do NOT store learnings in `.claude/` or private agent memory
 - ALL project knowledge goes to `ai-notes/` (shared with team and future agents)
 
 ## Project Structure
-- `vendor/claude-code-proxy/` — Anthropic→OpenAI proxy (hot-reload via bind mount)
-- `scripts/` — CLI tools (cc-scan, cc-plan, cc-agent-cloud, etc.)
-- `profile-envs/` — Per-provider environment configs
-- `templates/` — AI_CONTEXT, AI_PLAN, AI_LEARNING, GUARDRAILS templates
-- `ai-notes/` — Session artifacts (plans, analyses, learnings)
 
-## Workflow
-1. Create `ai-notes/AI_CONTEXT.md` (from template)
-2. `cc-scan <files>` — analyze (local, tools OFF)
-3. `cc-plan` — generate plan (local, tools OFF, outputs STATUS: DRAFT)
-4. Human reviews plan → changes STATUS to REVIEWED + adds Reviewed-by
-5. `cc-agent-cloud` — execute (cloud, tools ON, validates REVIEWED)
+### Core
+- `vendor/claude-code-proxy/` — Anthropic→OpenAI proxy (hot-reload via bind mount)
+- `scripts/` — Workflow CLI tools (cc-proxy-up, cc-switch, cc-health, cc-chat, cc-proxy-init.sh)
+- `bin/` — Standalone utilities (ollama-up, ollama-down, ollama-status, ollama-model)
+- `profile-envs/` — Per-provider environment configs
+- `cloud-provider-ymls/` — Docker compose overrides per provider
+
+### Knowledge & Enforcement
+- `templates/` — Workflow enforcement templates (GUARDRAILS, AI_CONTEXT, AI_PLAN, AI_LEARNING)
+- `docs/` — Project documentation (organized by `documentation.sections` from settings.json)
+- `ai-notes/` — Session artifacts (learnings, analyses, plans)
+
+### MCP Servers
+Configured in `settings.local.json` → `mcpServers`:
+- `alloydb` — AlloyDB queries (postgres-mcp)
+- `atlassian` — Jira/Confluence (uvx mcp-atlassian)
+- `bitbucket` — Bitbucket (npx @aashari/mcp-server-atlassian-bitbucket)
+- `squit` — Legacy SP search (npx mcp-remote)
+- `cloudsql` — CloudSQL wrapper (scripts/cloudsql-mcp.sh)
+
+## Skills
+
+### Database Skills (via AlloyDB MCP)
+| Skill | Command | Description |
+|-------|---------|-------------|
+| `alloydb-query` | `mcp__alloydb__query_tool` | Query pricing data |
+| `alloydb-debug` | `mcp__alloydb__query_tool` | Diagnose calculation errors |
+| `cascade-analyzer` | `mcp__alloydb__query_tool` | Analyze price/freight cascade |
+
+### Dynamic Skills (via scripts)
+| Skill | Command | Documentation |
+|-------|---------|---------------|
+| `api-test` | `./scripts/api-test` | Tests API integration |
+| `validation-checker` | `./scripts/validation-checker` | Validates business rules |
+
+### Project Skills (via MCP)
+| Skill | Commands | Docs |
+|-------|-----------|------|
+| `jira-context` | `mcp__atlassian__jira_get_issue`, `mcp__atlassian__jira_search` | docs/jira/ |
+| `sp-search` | `mcp__squit__squit_search`, `mcp__squit__squit_get_code` | docs/sp-search/ |
+| `tunnel-health` | `./scripts/tunnel-health` | docs/tunnel-health/ |
+
+## MCP Credentials
+
+All MCP credentials are stored as environment variables (see `.env`):
+
+| Provider | Env Variables | Description |
+|----------|---------------|-------------|
+| **AlloyDB** | `ALLOYDB_PASSWORD` | Password for postgres connection |
+| **Atlassian** | `ATLASSIAN_CONFLUENCE_TOKEN`, `ATLASSIAN_JIRA_API_TOKEN` | Confluence & Jira tokens |
+| **Bitbucket** | `ATLASSIAN_BITBUCKET_API_TOKEN` | API token |
+| **Squit** | `SQUIT_API_KEY` | API key |
+| **CloudSQL** | `WPC_ENV` + `PROD/QA/DEV_*` | Per-environment DB credentials |
+
+## Utility Scripts
+
+| Script | Function |
+|--------|----------|
+| `check-mcp-status.sh` | Check health of all MCP services |
+| `cloudsql-mcp.sh` | Wrapper for CloudSQL MCP (switches WPC_ENV) |
+| `_load-skill-doc.sh` | Helper to load markdown docs for dynamic skills |

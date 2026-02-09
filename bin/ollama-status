@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+PORT=11434
+LOG="$HOME/.ollama/manual-serve.log"
+
+echo "== port ${PORT} =="
+lsof -nP -iTCP:${PORT} -sTCP:LISTEN || echo "(free)"
+
+echo
+echo "== processes =="
+ps aux | grep '[o]llama'
+
+echo
+echo "== last log lines =="
+[ -f "$LOG" ] && tail -n 20 "$LOG" || echo "(no log yet)"

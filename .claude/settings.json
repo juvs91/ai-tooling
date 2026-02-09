@@ -1,28 +1,140 @@
 {
-  "model": "claude-sonnet-4-5-20250929",
-  "bypassPermissions": true,
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-dangerous.sh",
-            "timeout": 10
-          }
-        ]
-      },
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/protect-secrets.sh",
-            "timeout": 10
-          }
-        ]
+  "permissions": {
+    "allow": [
+      "Bash(lsof:*)",
+      "Bash(curl:*)",
+      "Bash(gcloud auth:*)",
+      "Bash(gcloud config:*)",
+      "Bash(./scripts/*)",
+      "Bash(source:*)",
+      "Read(*)"
+    ],
+    "deny": []
+  },
+  "project": {
+    "name": "AI-Tooling",
+    "code": "AITOOL",
+    "description": "Proxy Claude→OpenAI con routing multi-proveedor"
+  },
+  "skills": {
+    "alloydb-query": {
+      "description": "Consultar precios en AlloyDB (AlloyDB MCP)",
+      "category": "database",
+      "command": "mcp__alloydb__query_tool",
+      "documentation": "docs/alloydb/query-usage.md"
+    },
+    "alloydb-debug": {
+      "description": "Diagnosticar problemas de calculo (AlloyDB MCP)",
+      "category": "database",
+      "command": "mcp__alloydb__query_tool",
+      "documentation": "docs/alloydb/debug-usage.md"
+    },
+    "validation-checker": {
+      "description": "Validar reglas de negocio (dinamico)",
+      "category": "validation",
+      "command": "./scripts/validation-checker",
+      "documentation": "docs/validation-checker.md"
+    },
+    "api-test": {
+      "description": "Probar integracion con API (dinamico)",
+      "category": "integration",
+      "command": "./scripts/api-test",
+      "documentation": "docs/api-test.md"
+    },
+    "jira-context": {
+      "description": "Traer contexto de tickets Jira",
+      "category": "project",
+      "command": "mcp__atlassian__jira_get_issue,mcp__atlassian__jira_search",
+      "documentation": "docs/jira/usage.md"
+    },
+    "sp-search": {
+      "description": "Buscar stored procedures legacy",
+      "category": "search",
+      "command": "mcp__squit__squit_search",
+      "documentation": "docs/sp-search/usage.md"
+    },
+    "tunnel-health": {
+      "description": "Verificar salud del entorno",
+      "category": "devops",
+      "command": "./scripts/tunnel-health",
+      "documentation": "docs/tunnel-health/usage.md"
+    }
+  },
+  "documentation": {
+    "basePath": "docs",
+    "sections": {
+      "overview": "01-overview/",
+      "proxy": "02-proxy/",
+      "skills": "03-skills/",
+      "scripts": "04-scripts/",
+      "mcp": "05-mcp/"
+    }
+  },
+  "connections": {
+    "alloydb": {
+      "type": "mcp",
+      "mcpServer": "alloydb",
+      "fallbackMessage": "El tunel SSH no esta activo. Ejecutar: ./scripts/start-ssh-tunnel.sh",
+      "fallbackDocs": "docs/alloydb/ssh-tunnel.md"
+    },
+    "atlassian": {
+      "type": "mcp",
+      "mcpServer": "atlassian",
+      "docs": "https://deacero.atlassian.net/wiki/ARQ"
+    },
+    "bitbucket": {
+      "type": "mcp",
+      "mcpServer": "bitbucket",
+      "workspace": "deacero",
+      "mainRepo": "wpc-backend"
+    }
+  },
+  "mcpServers": {
+    "alloydb": {
+      "command": "node",
+      "args": [
+        "/Users/jeguzman/.nvm/versions/node/v20.20.0/lib/node_modules/postgres-mcp/dist/index.js"
+      ],
+      "env": {
+        "DB_MAIN_URL": "postgresql://postgres:$ALLOYDB_PASSWORD@localhost:5435/ods"
       }
-    ]
+    },
+    "atlassian": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-atlassian"],
+      "env": {
+        "CONFLUENCE_URL": "https://deacero.atlassian.net/wiki",
+        "CONFLUENCE_USERNAME": "jeguzman@deacero.com",
+        "CONFLUENCE_API_TOKEN": "$ATLASSIAN_CONFLUENCE_TOKEN",
+        "JIRA_URL": "https://deacero.atlassian.net",
+        "JIRA_USERNAME": "jeguzman@deacero.com",
+        "JIRA_API_TOKEN": "$ATLASSIAN_JIRA_API_TOKEN"
+      }
+    },
+    "bitbucket": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@aashari/mcp-server-atlassian-bitbucket"],
+      "env": {
+        "ATLASSIAN_USER_EMAIL": "jeguzman@deacero.com",
+        "ATLASSIAN_API_TOKEN": "$ATLASSIAN_BITBUCKET_API_TOKEN",
+        "BITBUCKET_DEFAULT_WORKSPACE": "deacero"
+      }
+    },
+    "squit": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://squit-mcp.deacero.us/mcp",
+        "--header",
+        "X-API-Key:$SQUIT_API_KEY"
+      ]
+    },
+    "cloudsql": {
+      "command": "bash",
+      "args": ["./scripts/cloudsql-mcp.sh"]
+    }
   }
 }

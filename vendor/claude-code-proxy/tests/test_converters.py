@@ -8,6 +8,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from llm.converters import (
+    _bget,
+    _safe_json,
+    _extract_tool_fields,
     _convert_assistant_blocks,
     _convert_user_blocks,
     _convert_message_blocks,
@@ -29,6 +32,77 @@ from llm.schemas import (
     ContentBlockServerToolResult,
     Message,
 )
+
+
+# ── _bget ────────────────────────────────────────────────────────────
+
+
+class TestBget:
+    def test_dict_access(self):
+        assert _bget({"name": "Read"}, "name") == "Read"
+
+    def test_dict_missing_key_returns_default(self):
+        assert _bget({"name": "Read"}, "missing") is None
+        assert _bget({"name": "Read"}, "missing", "fallback") == "fallback"
+
+    def test_object_access(self):
+        from llm.schemas import ContentBlockText
+        block = ContentBlockText(type="text", text="hello")
+        assert _bget(block, "type") == "text"
+        assert _bget(block, "text") == "hello"
+
+    def test_object_missing_attr_returns_default(self):
+        from llm.schemas import ContentBlockText
+        block = ContentBlockText(type="text", text="hello")
+        assert _bget(block, "nonexistent") is None
+        assert _bget(block, "nonexistent", "fb") == "fb"
+
+
+# ── _safe_json ───────────────────────────────────────────────────────
+
+
+class TestSafeJson:
+    def test_valid_dict(self):
+        assert _safe_json({"a": 1}) == '{"a": 1}'
+
+    def test_valid_list(self):
+        assert _safe_json([1, 2]) == "[1, 2]"
+
+    def test_non_serializable_falls_back_to_str(self):
+        obj = object()
+        result = _safe_json(obj)
+        assert isinstance(result, str)
+        assert "object" in result
+
+    def test_ensure_ascii_false(self):
+        result = _safe_json({"text": "café"}, ensure_ascii=False)
+        assert "café" in result
+
+
+# ── _extract_tool_fields ─────────────────────────────────────────────
+
+
+class TestExtractToolFields:
+    def test_dict_input(self):
+        block = {"name": "Read", "id": "toolu_1", "input": {"path": "/tmp"}}
+        name, tid, inp = _extract_tool_fields(block)
+        assert name == "Read"
+        assert tid == "toolu_1"
+        assert inp == {"path": "/tmp"}
+
+    def test_pydantic_model_input(self):
+        from llm.schemas import ContentBlockToolUse
+        block = ContentBlockToolUse(type="tool_use", id="toolu_2", name="Grep", input={"pattern": "foo"})
+        name, tid, inp = _extract_tool_fields(block)
+        assert name == "Grep"
+        assert tid == "toolu_2"
+        assert inp == {"pattern": "foo"}
+
+    def test_missing_fields_return_defaults(self):
+        name, tid, inp = _extract_tool_fields({})
+        assert name == ""
+        assert tid == ""
+        assert inp is None
 
 
 # ── _tool_result_content_to_str ──────────────────────────────────────

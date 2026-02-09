@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "WebFetch(domain:docs.z.ai)",
+      "WebFetch(domain:karim.touma.io)",
+      "WebFetch(domain:claudelog.com)",
+      "WebFetch(domain:hboon.com)",
+      "Bash(curl:*)",
+      "Bash(python3:*)"
+    ]
+  },
+  "model": "claude-sonnet-4-5-20250929",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-dangerous.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/protect-secrets.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

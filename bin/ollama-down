@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PORT=11434
+PIDFILE="$HOME/.ollama/ollama-serve.pid"
+
+echo "[ollama-down] stopping ollama..."
+
+if [ -f "$PIDFILE" ]; then
+  PID=$(cat "$PIDFILE")
+  if ps -p "$PID" >/dev/null 2>&1; then
+    kill "$PID"
+    echo "[ollama-down] killed PID $PID"
+  fi
+  rm -f "$PIDFILE"
+fi
+
+# fallback: matar por puerto
+lsof -nP -iTCP:${PORT} -sTCP:LISTEN | awk 'NR>1 {print $2}' | xargs -r kill
+
+sleep 0.3
+lsof -nP -iTCP:${PORT} -sTCP:LISTEN || echo "[ollama-down] port ${PORT} is free"

@@ -11,6 +11,32 @@ from json_repair import repair_json
 from llm.schemas import MessagesRequest, MessagesResponse, Usage
 
 
+# ── Shared helpers ────────────────────────────────────────────────────
+
+def _bget(block: Any, key: str, default: Any = None) -> Any:
+    """Unified accessor for Pydantic models and dicts."""
+    if isinstance(block, dict):
+        return block.get(key, default)
+    return getattr(block, key, default)
+
+
+def _safe_json(obj: Any, ensure_ascii: bool = False) -> str:
+    """json.dumps with str() fallback."""
+    try:
+        return json.dumps(obj, ensure_ascii=ensure_ascii)
+    except Exception:
+        return str(obj)
+
+
+def _extract_tool_fields(block: Any) -> tuple[str, str, Any]:
+    """Extract (name, id, input) from tool_use or server_tool_use block."""
+    return (
+        _bget(block, "name") or "",
+        _bget(block, "id") or "",
+        _bget(block, "input"),
+    )
+
+
 def clean_gemini_schema(schema: Any) -> Any:
     """
     Sanitizer best-effort para Gemini / Vertex tools schemas.
@@ -206,55 +232,31 @@ def _content_blocks_to_text(content: Any) -> str:
             return str(content)[:8000]
 
     out = []
-    for block in content:
-        b = block
-        btype = getattr(b, "type", None) if not isinstance(b, dict) else b.get("type")
+    for b in content:
+        btype = _bget(b, "type")
 
         if btype == "text":
-            txt = getattr(b, "text", None) if not isinstance(b, dict) else b.get("text")
+            txt = _bget(b, "text")
             if txt:
                 out.append(str(txt))
         elif btype == "tool_result":
-            tool_id = getattr(b, "tool_use_id", None) if not isinstance(b, dict) else b.get("tool_use_id")
+            tool_id = _bget(b, "tool_use_id")
             out.append(f"[Tool Result ID: {tool_id or 'unknown'}]")
-            nested = getattr(b, "content", None) if not isinstance(b, dict) else b.get("content")
-            out.append(_content_blocks_to_text(nested))
-        elif btype == "tool_use":
-            name = getattr(b, "name", None) if not isinstance(b, dict) else b.get("name")
-            tid = getattr(b, "id", None) if not isinstance(b, dict) else b.get("id")
-            inp = getattr(b, "input", None) if not isinstance(b, dict) else b.get("input")
-            try:
-                inp_s = json.dumps(inp, ensure_ascii=False)
-            except Exception:
-                inp_s = str(inp)
-            out.append(f"[Tool: {name} (ID: {tid})] Input: {inp_s}")
-        elif btype == "thinking":
-            # Extended thinking block - strip for non-Anthropic providers
+            out.append(_content_blocks_to_text(_bget(b, "content")))
+        elif btype in ("tool_use", "server_tool_use"):
+            label = "ServerTool" if btype == "server_tool_use" else "Tool"
+            name, tid, inp = _extract_tool_fields(b)
+            out.append(f"[{label}: {name} (ID: {tid})] Input: {_safe_json(inp, ensure_ascii=False)}")
+        elif btype in ("thinking", "redacted_thinking"):
             pass
-        elif btype == "redacted_thinking":
-            # Redacted thinking block - strip for non-Anthropic providers
-            pass
-        elif btype == "server_tool_use":
-            name = getattr(b, "name", None) if not isinstance(b, dict) else b.get("name")
-            tid = getattr(b, "id", None) if not isinstance(b, dict) else b.get("id")
-            inp = getattr(b, "input", None) if not isinstance(b, dict) else b.get("input")
-            try:
-                inp_s = json.dumps(inp, ensure_ascii=False)
-            except Exception:
-                inp_s = str(inp)
-            out.append(f"[ServerTool: {name} (ID: {tid})] Input: {inp_s}")
         elif btype == "server_tool_result":
-            tool_id = getattr(b, "tool_use_id", None) if not isinstance(b, dict) else b.get("tool_use_id")
+            tool_id = _bget(b, "tool_use_id")
             out.append(f"[ServerTool Result ID: {tool_id or 'unknown'}]")
-            nested = getattr(b, "content", None) if not isinstance(b, dict) else b.get("content")
-            out.append(_content_blocks_to_text(nested))
+            out.append(_content_blocks_to_text(_bget(b, "content")))
         elif btype == "image":
             out.append("[Image content omitted]")
         else:
-            try:
-                out.append(json.dumps(b)[:1000])
-            except Exception:
-                out.append(str(b)[:1000])
+            out.append(_safe_json(b)[:1000])
 
     text = "\n".join([x for x in out if x]).strip()
     return text if text else "..."
@@ -305,19 +307,16 @@ def _convert_assistant_blocks(blocks: Any) -> List[Dict[str, Any]]:
     text_parts: List[str] = []
     tool_calls: List[Dict[str, Any]] = []
 
-    for block in blocks:
-        b = block
-        btype = getattr(b, "type", None) if not isinstance(b, dict) else b.get("type")
+    for b in blocks:
+        btype = _bget(b, "type")
 
         if btype == "text":
-            txt = getattr(b, "text", None) if not isinstance(b, dict) else b.get("text")
+            txt = _bget(b, "text")
             if txt:
                 text_parts.append(str(txt))
 
         elif btype == "tool_use":
-            name = getattr(b, "name", None) if not isinstance(b, dict) else b.get("name")
-            tid = getattr(b, "id", None) if not isinstance(b, dict) else b.get("id")
-            inp = getattr(b, "input", None) if not isinstance(b, dict) else b.get("input")
+            name, tid, inp = _extract_tool_fields(b)
             try:
                 args_str = json.dumps(inp, ensure_ascii=False)
             except Exception:
@@ -332,20 +331,12 @@ def _convert_assistant_blocks(blocks: Any) -> List[Dict[str, Any]]:
             pass
 
         elif btype == "server_tool_use":
-            name = getattr(b, "name", None) if not isinstance(b, dict) else b.get("name")
-            tid = getattr(b, "id", None) if not isinstance(b, dict) else b.get("id")
-            inp = getattr(b, "input", None) if not isinstance(b, dict) else b.get("input")
-            try:
-                inp_s = json.dumps(inp, ensure_ascii=False)
-            except Exception:
-                inp_s = str(inp)
-            text_parts.append(f"[ServerTool: {name} (ID: {tid})] Input: {inp_s}")
+            name, tid, inp = _extract_tool_fields(b)
+            text_parts.append(f"[ServerTool: {name} (ID: {tid})] Input: {_safe_json(inp, ensure_ascii=False)}")
 
         else:
-            try:
-                text_parts.append(json.dumps(b if isinstance(b, dict) else (b.model_dump() if hasattr(b, "model_dump") else str(b)))[:1000])
-            except Exception:
-                text_parts.append(str(b)[:1000])
+            dumped = b if isinstance(b, dict) else (b.model_dump() if hasattr(b, "model_dump") else str(b))
+            text_parts.append(_safe_json(dumped)[:1000])
 
     content_text = "\n".join(text_parts).strip() if text_parts else None
     result: Dict[str, Any] = {"role": "assistant"}
@@ -369,22 +360,19 @@ def _convert_user_blocks(blocks: Any) -> List[Dict[str, Any]]:
     text_parts: List[str] = []
     tool_messages: List[Dict[str, Any]] = []
 
-    for block in blocks:
-        b = block
-        btype = getattr(b, "type", None) if not isinstance(b, dict) else b.get("type")
+    for b in blocks:
+        btype = _bget(b, "type")
 
         if btype == "text":
-            txt = getattr(b, "text", None) if not isinstance(b, dict) else b.get("text")
+            txt = _bget(b, "text")
             if txt:
                 text_parts.append(str(txt))
 
         elif btype == "tool_result":
-            tool_use_id = getattr(b, "tool_use_id", None) if not isinstance(b, dict) else b.get("tool_use_id")
-            nested_content = getattr(b, "content", None) if not isinstance(b, dict) else b.get("content")
-            content_str = _tool_result_content_to_str(nested_content)
+            tool_use_id = _bget(b, "tool_use_id")
+            content_str = _tool_result_content_to_str(_bget(b, "content"))
 
-            is_error = getattr(b, "is_error", None) if not isinstance(b, dict) else b.get("is_error")
-            if is_error and content_str:
+            if _bget(b, "is_error") and content_str:
                 content_str = f"[ERROR] {content_str}"
 
             tool_messages.append({
@@ -394,19 +382,16 @@ def _convert_user_blocks(blocks: Any) -> List[Dict[str, Any]]:
             })
 
         elif btype == "server_tool_result":
-            tool_id = getattr(b, "tool_use_id", None) if not isinstance(b, dict) else b.get("tool_use_id")
-            nested = getattr(b, "content", None) if not isinstance(b, dict) else b.get("content")
+            tool_id = _bget(b, "tool_use_id")
             text_parts.append(f"[ServerTool Result ID: {tool_id or 'unknown'}]")
-            text_parts.append(_content_blocks_to_text(nested))
+            text_parts.append(_content_blocks_to_text(_bget(b, "content")))
 
         elif btype == "image":
             text_parts.append("[Image content omitted]")
 
         else:
-            try:
-                text_parts.append(json.dumps(b if isinstance(b, dict) else str(b))[:1000])
-            except Exception:
-                text_parts.append(str(b)[:1000])
+            dumped = b if isinstance(b, dict) else str(b)
+            text_parts.append(_safe_json(dumped)[:1000])
 
     result: List[Dict[str, Any]] = []
     result.extend(tool_messages)
@@ -507,29 +492,22 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
     """
     LiteLLM(OpenAI-ish) response -> Anthropic /v1/messages response object
     """
-    # Extract response data from either ModelResponse object or dict
-    if hasattr(litellm_response, "choices") and hasattr(litellm_response, "usage"):
-        choices = litellm_response.choices
-        message = choices[0].message if choices else None
-        content_text = getattr(message, "content", "") if message else ""
-        tool_calls = getattr(message, "tool_calls", None) if message else None
-        finish_reason = getattr(choices[0], "finish_reason", "stop") if choices else "stop"
-        usage_info = litellm_response.usage
-        response_id = getattr(litellm_response, "id", f"msg_{uuid.uuid4()}")
-    else:
+    # Normalize response to dict for uniform extraction
+    if isinstance(litellm_response, dict):
         resp = litellm_response
-        if not isinstance(resp, dict):
-            try:
-                resp = resp.model_dump() if hasattr(resp, "model_dump") else resp.__dict__
-            except Exception:
-                resp = {}
-        choices = resp.get("choices", [{}])
-        message = choices[0].get("message", {}) if choices else {}
-        content_text = message.get("content", "") if isinstance(message, dict) else ""
-        tool_calls = message.get("tool_calls", None) if isinstance(message, dict) else None
-        finish_reason = choices[0].get("finish_reason", "stop") if choices else "stop"
-        usage_info = resp.get("usage", {})
-        response_id = resp.get("id", f"msg_{uuid.uuid4()}")
+    else:
+        try:
+            resp = litellm_response.model_dump() if hasattr(litellm_response, "model_dump") else litellm_response.__dict__
+        except Exception:
+            resp = {}
+
+    choices = resp.get("choices", [{}])
+    message = choices[0].get("message", {}) if choices else {}
+    content_text = message.get("content", "") if isinstance(message, dict) else ""
+    tool_calls = message.get("tool_calls", None) if isinstance(message, dict) else None
+    finish_reason = choices[0].get("finish_reason", "stop") if choices else "stop"
+    usage_info = resp.get("usage", {})
+    response_id = resp.get("id", f"msg_{uuid.uuid4()}")
 
     content: List[Dict[str, Any]] = []
     if content_text is not None and content_text != "":
