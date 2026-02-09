@@ -12,6 +12,7 @@ from utils.utils import (
     filter_tools_allowlist,
     normalize_tool_choice,
 )
+from utils.metrics import metrics
 from router.llm_router import choose_local_model
 from llm.converters import convert_anthropic_to_litellm
 from router.model_mapper import map_claude_alias_to_target
@@ -191,7 +192,7 @@ def apply_policy_and_routing(
 
 async def _call_provider(request_obj: Any, litellm_request: dict) -> Tuple[bool, Any]:
     """Execute a single litellm call. For streaming, validates the first chunk."""
-    from utils.metrics import metrics
+    
 
     if getattr(request_obj, "stream", False):
         gen = await litellm.acompletion(**litellm_request)

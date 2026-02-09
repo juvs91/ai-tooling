@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
+import litellm
 from litellm import token_counter
 from utils.utils import cached_token_count, store_token_count, scale_tokens
 from proxy.proxy import apply_policy_and_routing, run_messages
@@ -73,10 +74,9 @@ else:
     logger.info("[startup] Intent classifier: regex fallback (CLASSIFIER_MODEL not set)")
 
 # Initialize LiteLLM response cache
-import litellm as _litellm_init
 if CACHE_ENABLED:
-    _litellm_init.cache = _litellm_init.Cache(type="local", ttl=CACHE_TTL)
-    _litellm_init.enable_cache()
+    litellm.cache = litellm.Cache(type="local", ttl=CACHE_TTL)
+    litellm.enable_cache()
     logger.info("[startup] Response cache: ENABLED (TTL=%ds, in-memory)", CACHE_TTL)
 else:
     logger.info("[startup] Response cache: disabled (set CACHE_ENABLED=1 to enable)")
