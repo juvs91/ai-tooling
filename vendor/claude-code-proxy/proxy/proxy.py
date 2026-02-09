@@ -191,10 +191,19 @@ def apply_policy_and_routing(
 
 async def _call_provider(request_obj: Any, litellm_request: dict) -> Tuple[bool, Any]:
     """Execute a single litellm call. For streaming, validates the first chunk."""
+    from utils.metrics import metrics
+
     if getattr(request_obj, "stream", False):
         gen = await litellm.acompletion(**litellm_request)
         # Consume first chunk to validate the connection before committing
         first_chunk = await gen.__anext__()
+
+        # Track cache hit from first chunk
+        hidden = getattr(first_chunk, "_hidden_params", {}) or {}
+        if hidden.get("cache_hit"):
+            metrics.cache_hits += 1
+        else:
+            metrics.cache_misses += 1
 
         async def _chain(first, rest):
             yield first
@@ -204,6 +213,14 @@ async def _call_provider(request_obj: Any, litellm_request: dict) -> Tuple[bool,
         return True, _chain(first_chunk, gen)
 
     resp = litellm.completion(**litellm_request)
+
+    # Track cache hit from response
+    hidden = getattr(resp, "_hidden_params", {}) or {}
+    if hidden.get("cache_hit"):
+        metrics.cache_hits += 1
+    else:
+        metrics.cache_misses += 1
+
     return False, resp
 
 

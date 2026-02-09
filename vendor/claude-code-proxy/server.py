@@ -52,6 +52,10 @@ CLASSIFIER_API_KEY = os.environ.get("CLASSIFIER_API_KEY", "").strip()
 CLASSIFIER_BASE_URL = os.environ.get("CLASSIFIER_BASE_URL", "").strip() or None
 CLASSIFIER_TIMEOUT = float(os.environ.get("CLASSIFIER_TIMEOUT", "3.0"))
 
+# Response cache config — in-memory, reduces duplicate API calls on retries/bursts
+CACHE_ENABLED = os.environ.get("CACHE_ENABLED", "0").strip() == "1"
+CACHE_TTL = int(os.environ.get("CACHE_TTL", "60"))
+
 # Startup validation: warn if classifier is half-configured
 if CLASSIFIER_MODEL and not CLASSIFIER_API_KEY:
     logger.warning(
@@ -67,6 +71,15 @@ if CLASSIFIER_MODEL:
     )
 else:
     logger.info("[startup] Intent classifier: regex fallback (CLASSIFIER_MODEL not set)")
+
+# Initialize LiteLLM response cache
+import litellm as _litellm_init
+if CACHE_ENABLED:
+    _litellm_init.cache = _litellm_init.Cache(type="local", ttl=CACHE_TTL)
+    _litellm_init.enable_cache()
+    logger.info("[startup] Response cache: ENABLED (TTL=%ds, in-memory)", CACHE_TTL)
+else:
+    logger.info("[startup] Response cache: disabled (set CACHE_ENABLED=1 to enable)")
 
 # Fallback provider chain (FALLBACK_1_*, FALLBACK_2_*, ... FALLBACK_9_*)
 def _load_fallback_providers() -> list[ProviderConfig]:
