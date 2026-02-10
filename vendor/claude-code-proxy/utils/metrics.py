@@ -37,6 +37,10 @@ class ProxyMetrics:
         self.intent_counts: dict[str, int] = {}
         self.cache_hits = 0
         self.cache_misses = 0
+        self.total_retries = 0
+        self.retry_successes = 0
+        self.classifier_llm_success = 0
+        self.classifier_regex_fallback = 0
 
     def record(self, log: RequestLog):
         with self._lock:
@@ -72,6 +76,8 @@ class ProxyMetrics:
                 "total_input_tokens": self.total_input_tokens,
                 "total_output_tokens": self.total_output_tokens,
                 "cache": {"hits": self.cache_hits, "misses": self.cache_misses},
+                "retries": {"total": self.total_retries, "successes": self.retry_successes},
+                "classifier": {"llm_success": self.classifier_llm_success, "regex_fallback": self.classifier_regex_fallback},
                 "providers": providers,
                 "intents": dict(self.intent_counts),
             }

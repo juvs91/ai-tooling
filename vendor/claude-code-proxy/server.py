@@ -81,6 +81,11 @@ if CACHE_ENABLED:
 else:
     logger.info("[startup] Response cache: disabled (set CACHE_ENABLED=1 to enable)")
 
+# Retry configuration
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "5"))
+RETRY_BASE_DELAY = float(os.environ.get("RETRY_BASE_DELAY", "1.0"))
+logger.info("[startup] Retry: max_retries=%d, base_delay=%.1fs", MAX_RETRIES, RETRY_BASE_DELAY)
+
 # Fallback provider chain (FALLBACK_1_*, FALLBACK_2_*, ... FALLBACK_9_*)
 def _load_fallback_providers() -> list[ProviderConfig]:
     providers = []

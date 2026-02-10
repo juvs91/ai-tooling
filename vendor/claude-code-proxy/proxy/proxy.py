@@ -1,5 +1,6 @@
 # app/proxy/proxy.py
 from __future__ import annotations
+import asyncio
 from typing import Any, Optional, Tuple
 
 import litellm
@@ -225,6 +226,49 @@ async def _call_provider(request_obj: Any, litellm_request: dict) -> Tuple[bool,
     return False, resp
 
 
+def _is_retryable_error(error: Exception) -> bool:
+    """Check if error should trigger a retry (rate limit, timeout, server error)."""
+    error_str = str(error).lower()
+    return (
+        "429" in error_str
+        or "rate limit" in error_str
+        or "timeout" in error_str
+        or "connection" in error_str
+        or "internal server error" in error_str
+    )
+
+
+async def _call_provider_with_retry(
+    request_obj: Any,
+    litellm_request: dict,
+    max_retries: int = 5,
+    base_delay: float = 1.0,
+) -> Tuple[bool, Any]:
+    """Call provider with exponential backoff on retryable errors."""
+    from utils.metrics import metrics
+
+    last_exception = None
+
+    for attempt in range(max_retries):
+        try:
+            result = await _call_provider(request_obj, litellm_request)
+            if attempt > 0:
+                metrics.retry_successes += 1
+                print(f"[retry] Succeeded on attempt {attempt + 1}/{max_retries}")
+            return result
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries - 1 and _is_retryable_error(e):
+                delay = base_delay * (2 ** attempt)  # 1s, 2s, 4s, 8s, 16s
+                print(f"[retry] Attempt {attempt + 1}/{max_retries} failed, retry in {delay}s: {type(e).__name__}")
+                metrics.total_retries += 1
+                await asyncio.sleep(delay)
+            else:
+                raise
+
+    raise last_exception
+
+
 def _inject_credentials(
     litellm_request: dict,
     *,
@@ -282,16 +326,23 @@ async def run_messages(
         vertex_location=vertex_location,
     )
 
+    max_retries = int(os.environ.get("MAX_RETRIES", "5"))
+    base_delay = float(os.environ.get("RETRY_BASE_DELAY", "1.0"))
+
     if not fallback_providers:
-        is_stream, out = await _call_provider(request_obj, litellm_request)
+        is_stream, out = await _call_provider_with_retry(
+            request_obj, litellm_request, max_retries=max_retries, base_delay=base_delay,
+        )
         return is_stream, out, "primary"
 
-    # --- With fallback chain ---
+    # --- With fallback chain: retry primary, then fallbacks ---
     try:
-        is_stream, out = await _call_provider(request_obj, litellm_request)
+        is_stream, out = await _call_provider_with_retry(
+            request_obj, litellm_request, max_retries=max_retries, base_delay=base_delay,
+        )
         return is_stream, out, "primary"
     except Exception as primary_err:
-        print(f"[fallback] primary failed: {primary_err}")
+        print(f"[fallback] primary failed after {max_retries} attempts: {primary_err}")
 
     errors = [f"primary: {primary_err}"]
     original_model = getattr(request_obj, "original_model", None) or model
@@ -305,7 +356,9 @@ async def run_messages(
                 fb_request["api_base"] = provider.base_url
 
             print(f"[fallback] trying {provider.name}: model={request_obj.model}")
-            is_stream, out = await _call_provider(request_obj, fb_request)
+            is_stream, out = await _call_provider_with_retry(
+                request_obj, fb_request, max_retries=max_retries, base_delay=base_delay,
+            )
             return is_stream, out, provider.name
         except Exception as e:
             print(f"[fallback] {provider.name} failed: {e}")
