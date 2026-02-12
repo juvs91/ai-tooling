@@ -4,11 +4,24 @@ import os
 import json
 import time
 import logging
+import traceback
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 import litellm
 from litellm import token_counter
+from litellm.exceptions import (
+    ContextWindowExceededError,
+    BadRequestError as LiteLLMBadRequestError,
+    AuthenticationError as LiteLLMAuthenticationError,
+    RateLimitError as LiteLLMRateLimitError,
+    Timeout as LiteLLMTimeout,
+    APIConnectionError as LiteLLMAPIConnectionError,
+    ServiceUnavailableError as LiteLLMServiceUnavailableError,
+    InternalServerError as LiteLLMInternalServerError,
+    NotFoundError as LiteLLMNotFoundError,
+    ContentPolicyViolationError,
+)
 from utils.utils import cached_token_count, store_token_count, scale_tokens
 from proxy.proxy import apply_policy_and_routing, run_messages
 from llm.converters import convert_litellm_to_anthropic
@@ -116,6 +129,51 @@ if FALLBACK_PROVIDERS:
 else:
     logger.info("[startup] No fallback providers configured")
 
+def _classify_llm_error(e: Exception) -> tuple[int, str]:
+    """Map exception to (HTTP status, detail). Uses LiteLLM typed exceptions first."""
+    error_str = str(e)
+
+    # LiteLLM typed exceptions (most specific first)
+    if isinstance(e, ContextWindowExceededError):
+        return 400, f"Context window exceeded: {error_str[:300]}"
+    if isinstance(e, ContentPolicyViolationError):
+        return 400, f"Content policy violation: {error_str[:300]}"
+    if isinstance(e, LiteLLMAuthenticationError):
+        return 401, f"Authentication failed: {error_str[:300]}"
+    if isinstance(e, LiteLLMRateLimitError):
+        return 429, f"Rate limited: {error_str[:300]}"
+    if isinstance(e, LiteLLMNotFoundError):
+        return 404, f"Model not found: {error_str[:300]}"
+    if isinstance(e, LiteLLMTimeout):
+        return 504, f"Upstream timeout: {error_str[:300]}"
+    if isinstance(e, LiteLLMAPIConnectionError):
+        return 502, f"Connection error: {error_str[:300]}"
+    if isinstance(e, LiteLLMServiceUnavailableError):
+        return 503, f"Service unavailable: {error_str[:300]}"
+    if isinstance(e, LiteLLMInternalServerError):
+        return 502, f"Upstream server error: {error_str[:300]}"
+    if isinstance(e, LiteLLMBadRequestError):
+        return 400, f"Bad request: {error_str[:300]}"
+
+    # Fallback: status_code attribute (some LiteLLM exceptions carry it)
+    status_code = getattr(e, "status_code", None)
+    if isinstance(status_code, int) and 400 <= status_code < 600:
+        return status_code, f"Error ({status_code}): {error_str[:300]}"
+
+    # Last resort: string heuristics for non-LiteLLM exceptions
+    lower = error_str.lower()
+    if "context" in lower and ("length" in lower or "window" in lower or "exceeded" in lower):
+        return 400, f"Context length exceeded: {error_str[:300]}"
+    if "400" in error_str:
+        return 400, f"Bad request: {error_str[:300]}"
+    if "401" in error_str or "authentication" in lower:
+        return 401, f"Authentication error: {error_str[:300]}"
+    if "429" in error_str or "rate limit" in lower:
+        return 429, f"Rate limited: {error_str[:300]}"
+
+    return 500, f"Internal error: {error_str[:300]}"
+
+
 @app.post("/v1/messages")
 async def create_message(request: MessagesRequest, raw_request: Request):
     try:
@@ -213,7 +271,13 @@ async def create_message(request: MessagesRequest, raw_request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        logger.error(
+            "[create_message] %s: %s",
+            type(e).__name__, str(e)[:500],
+            exc_info=True,
+        )
+        status, detail = _classify_llm_error(e)
+        raise HTTPException(status_code=status, detail=detail)
 
 
 @app.post("/v1/messages/count_tokens", response_model=TokenCountResponse)

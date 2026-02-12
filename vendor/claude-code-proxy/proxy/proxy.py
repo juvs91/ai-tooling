@@ -5,6 +5,15 @@ from typing import Any, Optional, Tuple
 
 import litellm
 import os
+from litellm.exceptions import (
+    ContextWindowExceededError,
+    BadRequestError as LiteLLMBadRequestError,
+    RateLimitError as LiteLLMRateLimitError,
+    Timeout as LiteLLMTimeout,
+    APIConnectionError as LiteLLMAPIConnectionError,
+    ServiceUnavailableError as LiteLLMServiceUnavailableError,
+    InternalServerError as LiteLLMInternalServerError,
+)
 
 from utils.utils import (
     approx_tokens_from_bytes,
@@ -16,6 +25,7 @@ from utils.utils import (
 from utils.metrics import metrics
 from router.llm_router import choose_local_model
 from llm.converters import convert_anthropic_to_litellm
+from llm.compressor import compress_messages_if_needed
 from router.model_mapper import map_claude_alias_to_target
 
 
@@ -227,7 +237,21 @@ async def _call_provider(request_obj: Any, litellm_request: dict) -> Tuple[bool,
 
 
 def _is_retryable_error(error: Exception) -> bool:
-    """Check if error should trigger a retry (rate limit, timeout, server error)."""
+    """Check if error should trigger a retry.
+
+    Retryable: rate limits, timeouts, connection issues, transient server errors.
+    NOT retryable: context window exceeded, bad request, auth (same input always fails).
+    """
+    # Never retry context window / bad request — same payload will always fail
+    if isinstance(error, (ContextWindowExceededError, LiteLLMBadRequestError)):
+        return False
+
+    # Typed retryable exceptions
+    if isinstance(error, (LiteLLMRateLimitError, LiteLLMTimeout, LiteLLMAPIConnectionError,
+                          LiteLLMServiceUnavailableError, LiteLLMInternalServerError)):
+        return True
+
+    # String fallback for non-LiteLLM exceptions
     error_str = str(error).lower()
     return (
         "429" in error_str
@@ -264,6 +288,8 @@ async def _call_provider_with_retry(
                 metrics.total_retries += 1
                 await asyncio.sleep(delay)
             else:
+                if not _is_retryable_error(e):
+                    print(f"[retry] Non-retryable error on attempt {attempt + 1}: {type(e).__name__}: {str(e)[:200]}")
                 raise
 
     raise last_exception
@@ -318,6 +344,28 @@ async def run_messages(
     # --- Primary provider (uses model already set by apply_policy_and_routing) ---
     model = str(getattr(request_obj, "model", "") or "")
     litellm_request = convert_anthropic_to_litellm(request_obj)
+
+    # --- Context compression if needed ---
+    model_ctx = int(os.environ.get("MODEL_CONTEXT_WINDOW", "0"))
+    if model_ctx > 0:
+        comp_model = (os.environ.get("COMPRESSOR_MODEL", "").strip()
+                      or os.environ.get("CLASSIFIER_MODEL", "").strip())
+        comp_key = (os.environ.get("COMPRESSOR_API_KEY", "").strip()
+                    or os.environ.get("CLASSIFIER_API_KEY", "").strip())
+        comp_base = (os.environ.get("COMPRESSOR_BASE_URL", "").strip()
+                     or os.environ.get("CLASSIFIER_BASE_URL", "").strip() or None)
+        keep_recent = int(os.environ.get("COMPRESSOR_KEEP_RECENT", "15"))
+
+        if comp_model and comp_key:
+            litellm_request["messages"], was_compressed = await compress_messages_if_needed(
+                messages=litellm_request["messages"],
+                model_context_window=model_ctx,
+                compressor_model=comp_model,
+                compressor_api_key=comp_key,
+                compressor_base_url=comp_base,
+                keep_recent=keep_recent,
+            )
+
     _inject_credentials(
         litellm_request, model=model,
         openai_api_key=openai_api_key, openai_base_url=openai_base_url,

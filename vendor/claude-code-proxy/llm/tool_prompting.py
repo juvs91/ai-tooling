@@ -1,0 +1,505 @@
+# llm/tool_prompting.py
+"""
+Tool simulation via XML prompting for models without native function calling.
+
+When a model is in NO_TOOLS_MODELS (env var), the proxy:
+  REQUEST:  strips tools/tool_choice, injects tool definitions as XML prompt,
+            rewrites message history (tool_use → XML text, tool_result → XML text)
+  RESPONSE: parses XML <tool_call> tags from text, converts to Anthropic tool_use blocks
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import uuid
+from functools import lru_cache
+from typing import Any, FrozenSet
+
+from json_repair import repair_json
+
+
+# ---------------------------------------------------------------------------
+# 1. Model detection
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def _load_no_tools_models() -> FrozenSet[str]:
+    """Load and validate NO_TOOLS_MODELS from env. Cached via lru_cache(1)."""
+    raw = os.environ.get("NO_TOOLS_MODELS", "").strip()
+    if not raw:
+        return frozenset()
+
+    models = frozenset(
+        m.strip().lower()
+        for m in raw.split(",")
+        if m.strip() and len(m.strip()) > 2
+    )
+    if models:
+        print(f"[no-tools] Loaded NO_TOOLS_MODELS: {', '.join(sorted(models))}")
+    return models
+
+
+def is_no_tools_model(model: str) -> bool:
+    """Check if model matches any pattern in NO_TOOLS_MODELS."""
+    patterns = _load_no_tools_models()
+    if not patterns:
+        return False
+    model_lower = model.lower()
+    return any(pattern in model_lower for pattern in patterns)
+
+
+# ---------------------------------------------------------------------------
+# 2. Tool prompt builder
+# ---------------------------------------------------------------------------
+
+def _format_schema_properties(input_schema: dict) -> str:
+    """Format JSON Schema properties into readable parameter list."""
+    props = input_schema.get("properties", {})
+    required = set(input_schema.get("required", []))
+    if not props:
+        return "  (no parameters)"
+
+    lines = []
+    for name, prop in props.items():
+        ptype = prop.get("type", "any")
+        desc = prop.get("description", "")
+        if len(desc) > 120:
+            desc = desc[:117] + "..."
+        req = "required" if name in required else "optional"
+        line = f"  - {name} ({ptype}, {req})"
+        if desc:
+            line += f": {desc}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def build_tool_prompt(tools: list[dict]) -> str:
+    """
+    Convert Anthropic tool definitions to an XML-format prompt.
+
+    Args:
+        tools: list of dicts with keys: name, description, input_schema
+    Returns:
+        Prompt string with tool definitions and XML format instructions.
+    """
+    header = (
+        "You have access to the following tools. "
+        "When you need to use a tool, you MUST respond using this EXACT XML format:\n\n"
+        '<tool_call name="tool_name">\n'
+        "<input>\n"
+        '{"param1": "value1", "param2": "value2"}\n'
+        "</input>\n"
+        "</tool_call>\n\n"
+        "RULES:\n"
+        "- CRITICAL: You MUST use exactly <input> and </input> tags. Do NOT use <textarea>, <arguments>, <params>, or any other tag name.\n"
+        "- The <input> must contain valid JSON matching the tool's parameters schema.\n"
+        "- You can include text before and after tool calls.\n"
+        "- You can make multiple tool calls in a single response.\n"
+        "- Always use the exact tool name as listed below.\n"
+        "- Do NOT nest tool calls inside other tool calls.\n"
+        "- NEVER describe what tool you would use in text. ALWAYS output the <tool_call> XML directly.\n"
+        "- Do NOT say 'I will use the Read tool' or 'Let me run a command'. Instead, directly output the XML.\n\n"
+        "EXAMPLES:\n"
+        'To read a file:\n'
+        '<tool_call name="Read">\n'
+        '<input>\n'
+        '{"file_path": "/path/to/file.py"}\n'
+        '</input>\n'
+        '</tool_call>\n\n'
+        'To run a command:\n'
+        '<tool_call name="Bash">\n'
+        '<input>\n'
+        '{"command": "ls -la", "description": "List files"}\n'
+        '</input>\n'
+        '</tool_call>\n\n'
+        'To search for files:\n'
+        '<tool_call name="Glob">\n'
+        '<input>\n'
+        '{"pattern": "**/*.py"}\n'
+        '</input>\n'
+        '</tool_call>\n'
+    )
+
+    tool_sections = []
+    for tool in tools:
+        name = tool.get("name", "unknown")
+        desc = tool.get("description", "") or ""
+        if len(desc) > 200:
+            desc = desc[:197] + "..."
+        schema = tool.get("input_schema", {}) or {}
+        params = _format_schema_properties(schema)
+        section = f"### {name}\n{desc}\nParameters:\n{params}"
+        tool_sections.append(section)
+
+    return header + "\n## Available Tools\n\n" + "\n\n".join(tool_sections)
+
+
+# ---------------------------------------------------------------------------
+# 3. Message history rewriter
+# ---------------------------------------------------------------------------
+
+def _merge_consecutive_messages(messages: list[dict]) -> list[dict]:
+    """Merge consecutive messages with the same role to avoid API errors."""
+    if not messages:
+        return messages
+
+    merged: list[dict] = [messages[0].copy()]
+    for msg in messages[1:]:
+        if msg["role"] == merged[-1]["role"]:
+            prev_content = merged[-1].get("content", "") or ""
+            new_content = msg.get("content", "") or ""
+            merged[-1]["content"] = f"{prev_content}\n\n{new_content}".strip()
+        else:
+            merged.append(msg.copy())
+    return merged
+
+
+def rewrite_messages_without_tools(messages: list[dict]) -> list[dict]:
+    """
+    Post-process OpenAI-format messages to remove native tool constructs.
+
+    - Assistant messages with tool_calls → assistant text with XML
+    - role:"tool" messages → user text with <tool_result> XML
+    - Merges consecutive same-role messages
+    """
+    rewritten: list[dict] = []
+
+    for msg in messages:
+        role = msg.get("role", "")
+
+        if role == "assistant" and "tool_calls" in msg:
+            # Convert tool_calls to XML text
+            text_parts = []
+            content = msg.get("content")
+            if content:
+                text_parts.append(str(content))
+
+            for tc in msg.get("tool_calls", []):
+                func = tc.get("function", {}) if isinstance(tc, dict) else {}
+                name = func.get("name", "unknown")
+                args = func.get("arguments", "{}")
+                text_parts.append(
+                    f'<tool_call name="{name}">\n<input>\n{args}\n</input>\n</tool_call>'
+                )
+
+            rewritten.append({
+                "role": "assistant",
+                "content": "\n\n".join(text_parts),
+            })
+
+        elif role == "tool":
+            # Convert tool result to XML text as user message
+            tool_id = msg.get("tool_call_id", "unknown")
+            content = msg.get("content", "")
+            rewritten.append({
+                "role": "user",
+                "content": f'<tool_result tool_use_id="{tool_id}">\n{content}\n</tool_result>',
+            })
+
+        else:
+            rewritten.append(msg.copy())
+
+    return _merge_consecutive_messages(rewritten)
+
+
+# ---------------------------------------------------------------------------
+# 4. Response parser
+# ---------------------------------------------------------------------------
+
+# Primary regex: matches known inner-tag variants models may use
+_INNER_TAG = r"(?:input|textarea|arguments|params|json|content|parameters)"
+_TOOL_CALL_RE = re.compile(
+    rf'<tool_call\s+name="([^"]+)">\s*<{_INNER_TAG}>([\s\S]*?)</{_INNER_TAG}>\s*</tool_call>',
+    re.DOTALL,
+)
+# Fallback regex: matches any single XML tag wrapping the content
+_TOOL_CALL_FALLBACK_RE = re.compile(
+    r'<tool_call\s+name="([^"]+)">\s*<(\w+)>([\s\S]*?)</\2>\s*</tool_call>',
+    re.DOTALL,
+)
+
+
+def _safe_parse_tool_input(raw_input: str, tool_name: str) -> dict:
+    """
+    Parse tool input JSON with multiple fallback strategies.
+    NEVER raises — always returns a valid dict.
+    """
+    raw = raw_input.strip()
+    if not raw:
+        return {}
+
+    # 1) Direct JSON parse
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+        return {"value": parsed}
+    except json.JSONDecodeError:
+        pass
+
+    # 2) json_repair
+    try:
+        repaired = repair_json(raw, return_objects=True)
+        if isinstance(repaired, dict):
+            print(f"[no-tools] Repaired malformed JSON for tool '{tool_name}'")
+            return repaired
+        return {"value": repaired}
+    except Exception:
+        pass
+
+    # 3) Last resort: wrap raw string
+    print(f"[no-tools] Could not parse tool input for '{tool_name}', wrapping as raw")
+    return {"raw_input": raw}
+
+
+def extract_tool_calls_from_text(text: str) -> tuple[list[dict], str]:
+    """
+    Extract XML tool calls from text response.
+
+    Returns:
+        (tool_call_blocks, remaining_text)
+        - tool_call_blocks: list of Anthropic tool_use dicts
+        - remaining_text: text with tool_call XML removed
+
+    Resilience guarantees:
+        - Malformed JSON → repaired or wrapped as {"raw_input": ...}
+        - Invalid XML structure → ignored (stays as text)
+        - Empty input → empty dict {}
+        - Tolerates model using wrong inner tags (textarea, arguments, etc.)
+        - Never raises exceptions
+    """
+    if not text:
+        return [], ""
+
+    tool_blocks: list[dict] = []
+    used_re = _TOOL_CALL_RE
+    try:
+        for match in _TOOL_CALL_RE.finditer(text):
+            name = match.group(1).strip()
+            raw_input = match.group(2)
+            parsed_input = _safe_parse_tool_input(raw_input, name)
+            tool_blocks.append({
+                "type": "tool_use",
+                "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                "name": name,
+                "input": parsed_input,
+            })
+
+        # Fallback: try permissive regex if primary found nothing
+        if not tool_blocks and "<tool_call" in text:
+            for match in _TOOL_CALL_FALLBACK_RE.finditer(text):
+                name = match.group(1).strip()
+                inner_tag = match.group(2)
+                raw_input = match.group(3)
+                print(f"[no-tools] WARNING: Model used <{inner_tag}> instead of <input> for tool '{name}' — parsed via fallback regex")
+                parsed_input = _safe_parse_tool_input(raw_input, name)
+                tool_blocks.append({
+                    "type": "tool_use",
+                    "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                    "name": name,
+                    "input": parsed_input,
+                })
+            used_re = _TOOL_CALL_FALLBACK_RE
+    except Exception as e:
+        print(f"[no-tools] Error extracting tool calls: {e}")
+        return [], text
+
+    if not tool_blocks:
+        if "<tool_call" in text:
+            print(f"[no-tools] WARNING: Found <tool_call> in text but could not parse. First 300 chars: {text[:300]}")
+        return [], text
+
+    remaining = used_re.sub("", text).strip()
+    return tool_blocks, remaining
+
+
+# ---------------------------------------------------------------------------
+# 5. Recovery for truncated tool calls
+# ---------------------------------------------------------------------------
+
+async def recover_incomplete_tool_call(
+    partial_xml: str,
+    tools: list | None,
+    model: str,
+    api_key: str,
+    api_base: str | None = None,
+    timeout_s: float = 3.0,
+) -> list[dict] | None:
+    """
+    Attempt to reconstruct truncated <tool_call> XML via a compact LLM call.
+    Returns list of tool_use dicts on success, None on failure.
+    Uses the classifier model (deepseek-chat) for speed and cost.
+    """
+    if not partial_xml or not api_key:
+        return None
+
+    # Allow disabling recovery via env var
+    if os.environ.get("DISABLE_TOOL_RECOVERY", "").strip() == "1":
+        return None
+
+    # Extract tool name from partial XML if possible
+    name_match = re.search(r'<tool_call\s+name="([^"]+)"', partial_xml)
+    tool_name = name_match.group(1) if name_match else None
+
+    # Find tool definition for context
+    tool_def = ""
+    if tools and tool_name:
+        for t in tools:
+            t_name = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
+            if t_name == tool_name:
+                raw = t.model_dump() if hasattr(t, "model_dump") else (t.dict() if hasattr(t, "dict") else dict(t))
+                tool_def = json.dumps(raw, ensure_ascii=False)[:500]
+                break
+
+    prompt = (
+        "Complete this truncated XML tool call. "
+        "Respond ONLY with the complete <tool_call> XML, nothing else.\n\n"
+        f"Partial XML:\n{partial_xml}\n\n"
+    )
+    if tool_def:
+        prompt += f"Tool schema:\n{tool_def}\n"
+
+    try:
+        import asyncio
+        import litellm
+        response = await asyncio.wait_for(
+            litellm.acompletion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=512,
+                temperature=0,
+                api_key=api_key,
+                api_base=api_base,
+            ),
+            timeout=timeout_s,
+        )
+        content = response.choices[0].message.content or ""
+        tool_blocks, _ = extract_tool_calls_from_text(content)
+        if tool_blocks:
+            print(f"[no-tools] Recovered {len(tool_blocks)} tool call(s) via retry")
+            return tool_blocks
+        print("[no-tools] Recovery response had no valid tool calls")
+    except asyncio.TimeoutError:
+        print(f"[no-tools] Tool call recovery timed out ({timeout_s}s)")
+    except Exception as e:
+        print(f"[no-tools] Tool call recovery failed: {type(e).__name__}: {e}")
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 6. Streaming XML buffer (state machine)
+# ---------------------------------------------------------------------------
+
+_TOOL_CALL_OPEN = "<tool_call"
+
+
+class XmlToolBuffer:
+    """
+    State machine for detecting <tool_call> XML tags in a streaming text.
+    Feed text chunks, get back ordered segments of text and tool_calls.
+    """
+
+    def __init__(self):
+        self.buffer: str = ""
+        self.in_tool: bool = False
+
+    def feed(self, text: str) -> list[dict]:
+        """
+        Feed a new text chunk.
+
+        Returns list of segments in order:
+            [{"type": "text", "text": "..."}, {"type": "tool_call", "name": ..., "input": {...}}, ...]
+        """
+        self.buffer += text
+        return self._drain()
+
+    def flush(self) -> list[dict]:
+        """Flush remaining buffer as text (call at stream end)."""
+        if not self.buffer:
+            return []
+        if "<tool_call" in self.buffer:
+            print(f"[no-tools] WARNING: flushing incomplete tool call ({len(self.buffer)} chars). First 300: {self.buffer[:300]}")
+        result = [{"type": "text", "text": self.buffer}]
+        self.buffer = ""
+        self.in_tool = False
+        return result
+
+    # -- internal --
+
+    def _drain(self) -> list[dict]:
+        """Process buffer and extract all complete segments."""
+        segments: list[dict] = []
+        while self.buffer:
+            if not self.in_tool:
+                segment = self._try_extract_text()
+            else:
+                segment = self._try_extract_tool()
+            if segment is None:
+                break
+            segments.append(segment)
+        return segments
+
+    def _try_extract_text(self) -> dict | None:
+        """Try to extract text before a <tool_call> tag, or return None if need more data."""
+        idx = self.buffer.find(_TOOL_CALL_OPEN)
+        if idx == -1:
+            safe_end = self._safe_text_end()
+            if safe_end == 0:
+                return None
+            text = self.buffer[:safe_end]
+            self.buffer = self.buffer[safe_end:]
+            return {"type": "text", "text": text}
+
+        # Found <tool_call
+        self.in_tool = True
+        if idx > 0:
+            text = self.buffer[:idx]
+            self.buffer = self.buffer[idx:]
+            return {"type": "text", "text": text}
+        # No text before — go directly to tool extraction
+        return self._try_extract_tool()
+
+    def _try_extract_tool(self) -> dict | None:
+        """Try to extract a complete </tool_call> block, or return None if incomplete."""
+        end_tag = "</tool_call>"
+        end_idx = self.buffer.find(end_tag)
+        if end_idx == -1:
+            return None
+        end_idx += len(end_tag)
+        tool_xml = self.buffer[:end_idx]
+        self.buffer = self.buffer[end_idx:]
+        self.in_tool = False
+        return self._parse_tool_xml(tool_xml)
+
+    def _parse_tool_xml(self, xml: str) -> dict:
+        """Parse a complete <tool_call> XML string. Falls back to text on parse failure."""
+        match = _TOOL_CALL_RE.search(xml)
+        if match:
+            name = match.group(1).strip()
+            raw_input = match.group(2)
+            parsed = _safe_parse_tool_input(raw_input, name)
+            print(f"[xml-buffer] Parsed tool_call: name={name} input_keys={list(parsed.keys())}")
+            return {"type": "tool_call", "name": name, "input": parsed}
+
+        # Fallback: try permissive regex for unknown inner tags
+        fallback_match = _TOOL_CALL_FALLBACK_RE.search(xml)
+        if fallback_match:
+            name = fallback_match.group(1).strip()
+            inner_tag = fallback_match.group(2)
+            raw_input = fallback_match.group(3)
+            print(f"[no-tools] WARNING: Streaming - model used <{inner_tag}> instead of <input> for tool '{name}'")
+            parsed = _safe_parse_tool_input(raw_input, name)
+            print(f"[xml-buffer] Parsed tool_call (fallback): name={name} input_keys={list(parsed.keys())}")
+            return {"type": "tool_call", "name": name, "input": parsed}
+
+        print(f"[no-tools] WARNING: Could not parse tool_call XML ({len(xml)} chars). First 300: {xml[:300]}")
+        return {"type": "text", "text": xml}
+
+    def _safe_text_end(self) -> int:
+        """Find safe end position, avoiding partial '<tool_call' matches at buffer end."""
+        for i in range(1, min(len(_TOOL_CALL_OPEN), len(self.buffer)) + 1):
+            if _TOOL_CALL_OPEN.startswith(self.buffer[-i:]):
+                return len(self.buffer) - i
+        return len(self.buffer)

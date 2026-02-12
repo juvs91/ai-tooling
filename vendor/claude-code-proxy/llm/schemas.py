@@ -49,6 +49,7 @@ class ContentBlockToolResult(BaseModel):
     type: Literal["tool_result"]
     tool_use_id: str
     content: Union[str, List[Dict[str, Any]], Dict[str, Any], List[Any], Any]
+    is_error: Optional[bool] = None
 
 class ContentBlockThinking(BaseModel):
     type: Literal["thinking"]

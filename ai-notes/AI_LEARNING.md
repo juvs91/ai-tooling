@@ -2,7 +2,7 @@
 > Aprendizajes iterativos del proyecto. Actualizar despues de cada sesion.
 
 ## Ultima actualizacion
-- Fecha: 2025-02-07
+- Fecha: 2026-02-12
 - Por: claude-opus-4-6 + jeguzman
 
 ---
@@ -17,6 +17,8 @@
 ### Codigo
 - Pydantic Union types para content blocks: agregar nuevos tipos es solo agregar al union en `Message.content`
 - Stripear bloques no soportados en converter (thinking, redacted_thinking) en vez de rechazar el request
+- `@lru_cache(maxsize=1)` + `frozenset` para config env vars que se leen una vez: sin estado global mutable, testeable con `.cache_clear()`
+- XML tool simulation: inyectar tools como prompt + parsear `<tool_call>` XML en respuesta permite simular function calling en modelos sin soporte nativo
 
 ### Herramientas
 - `cc-scan` + `cc-plan` (local, sin tools) para analisis barato antes de ejecutar
@@ -33,6 +35,7 @@
 ### Configuracion
 - `CLASSIFIER_MODEL` vacio = sin costo extra (regex fallback). No olvidar que sin esta var el intent siempre era "CHAT" (bug corregido)
 - Z.AI tiene DOS endpoints: `/api/paas/v4` (OpenAI) y `/api/anthropic` (nativo). El nativo evita conversion pero pierde el routing del proxy
+- `NO_TOOLS_MODELS` en `.env` global (no en profile-envs/) porque aplica a nivel de proxy independiente del provider
 
 ### Proceso
 - Regex para intent detection es fragil: "implement a login endpoint" matchea BUILDING pero mensajes en español no matchean nada
@@ -55,6 +58,19 @@
 | 2026-02-07 | Observabilidad in-memory (ring buffer + contadores) vs base de datos | DevX: curl /api/stats basta para debugging, no necesita setup externo | Prometheus/Grafana (overkill), SQLite (mas complejo), solo print (se pierde) |
 | 2026-02-07 | Token count cache con SHA-256 + FIFO eviction | Evita recalcular conteos identicos en sesiones multi-turno | LRU (mas complejo), per-message incremental (fragil si system cambia) |
 | 2026-02-07 | Tool conversion cache con key compuesto name:gemini:hash | Las mismas ~15 tools se convierten en cada request. Cache evita CPU desperdiciado | Sin cache (simple pero wasteful), cache solo por name (rompe si schema cambia) |
+| 2026-02-10 | XML tool simulation para NO_TOOLS_MODELS | deepseek-reasoner no soporta tools/tool_choice/temperature, retornaba 500. Simular via XML prompting preserva funcionalidad | Solo stripear tools (pierde function calling), hardcodear patterns (inflexible) |
+| 2026-02-10 | XmlToolBuffer state machine para streaming XML detection | Tool calls en XML llegan en chunks parciales. State machine con buffer detecta `<tool_call` parciales y espera completar | Regex en buffer completo (pierde streaming), no soportar streaming XML (inconsistente) |
+| 2026-02-10 | 3-level JSON parse fallback (_safe_parse_tool_input) | Modelos sin native tools pueden generar JSON malformado. Fallback: parse → json_repair → raw wrap. NUNCA lanza excepcion | Solo parse (crashea CC), solo json_repair (mas lento siempre) |
+| 2026-02-10 | Error status propagation en server.py | 500 generico ocultaba 400/401/429 reales del provider. Ahora se extrae status code del error string | Siempre 500 (debugging imposible), custom exception classes (overengineering) |
+| 2026-02-10 | Quitar cap max_tokens para reasoning models | deepseek-reasoner usa reasoning_content que consume output tokens. Cap 16384 truncaba respuestas mid-tool_call | Subir cap a 32K (arbitrario), cap configurable (overengineering por ahora) |
+| 2026-02-10 | Quitar gemini/ del cap max_tokens | Gemini tiene 1M context window, no necesita cap artificial de 16384 | Mantener cap (limita a Gemini sin razon) |
+| 2026-02-10 | Logging en streaming exception handlers | `except Exception:` sin log hacia imposible diagnosticar fallas mid-stream. Ahora imprime tipo y mensaje | Sin logging (status quo, invisible) |
+| 2026-02-11 | Error handling tipado con litellm.exceptions isinstance | String matching fragil ("400" in error_str) fallaba para ContextWindowExceededError. isinstance checks con jerarquia correcta (subclase antes de base) | Mantener string matching (fragil, misses subclasses) |
+| 2026-02-11 | LLM context compression en proxy | DeepSeek 500 con ~67K tokens. Comprimir mensajes viejos via LLM barato, conservar recientes intactos. COMPRESSOR_* vars con fallback a CLASSIFIER_* | Truncar mensajes (pierde contexto), chunking (diluye calidad) |
+| 2026-02-10 | Truncar tool descriptions a 200 chars en XML prompt | 17 tools × ~400 chars/desc = ~7.3KB. Truncar a 200 reduce a ~4.5KB sin perder funcionalidad | Sin truncar (prompt inflado innecesariamente) |
+| 2026-02-10 | Usar original_model en responses | Response contenia `openai/deepseek-reasoner` en vez de `claude-opus-4-6`. CC no valida estrictamente pero es mas correcto | Dejar modelo mapeado (funciona pero confuso en logs) |
+| 2026-02-12 | Defensivo: stop_reason=tool_use cuando hay tool_use blocks (streaming + non-streaming) | CC requiere stop_reason="tool_use" per Anthropic docs. Providers como Z.AI pueden retornar finish_reason="stop" con tool_calls | Solo confiar en finish_reason=="tool_calls" (falla si provider no lo retorna) |
+| 2026-02-12 | Cambiar stop_reason "error" a "end_turn" en fatal stream errors | "error" no es Literal valido de Anthropic. CC podria rechazarlo silenciosamente causando freeze | Agregar "error" al Literal (rompe compatibilidad Anthropic) |
 
 ---
 
@@ -111,6 +127,95 @@ print(urllib.request.urlopen(req, timeout=30).read().decode()[:200])
 
 ## Notas de sesiones anteriores
 
+### Sesion 2026-02-12 — Fix Tool Call Execution (stop_reason + guards + diagnostics)
+**Objetivo:** Diagnosticar y resolver por que CC "muere" al intentar ejecutar tool calls — la conversacion se congela y CC no ejecuta los tools
+**Analisis exhaustivo:** 39 funcionalidades inventariadas en 10 archivos. Plan completo en `.claude/plans/binary-crunching-fiddle.md`
+**Root cause:** Multiple bugs en `stop_reason` mapping:
+1. Si provider retorna `finish_reason="stop"` en vez de `"tool_calls"` (comun con Z.AI/GLM), streaming emitia `stop_reason: "end_turn"` en vez de `"tool_use"`. Per Anthropic docs, `stop_reason: "tool_use"` es **OBLIGATORIO** cuando hay tool_use blocks
+2. Fallback close path tenia el mismo bug
+3. Non-streaming path (converters.py) tenia el mismo bug
+4. Fatal stream errors emitian `stop_reason: "error"` que NO es un valor valido del Literal de Anthropic (`end_turn | max_tokens | stop_sequence | tool_use`). CC podria rechazarlo silenciosamente
+5. Tool calls con nombre vacio podrian pasar al cliente causando error
+**Resultado (6 fixes):**
+- Fix 1 (CRITICO): `streaming.py:285` — agregar `or tool_index is not None` a condicion de stop_reason
+- Fix 2 (CRITICO): `streaming.py:352` — agregar `or tool_index is not None` a fallback close
+- Fix 3 (CRITICO): `converters.py:612-618` — agregar `has_tool_use` check que detecta tool_use blocks en content
+- Fix 4 (MEDIO): `streaming.py:359` — cambiar `stop_reason: "error"` a `"end_turn"` (valor valido de Anthropic)
+- Fix 5 (MEDIO): Guards en streaming.py y converters.py que skipean tool_calls con nombre vacio + warning log
+- Fix 6 (DIAGNOSTICO): Logging en streaming close paths, XmlToolBuffer._parse_tool_xml, XmlToolBuffer.flush, y XML tool_use emission
+**Impacto en Z.AI/GLM:** SAFE — todos los fixes solo agregan `or` adicionales. Si GLM retorna `finish_reason="tool_calls"` (correcto), el check existente lo atrapa sin cambio. Los nuevos `or` solo activarian como defensa extra
+**Validacion:** Formato validado contra documentacion oficial de Anthropic (https://platform.claude.com/docs/en/agents-and-tools/tool-use/implement-tool-use)
+**Aprendizaje:**
+- `stop_reason: "tool_use"` es la señal que CC usa para ejecutar tools. Sin esto, CC ignora los tool_use blocks silenciosamente
+- Los Literal types de Anthropic son estrictos — `"error"` no es un valor valido y CC puede rechazarlo sin aviso
+- Diagnostic logging en las close paths es esencial — sin saber que `stop_reason` se emitio, el bug es invisible
+**Archivos modificados:** `llm/streaming.py`, `llm/converters.py`, `llm/tool_prompting.py`
+**Pendiente:** Test end-to-end con CC real apuntando a DeepSeek y a Z.AI para confirmar
+
+### Sesion 2026-02-11 — Fix Error 500 silencioso + Compresion LLM de contexto
+**Objetivo:** Diagnosticar y resolver error 500 intermitente con DeepSeek cuando la conversacion crece (~67K tokens)
+**Root cause:** Requests con ~67K tokens excedian el context window de DeepSeek. LiteLLM lanzaba excepcion pero el proxy: (1) no logueaba el error real, (2) usaba string matching fragil para status codes, (3) no tenia mecanismo para comprimir contexto overflow.
+**Resultado (2 fases):**
+- Fase 1 (Error Handling):
+  - `server.py`: `_classify_llm_error()` con `isinstance` checks de litellm.exceptions. `ContextWindowExceededError` (subclase de BadRequestError) se chequea primero. Logging con `exc_info=True` para traceback completo
+  - `proxy.py`: `_is_retryable_error()` usa isinstance para no retry en context window errors. Log explicito cuando un error NO es retryable
+- Fase 2 (Context Compression):
+  - Nuevo `llm/compressor.py`: `compress_messages_if_needed()` — detecta overflow (>85% window), separa old/recent, comprime via LLM barato, fallback a trimming simple
+  - Env vars `COMPRESSOR_MODEL/API_KEY/BASE_URL` con fallback a `CLASSIFIER_*` (zero-config)
+  - `COMPRESSOR_KEEP_RECENT=15` configurable
+  - Integrado en `run_messages()` entre `convert_anthropic_to_litellm()` y `_call_provider_with_retry()`
+**Aprendizaje:**
+- `litellm.exceptions.ContextWindowExceededError` es subclase de `BadRequestError` — siempre chequear con isinstance en orden especifico→general
+- String matching "400" in error_str es fragil: LiteLLM formatea como "litellm.BadRequestError: ..." que NO siempre contiene "400"
+- La compresion LLM es superior a truncar o chunking: preserva semantica, detalles tecnicos sobreviven via prompt engineering
+- El compresor solo necesita manejar los mensajes VIEJOS (~47K), no el total (~67K). Esto permite usar el mismo modelo barato (deepseek-chat) que tiene 128K de contexto
+**Archivos modificados:** `server.py`, `proxy/proxy.py`, `llm/compressor.py` (nuevo), `.env.example`
+**Pendiente:** Probar con sesion real larga en DeepSeek para confirmar compresion funciona
+
+### Sesion 2026-02-10 (b) — Diagnostico "Prueba de Fuego" + 5 Bug Fixes
+**Objetivo:** Diagnosticar por que la prueba real con Claude Code fallo (proxy 200 OK pero CC muestra error y deja de ejecutar)
+**Root cause:** `max_completion_tokens` capped a 16384 para TODOS los modelos openai/ y gemini/. deepseek-reasoner usa `reasoning_content` que consume output tokens (~8-15K), dejando solo ~1-6K para content real. La respuesta se truncaba mid-`<tool_call>` XML.
+**Agravante:** `except Exception:` sin logging en streaming.py hacia imposible ver que error ocurria. El proxy reportaba 200 pero el stream terminaba con `stop_reason: "error"` o respuesta truncada.
+**Resultado (5 fixes aplicados):**
+- Fix 1 (CRITICO): `converters.py:441-451` — Mover `no_tools` antes del cap, quitar `gemini/` del check, agregar `and not no_tools`. Reasoning models ya no tienen cap artificial
+- Fix 2 (CRITICO): `streaming.py:247-249, 282-284` — Agregar `as e` + `print()` a ambos exception handlers. Errores ahora visibles en logs
+- Fix 3 (ALTO): `tool_prompting.py:103-105` — Truncar tool descriptions a 200 chars. Reduce prompt XML de ~7.3KB a ~4.5KB
+- Fix 4 (MEDIO): `streaming.py:56` + `converters.py:619` — Usar `original_model` en responses (devuelve `claude-opus-4-6` en vez de `openai/deepseek-reasoner`)
+- Fix 5 (MEDIO): `tool_prompting.py:297-298` — Warning log en `flush()` si buffer contiene `<tool_call` incompleto
+**Bugs descartados (no son reales):**
+- Pydantic serialization warnings: vienen de LiteLLM interno, no de nuestro codigo
+- `_merge_consecutive_messages()` pierde tool_calls: rewrite convierte a XML text ANTES del merge
+- `message_delta` sin input_tokens: spec Anthropic solo requiere output_tokens en message_delta
+- reasoning mixed con text: diseño intencional (`<reasoning>` visible en CC)
+**Aprendizaje:**
+- deepseek-reasoner `reasoning_content` cuenta hacia output token limit. Un cap de 16384 es insuficiente cuando el reasoning chain consume 8-15K tokens
+- Sin logging en exception handlers, el proxy es una caja negra. Siempre agregar `as e` + log
+- Gemini tiene 1M context window — nunca debio tener cap de 16384
+- `getattr(request, "original_model", None) or request.model` es pattern seguro para acceder a un campo que puede no existir
+**Archivos modificados:** `llm/converters.py`, `llm/streaming.py`, `llm/tool_prompting.py`
+**Pendiente:** Re-ejecutar "prueba de fuego" con CC real para confirmar fix
+
+### Sesion 2026-02-10 — XML Tool Simulation para deepseek-reasoner
+**Objetivo:** Fix 500 error con deepseek-reasoner + implementar XML tool simulation para modelos sin native function calling
+**Root cause:** Proxy enviaba `tools`, `tool_choice`, `temperature` a deepseek-reasoner que no los soporta. DeepSeek API retornaba 400, server.py lo envolvia en 500 generico.
+**Resultado:**
+- Nuevo modulo `llm/tool_prompting.py`: detection, prompt building, message rewriting, response parsing, streaming state machine
+- `NO_TOOLS_MODELS=deepseek-reasoner` en `.env` global (configurable, comma-separated)
+- Request side: strip tools/tool_choice/temperature, inyectar XML prompt en system, reescribir historial (tool_calls→XML, tool_results→XML)
+- Response side (non-streaming): `extract_tool_calls_from_text()` con regex + 3-level JSON fallback
+- Response side (streaming): `XmlToolBuffer` class con `feed()/flush()/_drain()` state machine, detecta `<tool_call>` parciales entre chunks
+- `reasoning_content` de deepseek-reasoner se surfacea como `<reasoning>` text block
+- Error handling en server.py propaga status codes reales (400/401/429)
+- 8 unit tests + integration tests con DeepSeek API real (non-streaming + streaming)
+**Aprendizaje:**
+- deepseek-reasoner ignora temperature pero RECHAZA tools/tool_choice con 400 explicito
+- La simulacion XML funciona sorprendentemente bien — deepseek-reasoner sigue el formato XML fielmente
+- `_safe_text_end()` en XmlToolBuffer es clave: evita emitir texto que podria ser inicio de `<tool_call` parcial
+- `_merge_consecutive_messages()` es necesario post-rewrite porque tool→user messages pueden quedar adyacentes a user messages existentes
+- Pattern `@lru_cache(maxsize=1)` + `frozenset` es ideal para config env que se lee una vez: inmutable, testeable, sin globals
+**Archivos modificados:** `.env`, `llm/tool_prompting.py` (nuevo), `llm/converters.py`, `llm/streaming.py`, `server.py`
+**Bloqueadores:** Pydantic serialization warnings de LiteLLM (non-fatal, cosmetic)
+
 ### Sesion 2026-02-07 (b) — Caching + Observabilidad
 **Objetivo:** Implementar observabilidad y caching segun plan aprobado
 **Resultado:**
@@ -159,3 +264,7 @@ print(urllib.request.urlopen(req, timeout=30).read().decode()[:200])
 
 1. **2025-02-07**: El proxy es una capa de abstraccion Anthropic->OpenAI, no un simple forwarder. Cada content block type nuevo de Anthropic requiere: schema + converter + stripper
 2. **2025-02-07**: Intent classification es un "hop" en el multi-hop grounding. Separar el clasificador del provider principal permite optimizar costo vs precision independientemente
+3. **2026-02-10**: Reasoning models cambian la economía de output tokens. `reasoning_content` es invisible para el usuario pero consume el mismo budget de `max_completion_tokens`. Un cap fijo que funciona para modelos normales puede destruir la respuesta de un reasoning model
+4. **2026-02-10**: Function calling no es magia — es un prompt convention. XML tool simulation prueba que cualquier modelo que siga instrucciones puede "hacer" tool calls si el proxy hace la traduccion bidireccional. La calidad depende de que tan bien el modelo siga el formato, no de una feature nativa
+5. **2026-02-11**: El proxy es el lugar correcto para comprimir contexto, no el cliente. Claude Code asume 200K y no sabe que habla con un modelo de 64K. `scale_tokens()` es la primera linea de defensa (hace que CC comprima antes), pero si un solo tool result grande salta el threshold, la compresion LLM en el proxy es la safety net que falta
+6. **2026-02-12**: `stop_reason` no es decorativo — es la señal de control que CC usa para decidir si ejecutar tools. Un proxy que convierte formatos debe respetar TODAS las invariantes del protocolo Anthropic, no solo la forma del payload. La Anthropic API es un contrato: `stop_reason: "tool_use"` cuando hay `tool_use` blocks es OBLIGATORIO, no sugerido

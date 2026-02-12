@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Union
 from json_repair import repair_json
 
 from llm.schemas import MessagesRequest, MessagesResponse, Usage
+from llm.tool_prompting import is_no_tools_model, build_tool_prompt, rewrite_messages_without_tools, extract_tool_calls_from_text
 
 
 # ── Shared helpers ────────────────────────────────────────────────────
@@ -438,12 +439,19 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
         messages.extend(_convert_message_blocks(msg))
 
     max_tokens = anthropic_request.max_tokens
-    # tu código anterior “cap 16384” lo hacías para openai/gemini;
-    # ojo: esto no arregla TPM, pero evita requests absurdos.
-    if isinstance(anthropic_request.model, str) and (
-        anthropic_request.model.startswith("openai/") or anthropic_request.model.startswith("gemini/")
+    no_tools = is_no_tools_model(anthropic_request.model)
+
+    # Cap max_tokens for openai/ non-reasoning models to avoid absurd requests.
+    # Skip: gemini/ (1M context), no_tools/reasoning models (reasoning_content consumes output tokens).
+    if (
+        isinstance(anthropic_request.model, str)
+        and anthropic_request.model.startswith("openai/")
+        and not no_tools
     ):
         max_tokens = min(max_tokens, 16384)
+
+    if no_tools:
+        print(f"[no-tools] max_completion_tokens={max_tokens} (uncapped, reasoning model)")
 
     litellm_request: Dict[str, Any] = {
         "model": anthropic_request.model,
@@ -451,9 +459,12 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
         # litellm acepta max_tokens o max_completion_tokens según provider.
         # en tu server usabas max_completion_tokens; mantenemos por compat.
         "max_completion_tokens": max_tokens,
-        "temperature": anthropic_request.temperature,
         "stream": anthropic_request.stream,
     }
+
+    # reasoning models ignore temperature; strip to avoid potential API errors
+    if not no_tools:
+        litellm_request["temperature"] = anthropic_request.temperature
 
     if anthropic_request.stop_sequences:
         litellm_request["stop"] = anthropic_request.stop_sequences
@@ -463,16 +474,30 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
         litellm_request["top_k"] = anthropic_request.top_k
 
     # tools -> OpenAI function tools (cached per tool name + schema hash)
-    if anthropic_request.tools:
+    if anthropic_request.tools and not no_tools:
         is_gemini_model = anthropic_request.model.startswith("gemini/")
         openai_tools = []
         for tool in anthropic_request.tools:
             tool_dict = tool.model_dump() if hasattr(tool, "model_dump") else (tool.dict() if hasattr(tool, "dict") else dict(tool))
             openai_tools.append(_convert_tool_cached(tool_dict, is_gemini_model))
         litellm_request["tools"] = openai_tools
+    elif anthropic_request.tools and no_tools:
+        # Inject tool definitions as XML prompt in system message
+        tool_dicts = [
+            t.model_dump() if hasattr(t, "model_dump") else (t.dict() if hasattr(t, "dict") else dict(t))
+            for t in anthropic_request.tools
+        ]
+        tool_prompt = build_tool_prompt(tool_dicts)
+        if messages and messages[0]["role"] == "system":
+            messages[0]["content"] = tool_prompt + "\n\n" + messages[0]["content"]
+        else:
+            messages.insert(0, {"role": "system", "content": tool_prompt})
+        # Rewrite history: tool_calls/tool_results → XML text
+        litellm_request["messages"] = rewrite_messages_without_tools(messages)
+        print(f"[no-tools] Injected {len(tool_dicts)} tools as XML prompt for {anthropic_request.model}")
 
-    # tool_choice (Anthropic-style) -> OpenAI
-    if anthropic_request.tool_choice:
+    # tool_choice (Anthropic-style) -> OpenAI — skip for no-tools models
+    if anthropic_request.tool_choice and not no_tools:
         tc = anthropic_request.tool_choice
         choice_type = tc.get("type") if isinstance(tc, dict) else None
 
@@ -504,12 +529,18 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
     choices = resp.get("choices", [{}])
     message = choices[0].get("message", {}) if choices else {}
     content_text = message.get("content", "") if isinstance(message, dict) else ""
+    reasoning_text = message.get("reasoning_content", "") if isinstance(message, dict) else ""
     tool_calls = message.get("tool_calls", None) if isinstance(message, dict) else None
     finish_reason = choices[0].get("finish_reason", "stop") if choices else "stop"
     usage_info = resp.get("usage", {})
     response_id = resp.get("id", f"msg_{uuid.uuid4()}")
 
     content: List[Dict[str, Any]] = []
+
+    # reasoning_content (deepseek-reasoner): surface as text block
+    if reasoning_text:
+        content.append({"type": "text", "text": f"<reasoning>\n{reasoning_text}\n</reasoning>\n\n"})
+
     if content_text is not None and content_text != "":
         content.append({"type": "text", "text": content_text})
 
@@ -523,21 +554,26 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
         for tool_call in tool_calls:
             if isinstance(tool_call, dict):
                 function = tool_call.get("function", {}) or {}
-                tool_id = tool_call.get("id", f"toolu_{uuid.uuid4().hex[:24]}")
+                raw_id = tool_call.get("id", "")
+                tool_id = raw_id if raw_id.startswith("toolu_") else f"toolu_{uuid.uuid4().hex[:24]}"
                 name = function.get("name", "")
                 arguments = function.get("arguments", "{}")
             else:
                 function = getattr(tool_call, "function", None)
-                tool_id = getattr(tool_call, "id", f"toolu_{uuid.uuid4().hex[:24]}")
+                raw_id = getattr(tool_call, "id", "") or ""
+                tool_id = raw_id if raw_id.startswith("toolu_") else f"toolu_{uuid.uuid4().hex[:24]}"
                 name = getattr(function, "name", "") if function else ""
                 arguments = getattr(function, "arguments", "{}") if function else "{}"
+
+            if not name:
+                print(f"[converters] WARNING: Skipping tool_call with empty name (id={raw_id})")
+                continue
 
             if isinstance(arguments, str):
                 try:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError:
                     try:
-                        
                         repaired = repair_json(arguments, return_objects=True)
                         if isinstance(repaired, dict):
                             arguments = repaired
@@ -559,10 +595,32 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
         prompt_tokens = getattr(usage_info, "prompt_tokens", 0)
         completion_tokens = getattr(usage_info, "completion_tokens", 0)
 
+    # For no-tools models: extract XML tool calls from text response
+    if is_no_tools_model(original_request.model) and content_text:
+        xml_tool_blocks, clean_text = extract_tool_calls_from_text(content_text)
+        if xml_tool_blocks:
+            # Rebuild content: clean text + tool_use blocks
+            # OMIT reasoning_content when tool calls present — 5-15K tokens of reasoning
+            # before tool_use blocks crashes CC's SSE parser
+            content = []
+            if reasoning_text:
+                print(f"[no-tools] Suppressed {len(reasoning_text)} chars of reasoning_content (tool calls present)")
+            clean_text = clean_text.strip()
+            if clean_text:
+                content.append({"type": "text", "text": clean_text})
+            content.extend(xml_tool_blocks)
+            finish_reason = "tool_calls"
+            print(f"[no-tools] Extracted {len(xml_tool_blocks)} tool calls from text response")
+
     # finish_reason -> stop_reason
+    # Per Anthropic docs: stop_reason MUST be "tool_use" when tool_use blocks are present
+    has_tool_use = any(
+        (c.get("type") if isinstance(c, dict) else getattr(c, "type", None)) == "tool_use"
+        for c in content
+    )
     if finish_reason == "length":
         stop_reason = "max_tokens"
-    elif finish_reason == "tool_calls":
+    elif finish_reason == "tool_calls" or has_tool_use:
         stop_reason = "tool_use"
     else:
         stop_reason = "end_turn"
@@ -573,7 +631,7 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
     
     return MessagesResponse(
         id=response_id,
-        model=original_request.model,
+        model=getattr(original_request, "original_model", None) or original_request.model,
         role="assistant",
         content=content,
         stop_reason=stop_reason,
