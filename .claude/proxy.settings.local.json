@@ -8,6 +8,10 @@
       "WebFetch(domain:hboon.com)"
     ]
   },
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8083"
+  },
+
   "hooks": {
     "PreToolUse": [
       {
