@@ -52,6 +52,30 @@ def _load_guard_system() -> str:
 
 BASE_GUARD_SYSTEM = _load_guard_system()
 
+
+# ── Tool usage enforcement ──────────────────────────────────────────
+# Injected when ANALYSIS_ENFORCEMENT=1 AND is_analysis_request() matches.
+# Dynamically reads tools from the request — no hardcoded tool names.
+
+def _build_tool_enforcement_prompt(tools: list | None) -> str:
+    """Build a dynamic prompt from the request's actual tools. No maintenance needed."""
+    if not tools:
+        return ""
+    tool_names = []
+    for t in (tools or []):
+        name = getattr(t, "name", None) if not isinstance(t, dict) else t.get("name")
+        if name:
+            tool_names.append(name)
+    if not tool_names:
+        return ""
+    return (
+        f"[tool-guard] You have {len(tool_names)} tools available: {', '.join(tool_names)}\n"
+        "You MUST use these tools to gather real data before answering.\n"
+        "Do NOT answer from memory when a tool can provide actual information.\n"
+        "If a tool fails or is unavailable, say so explicitly — do NOT fabricate.\n"
+        "Cite sources (file:line) for factual claims."
+    )
+
 def is_ollama_base(base_url: Optional[str]) -> bool:
     return bool(base_url) and ("11434" in base_url)
 
@@ -101,6 +125,7 @@ def apply_policy_and_routing(
     building_model: str,
     preferred_provider: str,
     intent: str = "CHAT",
+    is_analysis: bool = False,
 ) -> Tuple[int, list[str]]:
     # Guardar modelo original para logging/debug
     if not getattr(request_obj, "original_model", None):
@@ -109,6 +134,13 @@ def apply_policy_and_routing(
 
     # 1) Guardrail system note (SIN system_content_cls)
     ensure_system_note(request_obj, BASE_GUARD_SYSTEM)
+
+    # 1b) Tool enforcement for analysis requests
+    if is_analysis:
+        tool_prompt = _build_tool_enforcement_prompt(getattr(request_obj, "tools", None))
+        if tool_prompt:
+            ensure_system_note(request_obj, tool_prompt)
+            print("[analysis-guard] Injected tool enforcement prompt")
 
     approx_tokens = approx_tokens_from_bytes(raw_body)
 

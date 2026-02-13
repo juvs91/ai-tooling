@@ -19,6 +19,7 @@ class RequestLog:
     latency_ms: int
     is_fallback: bool
     is_stream: bool
+    is_analysis: bool = False
     error: str | None = None
 
 
@@ -41,6 +42,7 @@ class ProxyMetrics:
         self.retry_successes = 0
         self.classifier_llm_success = 0
         self.classifier_regex_fallback = 0
+        self.analysis_enforcements = 0
 
     def record(self, log: RequestLog):
         with self._lock:
@@ -57,6 +59,8 @@ class ProxyMetrics:
                 self.provider_errors[p] = self.provider_errors.get(p, 0) + 1
             if log.is_fallback:
                 self.total_fallbacks += 1
+            if log.is_analysis:
+                self.analysis_enforcements += 1
 
     def get_stats(self) -> dict:
         with self._lock:
@@ -78,6 +82,7 @@ class ProxyMetrics:
                 "cache": {"hits": self.cache_hits, "misses": self.cache_misses},
                 "retries": {"total": self.total_retries, "successes": self.retry_successes},
                 "classifier": {"llm_success": self.classifier_llm_success, "regex_fallback": self.classifier_regex_fallback},
+                "analysis_enforcements": self.analysis_enforcements,
                 "providers": providers,
                 "intents": dict(self.intent_counts),
             }

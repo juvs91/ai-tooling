@@ -28,7 +28,7 @@ from llm.converters import convert_litellm_to_anthropic
 from llm.schemas import MessagesRequest, TokenCountRequest, TokenCountResponse, ProviderConfig
 from llm.streaming import handle_streaming
 from router.model_mapper import map_claude_alias_to_target
-from router.llm_router import classify_intent, get_last_user_text, _regex_fallback_intent
+from router.llm_router import classify_intent, get_last_user_text, _regex_fallback_intent, is_analysis_request
 from utils.metrics import metrics, RequestLog
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -69,6 +69,9 @@ CLASSIFIER_TIMEOUT = float(os.environ.get("CLASSIFIER_TIMEOUT", "3.0"))
 # Response cache config — in-memory, reduces duplicate API calls on retries/bursts
 CACHE_ENABLED = os.environ.get("CACHE_ENABLED", "0").strip() == "1"
 CACHE_TTL = int(os.environ.get("CACHE_TTL", "60"))
+
+# Analysis enforcement: inject tool-usage prompt when analysis request detected
+ANALYSIS_ENFORCEMENT = os.environ.get("ANALYSIS_ENFORCEMENT", "0").strip() == "1"
 
 # Startup validation: warn if classifier is half-configured
 if CLASSIFIER_MODEL and not CLASSIFIER_API_KEY:
@@ -192,6 +195,9 @@ async def create_message(request: MessagesRequest, raw_request: Request):
         else:
             intent = _regex_fallback_intent(last_text)
 
+        # Analysis detection (only when toggle is on)
+        is_analysis = ANALYSIS_ENFORCEMENT and is_analysis_request(last_text)
+
         # policy + routing
         try:
             apply_policy_and_routing(
@@ -207,6 +213,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 building_model=BUILDING_MODEL,
                 preferred_provider=PREFERRED_PROVIDER,
                 intent=intent,
+                is_analysis=is_analysis,
             )
         except ValueError as e:
             raise HTTPException(status_code=413, detail=str(e))
@@ -242,6 +249,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 latency_ms=elapsed_ms,
                 is_fallback=provider_used != "primary",
                 is_stream=True,
+                is_analysis=is_analysis,
             ))
             return StreamingResponse(handle_streaming(out, request, model_context_window=MODEL_CONTEXT_WINDOW), media_type="text/event-stream")
 
@@ -264,6 +272,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
             latency_ms=elapsed_ms,
             is_fallback=provider_used != "primary",
             is_stream=False,
+            is_analysis=is_analysis,
         ))
 
         return anthropic_response

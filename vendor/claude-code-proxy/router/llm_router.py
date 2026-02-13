@@ -37,6 +37,29 @@ BUILDING_RE = re.compile(
     re.IGNORECASE,
 )
 
+ANALYSIS_RE = re.compile(
+    r"\b("
+    # English
+    r"analy[zs]e?\b.{0,30}(?:code|proxy|codebase|implementation|project|system|architecture)|"
+    r"audit\b.{0,20}(?:code|proxy|codebase)|"
+    r"exhaustiv|thorough|comprehensive|"
+    r"inspect\b.{0,20}(?:code|implementation)|"
+    r"list.{0,20}(?:feature|funcionalid|capabilit|endpoint|function)|"
+    r"review.{0,10}(?:code|codebase|implementation)|"
+    # Spanish
+    r"analiz\w*.{0,30}(?:código|proxy|codebase|implementaci|proyecto|sistema|arquitectura)|"
+    r"examin\w*.{0,20}(?:código|proxy|codebase)|"
+    r"exhaustiv|lista.{0,20}funcionalidad|"
+    r"todas.{0,10}funcionalid|revis\w*.{0,10}(?:código|implementaci)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_analysis_request(text: str) -> bool:
+    """Detect if the user is requesting a code analysis / audit / exhaustive review."""
+    return bool(ANALYSIS_RE.search(text))
+
 # --------------- LLM Intent Classifier ---------------
 
 _CLASSIFY_PROMPT = (
