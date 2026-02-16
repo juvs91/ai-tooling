@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from litellm import token_counter
+
 
 _COMPRESS_PROMPT = (
     "You are a conversation summarizer. Summarize the following conversation context concisely.\n\n"
@@ -27,13 +29,38 @@ _COMPRESS_PROMPT = (
 )
 
 
-def _estimate_message_tokens(messages: list[dict]) -> int:
-    """Quick token estimate from message content lengths (chars / 4)."""
-    total = 0
-    for msg in messages:
-        content = msg.get("content", "") or ""
-        total += len(content) // 4
-    return max(1, total)
+def _count_message_tokens(messages: list[dict], model: str = "") -> int:
+    """
+    Count tokens using litellm's tokenizer (deterministic, local, no API call).
+    Falls back to chars/3 heuristic if tokenizer fails.
+    """
+    if not messages:
+        return 0
+
+    try:
+        count = token_counter(model=model, messages=messages)
+        return max(1, count)
+    except Exception as e:
+        # Fallback: chars/3 (better than chars/4 for JSON/XML-heavy content)
+        print(f"[compress] token_counter failed ({type(e).__name__}), using chars/3 fallback")
+        total = 0
+        for msg in messages:
+            content = msg.get("content", "") or ""
+            total += len(content) // 3
+        return max(1, total)
+
+
+def estimate_tools_tokens(tools: list[dict] | None) -> int:
+    """Estimate token overhead from OpenAI-format tool definitions."""
+    if not tools:
+        return 0
+    total_chars = 0
+    for tool in tools:
+        try:
+            total_chars += len(json.dumps(tool))
+        except Exception:
+            total_chars += 500  # conservative fallback per tool
+    return total_chars // 4
 
 
 def _serialize_messages_for_summary(messages: list[dict], max_chars: int = 50000) -> str:
@@ -63,6 +90,8 @@ async def compress_messages_if_needed(
     compressor_base_url: Optional[str] = None,
     keep_recent: int = 15,
     trigger_ratio: float = 0.85,
+    tools_overhead_tokens: int = 0,
+    target_model: str = "",
 ) -> tuple[list[dict], bool]:
     """
     Compress conversation if it exceeds the model's context window.
@@ -75,6 +104,8 @@ async def compress_messages_if_needed(
         compressor_base_url: Optional base URL for the compressor
         keep_recent: Number of recent messages to keep intact
         trigger_ratio: Compress when estimated tokens > ratio * window (default 0.85)
+        tools_overhead_tokens: Extra tokens from tool definitions (not in messages)
+        target_model: LiteLLM model string for the target model (used for accurate token counting)
 
     Returns:
         (messages, was_compressed) — compressed messages and whether compression happened
@@ -82,8 +113,12 @@ async def compress_messages_if_needed(
     if model_context_window <= 0 or not compressor_model or not compressor_api_key:
         return messages, False
 
-    estimated_tokens = _estimate_message_tokens(messages)
+    estimated_tokens = _count_message_tokens(messages, model=target_model) + tools_overhead_tokens
     threshold = int(trigger_ratio * model_context_window)
+
+    print(f"[compress] Check: tokens={estimated_tokens} (tools_overhead={tools_overhead_tokens}) "
+          f"threshold={threshold} (window={model_context_window} × ratio={trigger_ratio}) "
+          f"model={target_model}")
 
     if estimated_tokens <= threshold:
         return messages, False
@@ -97,6 +132,7 @@ async def compress_messages_if_needed(
 
     # Not enough messages to compress
     if len(conversation) <= keep_recent + 2:
+        print(f"[compress] Skipped: only {len(conversation)} msgs (need > {keep_recent + 2})")
         return messages, False
 
     old_messages = conversation[:-keep_recent]
@@ -104,27 +140,27 @@ async def compress_messages_if_needed(
 
     # Nothing meaningful to compress
     if len(old_messages) < 3:
+        print(f"[compress] Skipped: only {len(old_messages)} old msgs (need >= 3)")
         return messages, False
 
-    print(f"[compress] Triggered: ~{estimated_tokens} tokens > {threshold} threshold "
-          f"(window={model_context_window}). Compressing {len(old_messages)} old messages, "
-          f"keeping {len(recent_messages)} recent.")
+    print(f"[compress] Triggered: {estimated_tokens} tokens > {threshold} threshold. "
+          f"Compressing {len(old_messages)} old messages, keeping {len(recent_messages)} recent.")
 
     # Try LLM compression
     summary = await _llm_compress(old_messages, compressor_model, compressor_api_key, compressor_base_url)
 
     if summary:
         compressed = _reassemble_with_summary(system_msg, summary, recent_messages)
-        new_tokens = _estimate_message_tokens(compressed)
-        print(f"[compress] Success: {estimated_tokens} → ~{new_tokens} tokens "
-              f"(saved ~{estimated_tokens - new_tokens})")
+        new_tokens = _count_message_tokens(compressed, model=target_model)
+        print(f"[compress] Success: {estimated_tokens} → {new_tokens} tokens "
+              f"(saved {estimated_tokens - new_tokens})")
         return compressed, True
 
     # Fallback: simple trimming (discard old, keep recent)
     print(f"[compress] LLM compression failed, falling back to trimming")
     trimmed = _reassemble_trimmed(system_msg, recent_messages)
-    new_tokens = _estimate_message_tokens(trimmed)
-    print(f"[compress] Trimmed: {estimated_tokens} → ~{new_tokens} tokens")
+    new_tokens = _count_message_tokens(trimmed, model=target_model)
+    print(f"[compress] Trimmed: {estimated_tokens} → {new_tokens} tokens")
     return trimmed, True
 
 

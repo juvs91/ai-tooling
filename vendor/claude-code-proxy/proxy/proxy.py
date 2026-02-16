@@ -14,7 +14,7 @@ from litellm.exceptions import (
     ServiceUnavailableError as LiteLLMServiceUnavailableError,
     InternalServerError as LiteLLMInternalServerError,
 )
-
+from llm.compressor import estimate_tools_tokens
 from utils.utils import (
     approx_tokens_from_bytes,
     parse_allowlist,
@@ -213,6 +213,7 @@ def apply_policy_and_routing(
         request_obj.model = f"openai/{chosen}"
     else:
         # Cloud: 3-way intent routing (Z.AI, Groq, OpenAI, DeepSeek, etc.)
+        # Note: server.py already overrides CHAT→BUILDING when tools >= TOOL_UPGRADE_THRESHOLD
         current = request_obj.model
         prefix = current.rsplit("/", 1)[0] if "/" in current else "openai"
 
@@ -375,10 +376,10 @@ async def run_messages(
     """
     # --- Primary provider (uses model already set by apply_policy_and_routing) ---
     model = str(getattr(request_obj, "model", "") or "")
-    litellm_request = convert_anthropic_to_litellm(request_obj)
+    model_ctx = int(os.environ.get("MODEL_CONTEXT_WINDOW", "0"))
+    litellm_request = convert_anthropic_to_litellm(request_obj, model_context_window=model_ctx)
 
     # --- Context compression if needed ---
-    model_ctx = int(os.environ.get("MODEL_CONTEXT_WINDOW", "0"))
     if model_ctx > 0:
         comp_model = (os.environ.get("COMPRESSOR_MODEL", "").strip()
                       or os.environ.get("CLASSIFIER_MODEL", "").strip())
@@ -389,6 +390,10 @@ async def run_messages(
         keep_recent = int(os.environ.get("COMPRESSOR_KEEP_RECENT", "15"))
 
         if comp_model and comp_key:
+
+            trigger_ratio = float(os.environ.get("COMPRESSOR_TRIGGER_RATIO", "0.85"))
+            tools_overhead = estimate_tools_tokens(litellm_request.get("tools"))
+
             litellm_request["messages"], was_compressed = await compress_messages_if_needed(
                 messages=litellm_request["messages"],
                 model_context_window=model_ctx,
@@ -396,6 +401,9 @@ async def run_messages(
                 compressor_api_key=comp_key,
                 compressor_base_url=comp_base,
                 keep_recent=keep_recent,
+                trigger_ratio=trigger_ratio,
+                tools_overhead_tokens=tools_overhead,
+                target_model=model,
             )
 
     _inject_credentials(
@@ -430,7 +438,8 @@ async def run_messages(
     for provider in fallback_providers:
         try:
             request_obj.model = provider.get_litellm_model(intent)
-            fb_request = convert_anthropic_to_litellm(request_obj)
+            fb_ctx = getattr(provider, "context_window", 0) or model_ctx
+            fb_request = convert_anthropic_to_litellm(request_obj, model_context_window=fb_ctx)
             fb_request["api_key"] = provider.api_key
             if provider.base_url:
                 fb_request["api_base"] = provider.base_url

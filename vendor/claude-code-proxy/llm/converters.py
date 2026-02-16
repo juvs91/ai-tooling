@@ -7,7 +7,7 @@ import uuid
 from utils.utils import scale_tokens
 from typing import Any, Dict, List, Optional, Union
 from json_repair import repair_json
-
+import os
 from llm.schemas import MessagesRequest, MessagesResponse, Usage
 from llm.tool_prompting import is_no_tools_model, build_tool_prompt, rewrite_messages_without_tools, extract_tool_calls_from_text
 
@@ -424,7 +424,7 @@ def _convert_message_blocks(msg: Any) -> List[Dict[str, Any]]:
         return [{"role": msg.role, "content": _content_blocks_to_text(msg.content)}]
 
 
-def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str, Any]:
+def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_context_window: int = 0) -> Dict[str, Any]:
     """
     Anthropic /v1/messages -> LiteLLM(OpenAI-style) request dict.
     """
@@ -448,7 +448,26 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
         and anthropic_request.model.startswith("openai/")
         and not no_tools
     ):
-        max_tokens = min(max_tokens, 16384)
+        if model_context_window > 0:
+            # Dynamic cap: only for providers with MODEL_CONTEXT_WINDOW set (e.g. DeepSeek 64K)
+            # Z.AI, Groq, OpenAI, OpenRouter have MODEL_CONTEXT_WINDOW=0 → fall through to else
+            
+            provider_max = int(os.environ.get("MAX_OUTPUT_TOKENS", "8192"))
+            input_estimate = sum(len(str(m.get("content", ""))) for m in messages) // 4
+            tools_estimate = 0
+            if anthropic_request.tools:
+                for t in anthropic_request.tools:
+                    t_dict = t.model_dump() if hasattr(t, "model_dump") else dict(t)
+                    tools_estimate += len(json.dumps(t_dict)) // 4
+            remaining = model_context_window - input_estimate - tools_estimate
+            safe_remaining = int(remaining * 0.85)  # 15% margin for overhead
+            dynamic_cap = max(1024, min(safe_remaining, provider_max))
+            max_tokens = min(max_tokens, dynamic_cap)
+            print(f"[tokens] input~{input_estimate} tools~{tools_estimate} "
+                  f"remaining~{remaining} cap={dynamic_cap} max_tokens={max_tokens}")
+        else:
+            # Providers WITHOUT MODEL_CONTEXT_WINDOW: identical to current behavior
+            max_tokens = min(max_tokens, 16384)
 
     if no_tools:
         print(f"[no-tools] max_completion_tokens={max_tokens} (uncapped, reasoning model)")
@@ -614,12 +633,22 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
 
     # finish_reason -> stop_reason
     # Per Anthropic docs: stop_reason MUST be "tool_use" when tool_use blocks are present
+    # BUT if finish_reason=length and tool JSON is corrupted, use max_tokens so CC doesn't execute garbage
     has_tool_use = any(
         (c.get("type") if isinstance(c, dict) else getattr(c, "type", None)) == "tool_use"
         for c in content
     )
     if finish_reason == "length":
-        stop_reason = "max_tokens"
+        if has_tool_use:
+            # Validate all tool_use blocks have parseable input (dict, not raw string)
+            all_valid = all(
+                isinstance(c.get("input") if isinstance(c, dict) else getattr(c, "input", None), dict)
+                for c in content
+                if (c.get("type") if isinstance(c, dict) else getattr(c, "type", None)) == "tool_use"
+            )
+            stop_reason = "tool_use" if all_valid else "max_tokens"
+        else:
+            stop_reason = "max_tokens"
     elif finish_reason == "tool_calls" or has_tool_use:
         stop_reason = "tool_use"
     else:

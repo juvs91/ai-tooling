@@ -92,8 +92,9 @@ def build_tool_prompt(tools: list[dict]) -> str:
         "</input>\n"
         "</tool_call>\n\n"
         "RULES:\n"
-        "- CRITICAL: You MUST use exactly <input> and </input> tags. Do NOT use <textarea>, <arguments>, <params>, or any other tag name.\n"
-        "- The <input> must contain valid JSON matching the tool's parameters schema.\n"
+        '- CRITICAL: You MUST use exactly <input> and </input> tags. Do NOT use <textarea>, <arguments>, <params>, or any other tag name.\n'
+        '- CRITICAL: Use DOUBLE QUOTES for the name attribute: name="ToolName" (NOT name=\'ToolName\').\n'
+        '- CRITICAL: The <input> must contain valid JSON (double quotes for keys and string values, NOT single quotes).\n'
         "- You can include text before and after tool calls.\n"
         "- You can make multiple tool calls in a single response.\n"
         "- Always use the exact tool name as listed below.\n"
@@ -208,16 +209,39 @@ def rewrite_messages_without_tools(messages: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 # Primary regex: matches known inner-tag variants models may use
+# Accept both single and double quotes for name= attribute (deepseek-reasoner uses single quotes)
 _INNER_TAG = r"(?:input|textarea|arguments|params|json|content|parameters)"
+_NAME_ATTR = r"""name=["']([^"']+)["']"""
 _TOOL_CALL_RE = re.compile(
-    rf'<tool_call\s+name="([^"]+)">\s*<{_INNER_TAG}>([\s\S]*?)</{_INNER_TAG}>\s*</tool_call>',
+    rf'<tool_call\s+{_NAME_ATTR}\s*>\s*<{_INNER_TAG}>([\s\S]*?)</{_INNER_TAG}>\s*</tool_call>',
     re.DOTALL,
 )
 # Fallback regex: matches any single XML tag wrapping the content
 _TOOL_CALL_FALLBACK_RE = re.compile(
-    r'<tool_call\s+name="([^"]+)">\s*<(\w+)>([\s\S]*?)</\2>\s*</tool_call>',
+    rf'<tool_call\s+{_NAME_ATTR}\s*>\s*<(\w+)>([\s\S]*?)</\2>\s*</tool_call>',
     re.DOTALL,
 )
+# Last-resort regex: NO inner tags — JSON directly inside <tool_call>
+# Handles: <tool_call name="Read">{"file_path": "/path"}</tool_call>
+_TOOL_CALL_BARE_RE = re.compile(
+    rf'<tool_call\s+{_NAME_ATTR}\s*>\s*([\s\S]*?)\s*</tool_call>',
+    re.DOTALL,
+)
+
+
+def _strip_inner_xml_tags(raw: str) -> str:
+    """
+    Strip wrapping XML inner tags if present.
+    Handles: <input>{json}</input> → {json}
+             <textarea>{json}</textarea> → {json}
+             {json} → {json} (no-op)
+    """
+    stripped = raw.strip()
+    # Try to remove a matched pair of XML tags wrapping the content
+    tag_match = re.match(r'^<(\w+)>([\s\S]*)</\1>$', stripped, re.DOTALL)
+    if tag_match:
+        return tag_match.group(2).strip()
+    return stripped
 
 
 def _safe_parse_tool_input(raw_input: str, tool_name: str) -> dict:
@@ -228,6 +252,9 @@ def _safe_parse_tool_input(raw_input: str, tool_name: str) -> dict:
     raw = raw_input.strip()
     if not raw:
         return {}
+
+    # 0) Strip any wrapping XML tags (e.g. <input>...</input>)
+    raw = _strip_inner_xml_tags(raw)
 
     # 1) Direct JSON parse
     try:
@@ -301,13 +328,30 @@ def extract_tool_calls_from_text(text: str) -> tuple[list[dict], str]:
                     "input": parsed_input,
                 })
             used_re = _TOOL_CALL_FALLBACK_RE
+
+        # 3rd fallback: bare regex (no inner tags at all)
+        # Also handles tool calls with NO input (e.g. EnterPlanMode, ExitPlanMode)
+        if not tool_blocks and "<tool_call" in text:
+            for match in _TOOL_CALL_BARE_RE.finditer(text):
+                name = match.group(1).strip()
+                raw_content = match.group(2).strip()
+                print(f"[no-tools] BARE regex match for tool '{name}' (no inner tags, content={len(raw_content)} chars)")
+                parsed_input = _safe_parse_tool_input(raw_content, name)
+                tool_blocks.append({
+                    "type": "tool_use",
+                    "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                    "name": name,
+                    "input": parsed_input,
+                })
+            used_re = _TOOL_CALL_BARE_RE
+
     except Exception as e:
         print(f"[no-tools] Error extracting tool calls: {e}")
         return [], text
 
     if not tool_blocks:
         if "<tool_call" in text:
-            print(f"[no-tools] WARNING: Found <tool_call> in text but could not parse. First 300 chars: {text[:300]}")
+            print(f"[no-tools] WARNING: Found <tool_call> in text but ALL regexes failed. First 500 chars: {text[:500]}")
         return [], text
 
     remaining = used_re.sub("", text).strip()
@@ -318,6 +362,108 @@ def extract_tool_calls_from_text(text: str) -> tuple[list[dict], str]:
 # 5. Recovery for truncated tool calls
 # ---------------------------------------------------------------------------
 
+# Regex to extract partial tool call: name + whatever JSON we got
+_PARTIAL_TOOL_RE = re.compile(
+    r'<tool_call\s+' + _NAME_ATTR + r'\s*>\s*<' + _INNER_TAG + r'>\s*([\s\S]*)',
+    re.DOTALL,
+)
+
+
+def _get_tool_required_fields(tool_name: str, tools: list | None) -> set[str]:
+    """Get required fields from a tool's input_schema."""
+    if not tools:
+        return set()
+    for t in tools:
+        name = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
+        if name == tool_name:
+            schema = getattr(t, "input_schema", None) or (t.get("input_schema") if isinstance(t, dict) else None)
+            if isinstance(schema, dict):
+                return set(schema.get("required", []))
+    return set()
+
+
+def recover_truncated_deterministic(
+    partial_xml: str,
+    tools: list | None = None,
+) -> list[dict] | None:
+    """
+    Attempt to recover a truncated <tool_call> XML deterministically (no LLM).
+
+    Strategy:
+      1. Extract tool name from partial XML
+      2. Extract whatever JSON is there (even truncated)
+      3. Use json_repair to close brackets/braces
+      4. Validate that required fields are present
+      5. Return tool_use dict if valid, None otherwise
+
+    This is FAST, FREE, and DETERMINISTIC — no API call needed.
+    """
+    if not partial_xml:
+        return None
+
+    match = _PARTIAL_TOOL_RE.search(partial_xml)
+    if not match:
+        return None
+
+    tool_name = match.group(1).strip()
+    raw_json = match.group(2).strip()
+
+    if not raw_json:
+        return None
+
+    # Strip any trailing XML tags that got caught
+    for tag in ["</input>", "</tool_call>", "</textarea>", "</arguments>", "</params>"]:
+        raw_json = raw_json.split(tag)[0]
+
+    # Try json_repair on the truncated JSON
+    parsed = None
+    try:
+        parsed = json.loads(raw_json)
+    except json.JSONDecodeError:
+        try:
+            repaired = repair_json(raw_json, return_objects=True)
+            if isinstance(repaired, dict):
+                parsed = repaired
+                print(f"[no-tools] Deterministic repair succeeded for '{tool_name}'")
+        except Exception:
+            pass
+
+    if not isinstance(parsed, dict):
+        print(f"[no-tools] Deterministic repair failed for '{tool_name}' ({len(raw_json)} chars of JSON)")
+        return None
+
+    # Validate: check that required fields are present
+    required = _get_tool_required_fields(tool_name, tools)
+    missing = required - set(parsed.keys())
+    if missing:
+        print(f"[no-tools] Deterministic repair for '{tool_name}' missing required fields: {missing}")
+        return None
+
+    # Check for obviously truncated string values (value ends with incomplete content)
+    # This catches Write/Edit where "content" got cut mid-file
+    for key, value in parsed.items():
+        if isinstance(value, str) and len(value) > 200:
+            # If the raw JSON was truncated and this is a large string value,
+            # json_repair may have closed quotes prematurely — the value is garbage
+            raw_value_start = f'"{key}"'
+            if raw_value_start in raw_json:
+                # Check if the value's closing quote is from repair (not original)
+                key_pos = raw_json.index(raw_value_start)
+                after_key = raw_json[key_pos:]
+                # If the raw JSON doesn't have the full value, it was truncated
+                if value not in after_key and len(value) > 500:
+                    print(f"[no-tools] Deterministic repair for '{tool_name}': field '{key}' appears truncated ({len(value)} chars), rejecting")
+                    return None
+
+    print(f"[no-tools] Deterministic recovery OK for '{tool_name}': keys={list(parsed.keys())}")
+    return [{
+        "type": "tool_use",
+        "id": f"toolu_{uuid.uuid4().hex[:24]}",
+        "name": tool_name,
+        "input": parsed,
+    }]
+
+
 async def recover_incomplete_tool_call(
     partial_xml: str,
     tools: list | None,
@@ -327,19 +473,32 @@ async def recover_incomplete_tool_call(
     timeout_s: float = 3.0,
 ) -> list[dict] | None:
     """
-    Attempt to reconstruct truncated <tool_call> XML via a compact LLM call.
+    Attempt to reconstruct truncated <tool_call> XML.
+
+    Strategy (ordered by reliability):
+      1. Deterministic: json_repair + schema validation (instant, free)
+      2. LLM retry: ask classifier model to complete the XML (slow, paid)
+
     Returns list of tool_use dicts on success, None on failure.
-    Uses the classifier model (deepseek-chat) for speed and cost.
     """
-    if not partial_xml or not api_key:
+    if not partial_xml:
         return None
 
     # Allow disabling recovery via env var
     if os.environ.get("DISABLE_TOOL_RECOVERY", "").strip() == "1":
         return None
 
+    # --- Step 1: Deterministic recovery (no LLM) ---
+    deterministic = recover_truncated_deterministic(partial_xml, tools)
+    if deterministic:
+        return deterministic
+
+    # --- Step 2: LLM recovery (fallback) ---
+    if not api_key:
+        return None
+
     # Extract tool name from partial XML if possible
-    name_match = re.search(r'<tool_call\s+name="([^"]+)"', partial_xml)
+    name_match = re.search(r'<tool_call\s+' + _NAME_ATTR, partial_xml)
     tool_name = name_match.group(1) if name_match else None
 
     # Find tool definition for context
@@ -355,10 +514,12 @@ async def recover_incomplete_tool_call(
     prompt = (
         "Complete this truncated XML tool call. "
         "Respond ONLY with the complete <tool_call> XML, nothing else.\n\n"
-        f"Partial XML:\n{partial_xml}\n\n"
+        f"Partial XML:\n{partial_xml[:2000]}\n\n"
     )
     if tool_def:
         prompt += f"Tool schema:\n{tool_def}\n"
+
+    max_recovery_tokens = int(os.environ.get("RECOVERY_MAX_TOKENS", "2048"))
 
     try:
         import asyncio
@@ -367,7 +528,7 @@ async def recover_incomplete_tool_call(
             litellm.acompletion(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=512,
+                max_tokens=max_recovery_tokens,
                 temperature=0,
                 api_key=api_key,
                 api_base=api_base,
@@ -377,13 +538,13 @@ async def recover_incomplete_tool_call(
         content = response.choices[0].message.content or ""
         tool_blocks, _ = extract_tool_calls_from_text(content)
         if tool_blocks:
-            print(f"[no-tools] Recovered {len(tool_blocks)} tool call(s) via retry")
+            print(f"[no-tools] Recovered {len(tool_blocks)} tool call(s) via LLM retry")
             return tool_blocks
-        print("[no-tools] Recovery response had no valid tool calls")
+        print("[no-tools] LLM recovery response had no valid tool calls")
     except asyncio.TimeoutError:
-        print(f"[no-tools] Tool call recovery timed out ({timeout_s}s)")
+        print(f"[no-tools] LLM tool call recovery timed out ({timeout_s}s)")
     except Exception as e:
-        print(f"[no-tools] Tool call recovery failed: {type(e).__name__}: {e}")
+        print(f"[no-tools] LLM tool call recovery failed: {type(e).__name__}: {e}")
 
     return None
 
@@ -443,29 +604,62 @@ class XmlToolBuffer:
 
     def _try_extract_text(self) -> dict | None:
         """Try to extract text before a <tool_call> tag, or return None if need more data."""
-        idx = self.buffer.find(_TOOL_CALL_OPEN)
-        if idx == -1:
-            safe_end = self._safe_text_end()
-            if safe_end == 0:
-                return None
-            text = self.buffer[:safe_end]
-            self.buffer = self.buffer[safe_end:]
-            return {"type": "text", "text": text}
+        search_start = 0
+        while True:
+            idx = self.buffer.find(_TOOL_CALL_OPEN, search_start)
+            if idx == -1:
+                safe_end = self._safe_text_end()
+                if safe_end == 0:
+                    return None
+                text = self.buffer[:safe_end]
+                self.buffer = self.buffer[safe_end:]
+                return {"type": "text", "text": text}
 
-        # Found <tool_call
-        self.in_tool = True
-        if idx > 0:
-            text = self.buffer[:idx]
-            self.buffer = self.buffer[idx:]
-            return {"type": "text", "text": text}
-        # No text before — go directly to tool extraction
-        return self._try_extract_tool()
+            # Validate: real XML tag must be followed by whitespace or >
+            # Rejects regex patterns like <tool_call(?:, <tool_call\s+, etc.
+            end_of_tag = idx + len(_TOOL_CALL_OPEN)
+            if end_of_tag >= len(self.buffer):
+                # Buffer ends at "<tool_call" — need more data to decide
+                if idx > 0:
+                    text = self.buffer[:idx]
+                    self.buffer = self.buffer[idx:]
+                    return {"type": "text", "text": text}
+                return None
+
+            next_char = self.buffer[end_of_tag]
+            if next_char not in (' ', '\t', '\n', '\r', '>'):
+                # Not valid XML tag — regex pattern or other false positive
+                search_start = end_of_tag
+                continue
+
+            # Skip false positives: <tool_call inside backtick-quoted text (documentation)
+            if self._is_backtick_quoted(idx):
+                search_start = end_of_tag
+                continue
+
+            # Found real <tool_call
+            self.in_tool = True
+            if idx > 0:
+                text = self.buffer[:idx]
+                self.buffer = self.buffer[idx:]
+                return {"type": "text", "text": text}
+            # No text before — go directly to tool extraction
+            return self._try_extract_tool()
+
+    _MAX_TOOL_BUFFER = 16_000  # Real tool calls shouldn't exceed this
 
     def _try_extract_tool(self) -> dict | None:
         """Try to extract a complete </tool_call> block, or return None if incomplete."""
         end_tag = "</tool_call>"
         end_idx = self.buffer.find(end_tag)
         if end_idx == -1:
+            # Safety: if buffer grows too large without closing tag, it's a false positive
+            if len(self.buffer) > self._MAX_TOOL_BUFFER:
+                print(f"[xml-buffer] Buffer overflow ({len(self.buffer)} chars > {self._MAX_TOOL_BUFFER}) — false positive <tool_call>, emitting as text")
+                text = self.buffer
+                self.buffer = ""
+                self.in_tool = False
+                return {"type": "text", "text": text}
             return None
         end_idx += len(end_tag)
         tool_xml = self.buffer[:end_idx]
@@ -473,28 +667,51 @@ class XmlToolBuffer:
         self.in_tool = False
         return self._parse_tool_xml(tool_xml)
 
+    def _is_backtick_quoted(self, idx: int) -> bool:
+        """Check if <tool_call at position idx is inside backtick-quoted text."""
+        # Check for backtick immediately before
+        if idx > 0 and self.buffer[idx - 1] == '`':
+            return True
+        # Check for triple-backtick code block in nearby prefix
+        prefix = self.buffer[max(0, idx - 10):idx]
+        if '```' in prefix:
+            return True
+        return False
+
     def _parse_tool_xml(self, xml: str) -> dict:
         """Parse a complete <tool_call> XML string. Falls back to text on parse failure."""
+        print(f"[xml-buffer] _parse_tool_xml: {len(xml)} chars. First 200: {xml[:200]}", flush=True)
+
+        # 1) Primary: known inner tags (<input>, <textarea>, etc.)
         match = _TOOL_CALL_RE.search(xml)
         if match:
             name = match.group(1).strip()
             raw_input = match.group(2)
             parsed = _safe_parse_tool_input(raw_input, name)
-            print(f"[xml-buffer] Parsed tool_call: name={name} input_keys={list(parsed.keys())}")
+            print(f"[xml-buffer] PRIMARY match: name={name} keys={list(parsed.keys())}")
             return {"type": "tool_call", "name": name, "input": parsed}
 
-        # Fallback: try permissive regex for unknown inner tags
+        # 2) Fallback: any matched pair of XML tags
         fallback_match = _TOOL_CALL_FALLBACK_RE.search(xml)
         if fallback_match:
             name = fallback_match.group(1).strip()
             inner_tag = fallback_match.group(2)
             raw_input = fallback_match.group(3)
-            print(f"[no-tools] WARNING: Streaming - model used <{inner_tag}> instead of <input> for tool '{name}'")
+            print(f"[xml-buffer] FALLBACK match ({inner_tag}): name={name}")
             parsed = _safe_parse_tool_input(raw_input, name)
-            print(f"[xml-buffer] Parsed tool_call (fallback): name={name} input_keys={list(parsed.keys())}")
             return {"type": "tool_call", "name": name, "input": parsed}
 
-        print(f"[no-tools] WARNING: Could not parse tool_call XML ({len(xml)} chars). First 300: {xml[:300]}")
+        # 3) Bare: no inner tags, JSON directly inside <tool_call>
+        # Also handles tool calls with NO input (e.g. EnterPlanMode, ExitPlanMode)
+        bare_match = _TOOL_CALL_BARE_RE.search(xml)
+        if bare_match:
+            name = bare_match.group(1).strip()
+            raw_content = bare_match.group(2).strip()
+            print(f"[xml-buffer] BARE match (no inner tags): name={name} content={len(raw_content)} chars")
+            parsed = _safe_parse_tool_input(raw_content, name)
+            return {"type": "tool_call", "name": name, "input": parsed}
+
+        print(f"[xml-buffer] FAILED all regexes ({len(xml)} chars). Full XML: {xml[:500]}", flush=True)
         return {"type": "text", "text": xml}
 
     def _safe_text_end(self) -> int:

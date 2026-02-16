@@ -7,7 +7,67 @@ import uuid
 from utils.utils import scale_tokens
 from json_repair import repair_json
 import os
-from llm.tool_prompting import is_no_tools_model, XmlToolBuffer, recover_incomplete_tool_call
+from llm.tool_prompting import is_no_tools_model, XmlToolBuffer, recover_incomplete_tool_call, extract_tool_calls_from_text
+
+
+def _close_json_brackets(text: str) -> str:
+    """Compute minimal suffix to close all open brackets/braces/strings in JSON text."""
+    in_string = False
+    escape_next = False
+    stack = []
+
+    for char in text:
+        if escape_next:
+            escape_next = False
+            continue
+        if char == '\\' and in_string:
+            escape_next = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if char in ('{', '['):
+                stack.append(char)
+            elif char == '}' and stack and stack[-1] == '{':
+                stack.pop()
+            elif char == ']' and stack and stack[-1] == '[':
+                stack.pop()
+
+    suffix = ''
+    if in_string:
+        suffix += '"'
+    for bracket in reversed(stack):
+        suffix += '}' if bracket == '{' else ']'
+    return suffix
+
+
+def _has_truncation_artifacts(json_str: str) -> bool:
+    """Detect if repaired JSON has truncation artifacts (all-empty string values in objects).
+
+    When json_repair closes truncated strings, it produces "" for all values.
+    A single empty string might be intentional, but ALL strings empty = truncated.
+    """
+    try:
+        parsed = json.loads(json_str)
+    except Exception:
+        return True
+
+    def _check(obj) -> bool:
+        if isinstance(obj, dict):
+            string_vals = [v for v in obj.values() if isinstance(v, str)]
+            if len(string_vals) >= 2 and all(v == '' for v in string_vals):
+                return True
+            for v in obj.values():
+                if isinstance(v, (dict, list)) and _check(v):
+                    return True
+        elif isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, (dict, list)) and _check(item):
+                    return True
+        return False
+
+    return _check(parsed)
 
 
 def _compute_repair_suffix(accumulated: str, tool_index: int) -> str | None:
@@ -18,20 +78,52 @@ def _compute_repair_suffix(accumulated: str, tool_index: int) -> str | None:
         json.loads(accumulated)
         return None  # already valid
     except json.JSONDecodeError:
-        try:
-            repaired_str = repair_json(accumulated)
-            json.loads(repaired_str)  # validate repair
+        pass
+
+    # Strategy 1: json_repair library (only safe if it only appends to our prefix)
+    try:
+        repaired_str = repair_json(accumulated)
+        # CRITICAL: repair_json may MODIFY middle characters (e.g. adding closing quotes).
+        # Only use suffix approach if repaired string starts with our exact accumulated text.
+        if repaired_str.startswith(accumulated):
             suffix = repaired_str[len(accumulated):]
             if suffix:
-                print(f"[json-repair] Streaming: appended repair suffix for tool index {tool_index}")
+                json.loads(accumulated + suffix)  # validate
+                print(f"[json-repair] Streaming: library suffix for tool index {tool_index} ({len(suffix)} chars)")
                 return suffix
+    except Exception:
+        pass
+
+    # Strategy 2: Manual bracket/brace/string closer (always safe — only appends)
+    suffix = _close_json_brackets(accumulated)
+    if suffix:
+        try:
+            json.loads(accumulated + suffix)
+            print(f"[json-repair] Streaming: bracket-close suffix for tool index {tool_index} ({len(suffix)} chars)")
+            return suffix
         except Exception:
-            print(f"[json-repair] Streaming: repair failed for tool index {tool_index}")
+            pass
+
+    print(f"[json-repair] Streaming: ALL repair strategies failed for tool index {tool_index} ({len(accumulated)} chars)")
     return None
+
+
+def _warn_empty_tool_values(name: str, input_dict: dict) -> None:
+    """Log a warning if tool arguments contain suspiciously empty values (model quality issue)."""
+    if name == "TodoWrite":
+        todos = input_dict.get("todos", [])
+        if todos and isinstance(todos, list):
+            empty_count = sum(1 for t in todos if isinstance(t, dict) and t.get("content", "") == "")
+            if empty_count > 0:
+                print(f"[quality] WARNING: TodoWrite has {empty_count}/{len(todos)} todos with empty 'content' — model likely truncated or hallucinated empty values")
+    elif name == "Write":
+        if input_dict.get("content", None) == "":
+            print(f"[quality] WARNING: Write tool has empty 'content' — model likely truncated")
 
 
 def _emit_tool_use_block(name: str, input_dict: dict, block_index: int) -> list[str]:
     """Generate SSE events for a single tool_use block (matches Anthropic SSE spec)."""
+    _warn_empty_tool_values(name, input_dict)
     tool_id = f"toolu_{uuid.uuid4().hex[:24]}"
     args_json = json.dumps(input_dict, ensure_ascii=False)
     return [
@@ -87,6 +179,7 @@ async def handle_streaming(response_generator, original_request, model_context_w
         xml_tool_buffer = XmlToolBuffer() if no_tools_mode else None
         has_xml_tool_calls = False
         reasoning_buffer = ""  # Buffer reasoning_content in no-tools mode; emit only if no tool calls
+        print(f"[streaming] INIT: model={original_request.model} no_tools_mode={no_tools_mode} xml_buffer={'YES' if xml_tool_buffer else 'NO'}", flush=True)
 
         async for chunk in response_generator:
             try:
@@ -134,7 +227,7 @@ async def handle_streaming(response_generator, original_request, model_context_w
                                     yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
                                 # Emit tool_use block
                                 last_tool_index += 1
-                                print(f"[streaming] XML tool_use emitted: name={segment['name']} index={last_tool_index}")
+                                print(f"[streaming] XML tool_use emitted: name={segment['name']} index={last_tool_index}", flush=True)
                                 for event in _emit_tool_use_block(segment["name"], segment["input"], last_tool_index):
                                     yield event
                     else:
@@ -262,19 +355,72 @@ async def handle_streaming(response_generator, original_request, model_context_w
                                 for event in _emit_tool_use_block(segment["name"], segment["input"], last_tool_index):
                                     yield event
 
-                    # close tool blocks (with JSON repair attempt)
+                    # close tool blocks (with JSON repair + validation)
+                    valid_tool_blocks = 0
                     if tool_index is not None:
                         for i in range(1, last_tool_index + 1):
-                            suffix = _compute_repair_suffix(tool_args_buffer.get(i, ""), i)
+                            accumulated = tool_args_buffer.get(i, "")
+                            is_valid = False
+                            was_repaired = False
+
+                            suffix = _compute_repair_suffix(accumulated, i)
                             if suffix:
                                 yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': i, 'delta': {'type': 'input_json_delta', 'partial_json': suffix}})}\n\n"
+                                accumulated += suffix
+                                was_repaired = True
+
+                            # Validate final JSON
+                            if accumulated:
+                                try:
+                                    json.loads(accumulated)
+                                    # Truncation artifact check: if we repaired AND response was
+                                    # truncated (length), check for empty string values — sign that
+                                    # json_repair closed strings prematurely (e.g. TodoWrite empty bullets)
+                                    if was_repaired and finish_reason == "length" and _has_truncation_artifacts(accumulated):
+                                        print(f"[streaming] WARNING: tool index {i} repair produced truncation artifacts (empty values), marking invalid")
+                                        is_valid = False
+                                    else:
+                                        is_valid = True
+                                except json.JSONDecodeError:
+                                    print(f"[streaming] WARNING: tool index {i} has irrecoverable JSON ({len(accumulated)} chars)")
+                            else:
+                                is_valid = True  # empty args = valid {}
+
                             yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': i})}\n\n"
+                            if is_valid:
+                                valid_tool_blocks += 1
 
                     # Emit buffered reasoning ONLY when no tool calls (reasoning + tools crashes CC)
                     if reasoning_buffer and not has_xml_tool_calls and tool_index is None:
-                        if not text_block_closed:
-                            text_sent = True
-                            yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': reasoning_buffer}})}\n\n"
+                        # deepseek-reasoner sometimes puts <tool_call> XML in reasoning_content instead of content
+                        if "<tool_call" in reasoning_buffer:
+                            reasoning_tools, reasoning_text = extract_tool_calls_from_text(reasoning_buffer)
+                            if reasoning_tools:
+                                has_xml_tool_calls = True
+                                print(f"[streaming] Found {len(reasoning_tools)} tool call(s) in reasoning_content!", flush=True)
+                                # Emit remaining text
+                                if reasoning_text.strip() and not text_block_closed:
+                                    text_sent = True
+                                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': reasoning_text}})}\n\n"
+                                # Close text block before tool_use
+                                if not text_block_closed:
+                                    text_block_closed = True
+                                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+                                # Emit tool_use blocks
+                                for tc in reasoning_tools:
+                                    last_tool_index += 1
+                                    print(f"[streaming] XML tool_use from reasoning: name={tc['name']} index={last_tool_index}", flush=True)
+                                    for event in _emit_tool_use_block(tc["name"], tc["input"], last_tool_index):
+                                        yield event
+                            else:
+                                # <tool_call> found but regex didn't match — emit as text
+                                if not text_block_closed:
+                                    text_sent = True
+                                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': reasoning_buffer}})}\n\n"
+                        else:
+                            if not text_block_closed:
+                                text_sent = True
+                                yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': reasoning_buffer}})}\n\n"
                     elif reasoning_buffer and (has_xml_tool_calls or tool_index is not None):
                         print(f"[streaming] Suppressed {len(reasoning_buffer)} chars of reasoning_content (tool calls present)")
 
@@ -284,13 +430,20 @@ async def handle_streaming(response_generator, original_request, model_context_w
                             yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': accumulated_text}})}\n\n"
                         yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
 
+                    # stop_reason: tool_use ONLY if all native tool blocks have valid JSON
+                    # Per Anthropic spec: stop_reason must be "tool_use" when tool_use blocks present
+                    # BUT if finish_reason=length and JSON is corrupted, use max_tokens so CC doesn't execute garbage
+                    total_native_tools = last_tool_index if tool_index is not None else 0
                     stop_reason = "end_turn"
                     if finish_reason == "length":
-                        stop_reason = "max_tokens"
+                        if (tool_index is not None or has_xml_tool_calls) and valid_tool_blocks == total_native_tools:
+                            stop_reason = "tool_use"  # tools are valid, CC can execute them
+                        else:
+                            stop_reason = "max_tokens"  # corrupted or no tools
                     elif finish_reason == "tool_calls" or has_xml_tool_calls or tool_index is not None:
                         stop_reason = "tool_use"
 
-                    print(f"[streaming] CLOSE: stop_reason={stop_reason} finish_reason={finish_reason} tool_index={tool_index} has_xml={has_xml_tool_calls} no_tools={no_tools_mode}")
+                    print(f"[streaming] CLOSE: stop_reason={stop_reason} finish_reason={finish_reason} tool_index={tool_index} has_xml={has_xml_tool_calls} no_tools={no_tools_mode}", flush=True)
                     yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None}, 'usage': {'output_tokens': scale_tokens(output_tokens, model_context_window)}})}\n\n"
                     yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
                     yield "data: [DONE]\n\n"
@@ -347,8 +500,28 @@ async def handle_streaming(response_generator, original_request, model_context_w
 
             # Emit buffered reasoning ONLY when no tool calls (fallback close path)
             if reasoning_buffer and not has_xml_tool_calls and tool_index is None:
-                if not text_block_closed:
-                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': reasoning_buffer}})}\n\n"
+                # deepseek-reasoner sometimes puts <tool_call> XML in reasoning_content instead of content
+                if "<tool_call" in reasoning_buffer:
+                    reasoning_tools, reasoning_text = extract_tool_calls_from_text(reasoning_buffer)
+                    if reasoning_tools:
+                        has_xml_tool_calls = True
+                        print(f"[streaming] Found {len(reasoning_tools)} tool call(s) in reasoning_content (fallback)!", flush=True)
+                        if reasoning_text.strip() and not text_block_closed:
+                            yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': reasoning_text}})}\n\n"
+                        if not text_block_closed:
+                            text_block_closed = True
+                            yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+                        for tc in reasoning_tools:
+                            last_tool_index += 1
+                            print(f"[streaming] XML tool_use from reasoning (fallback): name={tc['name']} index={last_tool_index}", flush=True)
+                            for event in _emit_tool_use_block(tc["name"], tc["input"], last_tool_index):
+                                yield event
+                    else:
+                        if not text_block_closed:
+                            yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': reasoning_buffer}})}\n\n"
+                else:
+                    if not text_block_closed:
+                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': reasoning_buffer}})}\n\n"
             elif reasoning_buffer and (has_xml_tool_calls or tool_index is not None):
                 print(f"[streaming] Suppressed {len(reasoning_buffer)} chars of reasoning_content in fallback close (tool calls present)")
 
@@ -356,13 +529,13 @@ async def handle_streaming(response_generator, original_request, model_context_w
                 yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
 
             fallback_stop = "tool_use" if (has_xml_tool_calls or tool_index is not None) else "end_turn"
-            print(f"[streaming] FALLBACK CLOSE: stop_reason={fallback_stop} tool_index={tool_index} has_xml={has_xml_tool_calls} no_tools={no_tools_mode}")
+            print(f"[streaming] FALLBACK CLOSE: stop_reason={fallback_stop} tool_index={tool_index} has_xml={has_xml_tool_calls} no_tools={no_tools_mode}", flush=True)
             yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': fallback_stop, 'stop_sequence': None}, 'usage': {'output_tokens': scale_tokens(output_tokens, model_context_window)}})}\n\n"
             yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
             yield "data: [DONE]\n\n"
 
     except Exception as e:
-        print(f"[streaming] FATAL stream error: {type(e).__name__}: {e}")
+        print(f"[streaming] FATAL stream error: {type(e).__name__}: {e}", flush=True)
         yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': 0}})}\n\n"
         yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
         yield "data: [DONE]\n\n"
