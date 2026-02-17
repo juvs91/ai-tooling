@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Union
 from json_repair import repair_json
 import os
 from llm.schemas import MessagesRequest, MessagesResponse, Usage
-from llm.tool_prompting import is_no_tools_model, build_tool_prompt, rewrite_messages_without_tools, extract_tool_calls_from_text
+from llm.tool_prompting import is_no_tools_model, build_tool_prompt, rewrite_messages_without_tools, extract_tool_calls_from_text, _build_valid_tool_names
 
 
 # ── Shared helpers ────────────────────────────────────────────────────
@@ -616,7 +616,9 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
 
     # For no-tools models: extract XML tool calls from text response
     if is_no_tools_model(original_request.model) and content_text:
-        xml_tool_blocks, clean_text = extract_tool_calls_from_text(content_text)
+        request_tools = getattr(original_request, "tools", None)
+        valid_names = _build_valid_tool_names(request_tools)
+        xml_tool_blocks, clean_text = extract_tool_calls_from_text(content_text, valid_tool_names=valid_names, tools=request_tools)
         if xml_tool_blocks:
             # Rebuild content: clean text + tool_use blocks
             # OMIT reasoning_content when tool calls present — 5-15K tokens of reasoning

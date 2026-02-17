@@ -195,12 +195,13 @@ async def create_message(request: MessagesRequest, raw_request: Request):
         else:
             intent = _regex_fallback_intent(last_text)
 
-        # Override: many tools = agentic behavior, never downgrade to CHAT
+        # Override: many tools = agentic behavior, never downgrade to CHAT/PLANNING
         tools_count = len(getattr(request, "tools", None) or [])
         tool_threshold = int(os.environ.get("TOOL_UPGRADE_THRESHOLD", "5"))
-        if intent == "CHAT" and tools_count >= tool_threshold:
+        if intent in ("CHAT", "PLANNING") and tools_count >= tool_threshold:
+            original_intent = intent
             intent = "BUILDING"
-            print(f"[classify] CHAT→BUILDING override: {tools_count} tools >= {tool_threshold}")
+            print(f"[classify] {original_intent}→BUILDING override: {tools_count} tools >= {tool_threshold}")
 
         # Analysis detection (only when toggle is on)
         is_analysis = ANALYSIS_ENFORCEMENT and is_analysis_request(last_text)

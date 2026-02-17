@@ -20,6 +20,31 @@ from json_repair import repair_json
 
 
 # ---------------------------------------------------------------------------
+# 0. Tool name validation helpers
+# ---------------------------------------------------------------------------
+
+def _build_valid_tool_names(tools: list | None) -> set[str]:
+    """Extract set of valid tool names from request tools."""
+    if not tools:
+        return set()
+    names = set()
+    for t in tools:
+        name = getattr(t, "name", None) if not isinstance(t, dict) else t.get("name")
+        if isinstance(name, str) and name.strip():
+            names.add(name.strip())
+    return names
+
+
+def validate_tool_name(name: str, valid_names: set[str]) -> bool:
+    """Check if tool name is in allowlist. Returns True when no allowlist (backward compat)."""
+    if not valid_names:
+        return True
+    if not name or not isinstance(name, str):
+        return False
+    return name.strip() in valid_names
+
+
+# ---------------------------------------------------------------------------
 # 1. Model detection
 # ---------------------------------------------------------------------------
 
@@ -53,12 +78,13 @@ def is_no_tools_model(model: str) -> bool:
 # 2. Tool prompt builder
 # ---------------------------------------------------------------------------
 
-def _format_schema_properties(input_schema: dict) -> str:
-    """Format JSON Schema properties into readable parameter list."""
+def _format_schema_properties(input_schema: dict, depth: int = 0, max_depth: int = 2) -> str:
+    """Format JSON Schema properties into readable parameter list with recursion into arrays/objects."""
     props = input_schema.get("properties", {})
     required = set(input_schema.get("required", []))
+    indent = "  " * (depth + 1)
     if not props:
-        return "  (no parameters)"
+        return f"{indent}(no parameters)"
 
     lines = []
     for name, prop in props.items():
@@ -67,10 +93,69 @@ def _format_schema_properties(input_schema: dict) -> str:
         if len(desc) > 120:
             desc = desc[:117] + "..."
         req = "required" if name in required else "optional"
-        line = f"  - {name} ({ptype}, {req})"
+        line = f"{indent}- {name} ({ptype}, {req})"
         if desc:
             line += f": {desc}"
+        # Show enum values so model knows valid choices
+        enum_vals = prop.get("enum")
+        if enum_vals and isinstance(enum_vals, list):
+            line += f" [values: {', '.join(str(v) for v in enum_vals)}]"
         lines.append(line)
+        # Recurse into array items (critical for TodoWrite-like schemas)
+        if ptype == "array" and depth < max_depth:
+            items = prop.get("items", {})
+            if isinstance(items, dict) and items.get("properties"):
+                lines.append(f"{indent}  Each item (object):")
+                lines.append(_format_schema_properties(items, depth=depth + 1, max_depth=max_depth))
+            elif isinstance(items, dict):
+                item_type = items.get("type", "any")
+                item_enum = items.get("enum")
+                if item_enum:
+                    lines.append(f"{indent}  Items: {item_type} [values: {', '.join(str(v) for v in item_enum)}]")
+        # Recurse into nested objects
+        elif ptype == "object" and depth < max_depth and prop.get("properties"):
+            lines.append(_format_schema_properties(prop, depth=depth + 1, max_depth=max_depth))
+    return "\n".join(lines)
+
+
+def _build_tool_quick_reference(tools: list[dict]) -> str:
+    """Build compact reference with nested structure: TodoWrite(todos=[{content, status(pending/in_progress/completed), activeForm}])"""
+    lines = []
+    for tool in tools:
+        name = tool.get("name", "unknown")
+        schema = tool.get("input_schema", {}) or {}
+        props = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        params = []
+        for prop_name, prop_schema in props.items():
+            suffix = "" if prop_name in required else "?"
+            ptype = prop_schema.get("type", "any") if isinstance(prop_schema, dict) else "any"
+            # Show array item structure (critical for complex tools like TodoWrite)
+            if ptype == "array" and isinstance(prop_schema, dict):
+                items = prop_schema.get("items", {})
+                if isinstance(items, dict) and items.get("properties"):
+                    inner_parts = []
+                    inner_req = set(items.get("required", []))
+                    for iname, ischema in items["properties"].items():
+                        isuffix = "" if iname in inner_req else "?"
+                        ienum = ischema.get("enum") if isinstance(ischema, dict) else None
+                        if ienum and isinstance(ienum, list):
+                            inner_parts.append(f"{iname}{isuffix}({'/'.join(str(v) for v in ienum)})")
+                        else:
+                            inner_parts.append(f"{iname}{isuffix}")
+                    params.append(f"{prop_name}{suffix}=[{{{', '.join(inner_parts)}}}]")
+                else:
+                    params.append(f"{prop_name}{suffix}")
+            else:
+                enum_vals = prop_schema.get("enum") if isinstance(prop_schema, dict) else None
+                if enum_vals and isinstance(enum_vals, list):
+                    params.append(f"{prop_name}{suffix}({'/'.join(str(v) for v in enum_vals)})")
+                else:
+                    params.append(f"{prop_name}{suffix}")
+        if params:
+            lines.append(f"- {name}({', '.join(params)})")
+        else:
+            lines.append(f"- {name}()")
     return "\n".join(lines)
 
 
@@ -101,26 +186,33 @@ def build_tool_prompt(tools: list[dict]) -> str:
         "- Do NOT nest tool calls inside other tool calls.\n"
         "- NEVER describe what tool you would use in text. ALWAYS output the <tool_call> XML directly.\n"
         "- Do NOT say 'I will use the Read tool' or 'Let me run a command'. Instead, directly output the XML.\n\n"
-        "EXAMPLES:\n"
-        'To read a file:\n'
-        '<tool_call name="Read">\n'
-        '<input>\n'
-        '{"file_path": "/path/to/file.py"}\n'
-        '</input>\n'
-        '</tool_call>\n\n'
-        'To run a command:\n'
-        '<tool_call name="Bash">\n'
-        '<input>\n'
-        '{"command": "ls -la", "description": "List files"}\n'
-        '</input>\n'
-        '</tool_call>\n\n'
-        'To search for files:\n'
-        '<tool_call name="Glob">\n'
-        '<input>\n'
-        '{"pattern": "**/*.py"}\n'
-        '</input>\n'
-        '</tool_call>\n'
     )
+
+    # Extract tool names for explicit allowlist
+    tool_names = sorted(_build_valid_tool_names(tools))
+    if tool_names:
+        header += (
+            "VALID TOOL NAMES (use ONLY these, NEVER invent others):\n"
+            + ", ".join(tool_names) + "\n"
+            "If a tool you need is not in this list, explain what you need — do NOT fabricate a tool name.\n\n"
+        )
+
+    # Single generic format example
+    header += (
+        "EXAMPLE (this is the exact format you must follow):\n"
+        '<tool_call name="ToolName">\n'
+        '<input>\n'
+        '{"param1": "value1", "param2": "value2"}\n'
+        '</input>\n'
+        '</tool_call>\n\n'
+    )
+
+    # Compact reference of ALL available tools
+    if tools:
+        header += (
+            "TOOL QUICK REFERENCE (all available tools with their parameters):\n"
+            + _build_tool_quick_reference(tools) + "\n"
+        )
 
     tool_sections = []
     for tool in tools:
@@ -244,10 +336,13 @@ def _strip_inner_xml_tags(raw: str) -> str:
     return stripped
 
 
-def _safe_parse_tool_input(raw_input: str, tool_name: str) -> dict:
+def _safe_parse_tool_input(raw_input: str, tool_name: str, tools: list | None = None) -> dict:
     """
     Parse tool input JSON with multiple fallback strategies.
     NEVER raises — always returns a valid dict.
+
+    When parsed value is not a dict (e.g. array), wraps as {"value": parsed}
+    then attempts to repair using _repair_tool_input if tools schema is available.
     """
     raw = raw_input.strip()
     if not raw:
@@ -256,12 +351,19 @@ def _safe_parse_tool_input(raw_input: str, tool_name: str) -> dict:
     # 0) Strip any wrapping XML tags (e.g. <input>...</input>)
     raw = _strip_inner_xml_tags(raw)
 
+    def _wrap_and_repair(parsed: Any) -> dict:
+        """Wrap non-dict parsed value and attempt schema-based repair."""
+        wrapped = {"value": parsed}
+        if tools:
+            return _repair_tool_input(tool_name, wrapped, tools)
+        return wrapped
+
     # 1) Direct JSON parse
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, dict):
             return parsed
-        return {"value": parsed}
+        return _wrap_and_repair(parsed)
     except json.JSONDecodeError:
         pass
 
@@ -271,7 +373,7 @@ def _safe_parse_tool_input(raw_input: str, tool_name: str) -> dict:
         if isinstance(repaired, dict):
             print(f"[no-tools] Repaired malformed JSON for tool '{tool_name}'")
             return repaired
-        return {"value": repaired}
+        return _wrap_and_repair(repaired)
     except Exception:
         pass
 
@@ -280,7 +382,7 @@ def _safe_parse_tool_input(raw_input: str, tool_name: str) -> dict:
     return {"raw_input": raw}
 
 
-def extract_tool_calls_from_text(text: str) -> tuple[list[dict], str]:
+def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = None, tools: list | None = None) -> tuple[list[dict], str]:
     """
     Extract XML tool calls from text response.
 
@@ -305,7 +407,7 @@ def extract_tool_calls_from_text(text: str) -> tuple[list[dict], str]:
         for match in _TOOL_CALL_RE.finditer(text):
             name = match.group(1).strip()
             raw_input = match.group(2)
-            parsed_input = _safe_parse_tool_input(raw_input, name)
+            parsed_input = _safe_parse_tool_input(raw_input, name, tools=tools)
             tool_blocks.append({
                 "type": "tool_use",
                 "id": f"toolu_{uuid.uuid4().hex[:24]}",
@@ -320,7 +422,7 @@ def extract_tool_calls_from_text(text: str) -> tuple[list[dict], str]:
                 inner_tag = match.group(2)
                 raw_input = match.group(3)
                 print(f"[no-tools] WARNING: Model used <{inner_tag}> instead of <input> for tool '{name}' — parsed via fallback regex")
-                parsed_input = _safe_parse_tool_input(raw_input, name)
+                parsed_input = _safe_parse_tool_input(raw_input, name, tools=tools)
                 tool_blocks.append({
                     "type": "tool_use",
                     "id": f"toolu_{uuid.uuid4().hex[:24]}",
@@ -336,7 +438,7 @@ def extract_tool_calls_from_text(text: str) -> tuple[list[dict], str]:
                 name = match.group(1).strip()
                 raw_content = match.group(2).strip()
                 print(f"[no-tools] BARE regex match for tool '{name}' (no inner tags, content={len(raw_content)} chars)")
-                parsed_input = _safe_parse_tool_input(raw_content, name)
+                parsed_input = _safe_parse_tool_input(raw_content, name, tools=tools)
                 tool_blocks.append({
                     "type": "tool_use",
                     "id": f"toolu_{uuid.uuid4().hex[:24]}",
@@ -349,6 +451,14 @@ def extract_tool_calls_from_text(text: str) -> tuple[list[dict], str]:
         print(f"[no-tools] Error extracting tool calls: {e}")
         return [], text
 
+    # Filter out hallucinated tool names
+    if valid_tool_names and tool_blocks:
+        original_count = len(tool_blocks)
+        tool_blocks = [tc for tc in tool_blocks if validate_tool_name(tc.get("name", ""), valid_tool_names)]
+        filtered = original_count - len(tool_blocks)
+        if filtered:
+            print(f"[no-tools] Filtered {filtered} tool call(s) with invalid names (valid: {', '.join(sorted(valid_tool_names))})")
+
     if not tool_blocks:
         if "<tool_call" in text:
             print(f"[no-tools] WARNING: Found <tool_call> in text but ALL regexes failed. First 500 chars: {text[:500]}")
@@ -356,6 +466,52 @@ def extract_tool_calls_from_text(text: str) -> tuple[list[dict], str]:
 
     remaining = used_re.sub("", text).strip()
     return tool_blocks, remaining
+
+
+def _repair_tool_input(name: str, input_dict: dict, tools: list | None) -> dict:
+    """
+    Repair tool input by rewrapping {"value": ...} to the correct field name
+    based on the tool's schema.
+
+    When _safe_parse_tool_input encounters a non-dict value (e.g. array for TodoWrite),
+    it wraps as {"value": parsed}. This function uses the schema to find the correct
+    field name and rewraps accordingly.
+    """
+    if not tools or "value" not in input_dict or len(input_dict) != 1:
+        return input_dict
+
+    # Find tool schema
+    schema = None
+    for t in tools:
+        t_name = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
+        if t_name == name:
+            schema = getattr(t, "input_schema", None) or (t.get("input_schema") if isinstance(t, dict) else None)
+            break
+
+    if not schema or not isinstance(schema, dict):
+        return input_dict
+
+    props = schema.get("properties", {})
+    required = set(schema.get("required", []))
+    value = input_dict["value"]
+
+    # Strategy 1: Single required array property + value is a list
+    if isinstance(value, list):
+        array_props = [k for k, v in props.items() if isinstance(v, dict) and v.get("type") == "array"]
+        required_array = [k for k in array_props if k in required]
+        if len(required_array) == 1:
+            field = required_array[0]
+            print(f"[repair] Rewrapped {{'value': [...]}} → {{'{field}': [...]}} for tool '{name}'")
+            return {field: value}
+
+    # Strategy 2: Single required property (any type)
+    if len(required) == 1:
+        field = list(required)[0]
+        if field in props:
+            print(f"[repair] Rewrapped {{'value': ...}} → {{'{field}': ...}} for tool '{name}'")
+            return {field: value}
+
+    return input_dict
 
 
 # ---------------------------------------------------------------------------
@@ -562,9 +718,11 @@ class XmlToolBuffer:
     Feed text chunks, get back ordered segments of text and tool_calls.
     """
 
-    def __init__(self):
+    def __init__(self, valid_tool_names: set[str] | None = None, tools: list | None = None):
         self.buffer: str = ""
         self.in_tool: bool = False
+        self.valid_tool_names: set[str] = valid_tool_names or set()
+        self.tools: list | None = tools
 
     def feed(self, text: str) -> list[dict]:
         """
@@ -627,8 +785,9 @@ class XmlToolBuffer:
                 return None
 
             next_char = self.buffer[end_of_tag]
-            if next_char not in (' ', '\t', '\n', '\r', '>'):
-                # Not valid XML tag — regex pattern or other false positive
+            if next_char not in (' ', '\t', '\n', '\r'):
+                # Not valid tool_call tag — either '>' (no name= attribute) or other char
+                # Our format requires <tool_call name="...">, so space after <tool_call is mandatory
                 search_start = end_of_tag
                 continue
 
@@ -669,11 +828,13 @@ class XmlToolBuffer:
 
     def _is_backtick_quoted(self, idx: int) -> bool:
         """Check if <tool_call at position idx is inside backtick-quoted text."""
-        # Check for backtick immediately before
-        if idx > 0 and self.buffer[idx - 1] == '`':
+        # Check for backtick within 2 chars before (inline code: `<tool_call`)
+        nearby = self.buffer[max(0, idx - 2):idx]
+        if '`' in nearby:
             return True
-        # Check for triple-backtick code block in nearby prefix
-        prefix = self.buffer[max(0, idx - 10):idx]
+        # Check for triple-backtick code block in wider prefix
+        # (streaming chunks may split backticks and content across chunks)
+        prefix = self.buffer[max(0, idx - 80):idx]
         if '```' in prefix:
             return True
         return False
@@ -686,8 +847,11 @@ class XmlToolBuffer:
         match = _TOOL_CALL_RE.search(xml)
         if match:
             name = match.group(1).strip()
+            if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
+                print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
+                return {"type": "text", "text": xml}
             raw_input = match.group(2)
-            parsed = _safe_parse_tool_input(raw_input, name)
+            parsed = _safe_parse_tool_input(raw_input, name, tools=self.tools)
             print(f"[xml-buffer] PRIMARY match: name={name} keys={list(parsed.keys())}")
             return {"type": "tool_call", "name": name, "input": parsed}
 
@@ -695,10 +859,13 @@ class XmlToolBuffer:
         fallback_match = _TOOL_CALL_FALLBACK_RE.search(xml)
         if fallback_match:
             name = fallback_match.group(1).strip()
+            if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
+                print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
+                return {"type": "text", "text": xml}
             inner_tag = fallback_match.group(2)
             raw_input = fallback_match.group(3)
             print(f"[xml-buffer] FALLBACK match ({inner_tag}): name={name}")
-            parsed = _safe_parse_tool_input(raw_input, name)
+            parsed = _safe_parse_tool_input(raw_input, name, tools=self.tools)
             return {"type": "tool_call", "name": name, "input": parsed}
 
         # 3) Bare: no inner tags, JSON directly inside <tool_call>
@@ -706,9 +873,12 @@ class XmlToolBuffer:
         bare_match = _TOOL_CALL_BARE_RE.search(xml)
         if bare_match:
             name = bare_match.group(1).strip()
+            if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
+                print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
+                return {"type": "text", "text": xml}
             raw_content = bare_match.group(2).strip()
             print(f"[xml-buffer] BARE match (no inner tags): name={name} content={len(raw_content)} chars")
-            parsed = _safe_parse_tool_input(raw_content, name)
+            parsed = _safe_parse_tool_input(raw_content, name, tools=self.tools)
             return {"type": "tool_call", "name": name, "input": parsed}
 
         print(f"[xml-buffer] FAILED all regexes ({len(xml)} chars). Full XML: {xml[:500]}", flush=True)

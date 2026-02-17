@@ -7,7 +7,7 @@ import uuid
 from utils.utils import scale_tokens
 from json_repair import repair_json
 import os
-from llm.tool_prompting import is_no_tools_model, XmlToolBuffer, recover_incomplete_tool_call, extract_tool_calls_from_text
+from llm.tool_prompting import is_no_tools_model, XmlToolBuffer, recover_incomplete_tool_call, extract_tool_calls_from_text, _build_valid_tool_names, validate_tool_name
 
 
 def _close_json_brackets(text: str) -> str:
@@ -113,12 +113,17 @@ def _warn_empty_tool_values(name: str, input_dict: dict) -> None:
     if name == "TodoWrite":
         todos = input_dict.get("todos", [])
         if todos and isinstance(todos, list):
-            empty_count = sum(1 for t in todos if isinstance(t, dict) and t.get("content", "") == "")
-            if empty_count > 0:
-                print(f"[quality] WARNING: TodoWrite has {empty_count}/{len(todos)} todos with empty 'content' — model likely truncated or hallucinated empty values")
+            empty_content = sum(1 for t in todos if isinstance(t, dict) and not t.get("content"))
+            empty_active = sum(1 for t in todos if isinstance(t, dict) and not t.get("activeForm"))
+            missing_status = sum(1 for t in todos if isinstance(t, dict) and t.get("status") not in ("pending", "in_progress", "completed"))
+            if empty_content or empty_active or missing_status:
+                print(f"[quality] WARNING: TodoWrite {len(todos)} items — empty content={empty_content}, empty activeForm={empty_active}, bad status={missing_status}")
     elif name == "Write":
         if input_dict.get("content", None) == "":
             print(f"[quality] WARNING: Write tool has empty 'content' — model likely truncated")
+    elif name == "Edit":
+        if input_dict.get("old_string", None) == "" and input_dict.get("new_string", None) == "":
+            print(f"[quality] WARNING: Edit tool has empty old_string and new_string")
 
 
 def _emit_tool_use_block(name: str, input_dict: dict, block_index: int) -> list[str]:
@@ -176,7 +181,9 @@ async def handle_streaming(response_generator, original_request, model_context_w
 
         # XML tool simulation state
         no_tools_mode = is_no_tools_model(original_request.model)
-        xml_tool_buffer = XmlToolBuffer() if no_tools_mode else None
+        request_tools = getattr(original_request, "tools", None)  # For XmlToolBuffer + extract_tool_calls repair
+        valid_names = _build_valid_tool_names(request_tools) if no_tools_mode else set()
+        xml_tool_buffer = XmlToolBuffer(valid_tool_names=valid_names, tools=request_tools) if no_tools_mode else None
         has_xml_tool_calls = False
         reasoning_buffer = ""  # Buffer reasoning_content in no-tools mode; emit only if no tool calls
         print(f"[streaming] INIT: model={original_request.model} no_tools_mode={no_tools_mode} xml_buffer={'YES' if xml_tool_buffer else 'NO'}", flush=True)
@@ -323,6 +330,10 @@ async def handle_streaming(response_generator, original_request, model_context_w
                                     api_base=os.environ.get("CLASSIFIER_BASE_URL"),
                                 )
                                 if recovered:
+                                    # Filter hallucinated tool names from recovery
+                                    if valid_names:
+                                        recovered = [tc for tc in recovered if validate_tool_name(tc.get("name", ""), valid_names)]
+                                if recovered:
                                     has_xml_tool_calls = True
                                     if not text_block_closed:
                                         text_block_closed = True
@@ -332,7 +343,7 @@ async def handle_streaming(response_generator, original_request, model_context_w
                                         for event in _emit_tool_use_block(tc["name"], tc["input"], last_tool_index):
                                             yield event
                                 else:
-                                    # Recovery failed — emit as text
+                                    # Recovery failed or all names invalid — emit as text
                                     seg_text = segment["text"]
                                     if seg_text.strip():
                                         accumulated_text += seg_text
@@ -394,7 +405,7 @@ async def handle_streaming(response_generator, original_request, model_context_w
                     if reasoning_buffer and not has_xml_tool_calls and tool_index is None:
                         # deepseek-reasoner sometimes puts <tool_call> XML in reasoning_content instead of content
                         if "<tool_call" in reasoning_buffer:
-                            reasoning_tools, reasoning_text = extract_tool_calls_from_text(reasoning_buffer)
+                            reasoning_tools, reasoning_text = extract_tool_calls_from_text(reasoning_buffer, valid_tool_names=valid_names, tools=request_tools)
                             if reasoning_tools:
                                 has_xml_tool_calls = True
                                 print(f"[streaming] Found {len(reasoning_tools)} tool call(s) in reasoning_content!", flush=True)
@@ -468,6 +479,10 @@ async def handle_streaming(response_generator, original_request, model_context_w
                             api_base=os.environ.get("CLASSIFIER_BASE_URL"),
                         )
                         if recovered:
+                            # Filter hallucinated tool names from recovery
+                            if valid_names:
+                                recovered = [tc for tc in recovered if validate_tool_name(tc.get("name", ""), valid_names)]
+                        if recovered:
                             has_xml_tool_calls = True
                             if not text_block_closed:
                                 text_block_closed = True
@@ -502,7 +517,7 @@ async def handle_streaming(response_generator, original_request, model_context_w
             if reasoning_buffer and not has_xml_tool_calls and tool_index is None:
                 # deepseek-reasoner sometimes puts <tool_call> XML in reasoning_content instead of content
                 if "<tool_call" in reasoning_buffer:
-                    reasoning_tools, reasoning_text = extract_tool_calls_from_text(reasoning_buffer)
+                    reasoning_tools, reasoning_text = extract_tool_calls_from_text(reasoning_buffer, valid_tool_names=valid_names, tools=request_tools)
                     if reasoning_tools:
                         has_xml_tool_calls = True
                         print(f"[streaming] Found {len(reasoning_tools)} tool call(s) in reasoning_content (fallback)!", flush=True)
