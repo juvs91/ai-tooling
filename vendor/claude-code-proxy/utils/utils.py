@@ -3,7 +3,66 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from typing import Any, Optional, Set, Tuple
+
+
+# ── Unified Accessors ────────────────────────────────────────────────
+# Pydantic models and dicts coexist throughout the proxy.
+# These helpers eliminate the "isinstance dance" from call sites.
+
+def bget(obj: Any, key: str, default: Any = None) -> Any:
+    """Access a field uniformly from a Pydantic model or a dict."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def get_tool_name(tool: Any) -> str:
+    """Extract the tool name from a tool definition (dict or Pydantic)."""
+    return (bget(tool, "name") or "").strip()
+
+
+# ── Anthropic-Format Helpers ─────────────────────────────────────────
+
+TOOL_ID_PREFIX = "toolu_"
+
+
+def make_tool_id() -> str:
+    """Generate a unique tool_use ID in Anthropic's expected format."""
+    return f"{TOOL_ID_PREFIX}{uuid.uuid4().hex[:24]}"
+
+
+def to_dict(obj: Any) -> Any:
+    """Convert a Pydantic model to a plain dict; pass-through for dicts."""
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(exclude_none=True)
+    if hasattr(obj, "dict"):
+        return obj.dict(exclude_none=True)
+    return obj
+
+
+# ── Stop Reason Mapping ─────────────────────────────────────────────
+# OpenAI uses "finish_reason"; Anthropic uses "stop_reason" with
+# different vocabulary.  This single mapping is the source of truth.
+
+_STOP_REASON_MAP = {
+    "stop": "end_turn",
+    "end_turn": "end_turn",
+    "length": "max_tokens",
+    "max_tokens": "max_tokens",
+    "tool_calls": "tool_use",
+    "content_filter": "end_turn",
+}
+
+
+def map_stop_reason(finish_reason: str | None, has_tool_use: bool = False) -> str:
+    """Map an OpenAI/LiteLLM finish_reason to an Anthropic stop_reason."""
+    if has_tool_use:
+        return "tool_use"
+    return _STOP_REASON_MAP.get(finish_reason or "", "end_turn")
 
 def parse_allowlist(raw: str) -> Set[str]:
     """
@@ -102,8 +161,7 @@ def filter_tools_allowlist(tools: Optional[list[Any]], allow: Set[str]) -> tuple
     kept = []
     dropped = []
     for t in tools:
-        name = getattr(t, "name", None) if not isinstance(t, dict) else t.get("name")
-        name = (name or "").strip()
+        name = get_tool_name(t)
         if name.lower() in allow:
             kept.append(t)
         else:
@@ -116,7 +174,7 @@ def normalize_tool_choice(tool_choice: Optional[dict], kept_tools: Optional[list
 
     kept_names = set()
     for t in (kept_tools or []):
-        name = getattr(t, "name", None) if not isinstance(t, dict) else t.get("name")
+        name = get_tool_name(t)
         if name:
             kept_names.add(name.lower())
 

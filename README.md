@@ -610,6 +610,77 @@ Response (Anthropic format) -> Claude Code CLI
 
 ---
 
+## 🛠️ Critical Fixes & Debugging
+
+### Problemas Críticos Resueltos
+
+#### 1. Thinking Blocks (HTTP 422 Error)
+**Problema:** OpenAI/Gemini no soportan `thinking` blocks de Anthropic, causando HTTP 422.
+**Solución:** Agregados `ContentBlockThinking`, `ContentBlockRedactedThinking`, `ContentBlockServerToolUse`, `ContentBlockServerToolResult` a `schemas.py`. Thinking blocks son removidos en `converters.py` al convertir a OpenAI format.
+- `vendor/claude-code-proxy/llm/schemas.py`
+- `vendor/claude-code-proxy/llm/converters.py`
+
+#### 2. Single-Quote Tool Calls (Tool Execution Fix)
+**Problema:** deepseek-reasoner outputs `<tool_call name='X'>` con SINGLE quotes + Python dict syntax `{'key': 'val'}`.
+**Solución:** Actualizados todos los regexes (`_TOOL_CALL_RE`, `_TOOL_CALL_FALLBACK_RE`, `_TOOL_CALL_BARE_RE`, `_PARTIAL_TOOL_RE`) para aceptar ambos estilos de quotes via `_NAME_ATTR` pattern. `json_repair` convierte Python dict → JSON.
+- `vendor/claude-code-proxy/llm/converters.py`
+
+#### 3. Token Counting
+**Problema:** Heurística chars/4 no es precisa.
+**Solución:** Reemplazado con `litellm.token_counter()` (determinístico) + chars/3 fallback en compressor.
+
+#### 4. Bare Regex Fallback
+**Problema:** Algunos modelos devuelven JSON directamente en `<tool_call>` sin tags internos.
+**Solución:** Agregado 3er nivel de regex para tool calls sin inner tags.
+
+### Cómo Debuggear el Proxy
+
+#### Verificar logs del proxy:
+```bash
+docker-compose logs -f proxy_cloud
+docker logs -f ai-tooling-proxy_cloud-1
+```
+
+#### Health check detallado:
+```bash
+cc-health --json | jq
+```
+
+#### Verificar configuración activa:
+```bash
+# Ver variables de entorno del contenedor
+docker exec ai-tooling-proxy_cloud-1 env | grep -E "(MODEL|PROVIDER|CLASSIFIER)"
+```
+
+#### Testear el proxy directamente:
+```bash
+curl -X GET http://localhost:8083/health
+curl -X POST http://localhost:8083/v1/messages/count_tokens \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-4.7","messages":[{"role":"user","content":"test"}]}'
+```
+
+#### Hot-reload debugging:
+```bash
+# Editar código del proxy
+vim vendor/claude-code-proxy/llm/converters.py
+
+# Verificar que los cambios se aplicaron
+docker logs --tail 10 ai-tooling-proxy_cloud-1 | grep "reload"
+```
+
+### Common Issues & Solutions
+
+| Problema | Posible Causa | Solución |
+|----------|---------------|----------|
+| **HTTP 422** | Thinking blocks no removidos | Verificar `converters.py` y `schemas.py` |
+| **Tool calls fallan** | Single quotes en XML | Verificar regexes en `converters.py` |
+| **Modelo incorrecto** | Intent classification falló | Check logs: `docker logs ai-tooling-proxy_cloud-1 | grep -i intent` |
+| **API key inválida** | .env incorrecto | Verificar `profile-envs/cloud.*.env` |
+| **Timeout** | Classifier LLM lento | Aumentar `CLASSIFIER_TIMEOUT` o usar regex |
+
+---
+
 ## FAQ
 
 **Q: Como cambio de modelo sin reiniciar nada?**

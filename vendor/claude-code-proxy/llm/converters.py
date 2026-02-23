@@ -4,22 +4,19 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from utils.utils import scale_tokens
+from utils.utils import bget, make_tool_id, map_stop_reason, scale_tokens, to_dict, TOOL_ID_PREFIX
 from typing import Any, Dict, List, Optional, Union
 from json_repair import repair_json
 import os
 from llm.schemas import MessagesRequest, MessagesResponse, Usage
-from llm.tool_prompting import is_no_tools_model, build_tool_prompt, rewrite_messages_without_tools, extract_tool_calls_from_text, _build_valid_tool_names
+from llm.tool_prompting import (
+    is_no_tools_model, build_tool_prompt, rewrite_messages_without_tools,
+    extract_tool_calls_from_text, strip_tool_call_xml, recover_incomplete_tool_call,
+    _build_valid_tool_names, validate_tool_name,
+)
 
 
 # ── Shared helpers ────────────────────────────────────────────────────
-
-def _bget(block: Any, key: str, default: Any = None) -> Any:
-    """Unified accessor for Pydantic models and dicts."""
-    if isinstance(block, dict):
-        return block.get(key, default)
-    return getattr(block, key, default)
-
 
 def _safe_json(obj: Any, ensure_ascii: bool = False) -> str:
     """json.dumps with str() fallback."""
@@ -32,9 +29,9 @@ def _safe_json(obj: Any, ensure_ascii: bool = False) -> str:
 def _extract_tool_fields(block: Any) -> tuple[str, str, Any]:
     """Extract (name, id, input) from tool_use or server_tool_use block."""
     return (
-        _bget(block, "name") or "",
-        _bget(block, "id") or "",
-        _bget(block, "input"),
+        bget(block, "name") or "",
+        bget(block, "id") or "",
+        bget(block, "input"),
     )
 
 
@@ -234,16 +231,16 @@ def _content_blocks_to_text(content: Any) -> str:
 
     out = []
     for b in content:
-        btype = _bget(b, "type")
+        btype = bget(b, "type")
 
         if btype == "text":
-            txt = _bget(b, "text")
+            txt = bget(b, "text")
             if txt:
                 out.append(str(txt))
         elif btype == "tool_result":
-            tool_id = _bget(b, "tool_use_id")
+            tool_id = bget(b, "tool_use_id")
             out.append(f"[Tool Result ID: {tool_id or 'unknown'}]")
-            out.append(_content_blocks_to_text(_bget(b, "content")))
+            out.append(_content_blocks_to_text(bget(b, "content")))
         elif btype in ("tool_use", "server_tool_use"):
             label = "ServerTool" if btype == "server_tool_use" else "Tool"
             name, tid, inp = _extract_tool_fields(b)
@@ -251,9 +248,9 @@ def _content_blocks_to_text(content: Any) -> str:
         elif btype in ("thinking", "redacted_thinking"):
             pass
         elif btype == "server_tool_result":
-            tool_id = _bget(b, "tool_use_id")
+            tool_id = bget(b, "tool_use_id")
             out.append(f"[ServerTool Result ID: {tool_id or 'unknown'}]")
-            out.append(_content_blocks_to_text(_bget(b, "content")))
+            out.append(_content_blocks_to_text(bget(b, "content")))
         elif btype == "image":
             out.append("[Image content omitted]")
         else:
@@ -309,10 +306,10 @@ def _convert_assistant_blocks(blocks: Any) -> List[Dict[str, Any]]:
     tool_calls: List[Dict[str, Any]] = []
 
     for b in blocks:
-        btype = _bget(b, "type")
+        btype = bget(b, "type")
 
         if btype == "text":
-            txt = _bget(b, "text")
+            txt = bget(b, "text")
             if txt:
                 text_parts.append(str(txt))
 
@@ -336,8 +333,7 @@ def _convert_assistant_blocks(blocks: Any) -> List[Dict[str, Any]]:
             text_parts.append(f"[ServerTool: {name} (ID: {tid})] Input: {_safe_json(inp, ensure_ascii=False)}")
 
         else:
-            dumped = b if isinstance(b, dict) else (b.model_dump() if hasattr(b, "model_dump") else str(b))
-            text_parts.append(_safe_json(dumped)[:1000])
+            text_parts.append(_safe_json(to_dict(b))[:1000])
 
     content_text = "\n".join(text_parts).strip() if text_parts else None
     result: Dict[str, Any] = {"role": "assistant"}
@@ -362,18 +358,18 @@ def _convert_user_blocks(blocks: Any) -> List[Dict[str, Any]]:
     tool_messages: List[Dict[str, Any]] = []
 
     for b in blocks:
-        btype = _bget(b, "type")
+        btype = bget(b, "type")
 
         if btype == "text":
-            txt = _bget(b, "text")
+            txt = bget(b, "text")
             if txt:
                 text_parts.append(str(txt))
 
         elif btype == "tool_result":
-            tool_use_id = _bget(b, "tool_use_id")
-            content_str = _tool_result_content_to_str(_bget(b, "content"))
+            tool_use_id = bget(b, "tool_use_id")
+            content_str = _tool_result_content_to_str(bget(b, "content"))
 
-            if _bget(b, "is_error") and content_str:
+            if bget(b, "is_error") and content_str:
                 content_str = f"[ERROR] {content_str}"
 
             tool_messages.append({
@@ -383,9 +379,9 @@ def _convert_user_blocks(blocks: Any) -> List[Dict[str, Any]]:
             })
 
         elif btype == "server_tool_result":
-            tool_id = _bget(b, "tool_use_id")
+            tool_id = bget(b, "tool_use_id")
             text_parts.append(f"[ServerTool Result ID: {tool_id or 'unknown'}]")
-            text_parts.append(_content_blocks_to_text(_bget(b, "content")))
+            text_parts.append(_content_blocks_to_text(bget(b, "content")))
 
         elif btype == "image":
             text_parts.append("[Image content omitted]")
@@ -450,15 +446,14 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_conte
     ):
         if model_context_window > 0:
             # Dynamic cap: only for providers with MODEL_CONTEXT_WINDOW set (e.g. DeepSeek 64K)
-            # Z.AI, Groq, OpenAI, OpenRouter have MODEL_CONTEXT_WINDOW=0 → fall through to else
+            # Groq, OpenAI, OpenRouter have MODEL_CONTEXT_WINDOW=0 → fall through to else
             
             provider_max = int(os.environ.get("MAX_OUTPUT_TOKENS", "8192"))
             input_estimate = sum(len(str(m.get("content", ""))) for m in messages) // 4
             tools_estimate = 0
             if anthropic_request.tools:
                 for t in anthropic_request.tools:
-                    t_dict = t.model_dump() if hasattr(t, "model_dump") else dict(t)
-                    tools_estimate += len(json.dumps(t_dict)) // 4
+                    tools_estimate += len(json.dumps(to_dict(t))) // 4
             remaining = model_context_window - input_estimate - tools_estimate
             safe_remaining = int(remaining * 0.85)  # 15% margin for overhead
             dynamic_cap = max(1024, min(safe_remaining, provider_max))
@@ -497,15 +492,11 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_conte
         is_gemini_model = anthropic_request.model.startswith("gemini/")
         openai_tools = []
         for tool in anthropic_request.tools:
-            tool_dict = tool.model_dump() if hasattr(tool, "model_dump") else (tool.dict() if hasattr(tool, "dict") else dict(tool))
-            openai_tools.append(_convert_tool_cached(tool_dict, is_gemini_model))
+            openai_tools.append(_convert_tool_cached(to_dict(tool), is_gemini_model))
         litellm_request["tools"] = openai_tools
     elif anthropic_request.tools and no_tools:
         # Inject tool definitions as XML prompt in system message
-        tool_dicts = [
-            t.model_dump() if hasattr(t, "model_dump") else (t.dict() if hasattr(t, "dict") else dict(t))
-            for t in anthropic_request.tools
-        ]
+        tool_dicts = [to_dict(t) for t in anthropic_request.tools]
         tool_prompt = build_tool_prompt(tool_dicts)
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] = tool_prompt + "\n\n" + messages[0]["content"]
@@ -574,13 +565,13 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
             if isinstance(tool_call, dict):
                 function = tool_call.get("function", {}) or {}
                 raw_id = tool_call.get("id", "")
-                tool_id = raw_id if raw_id.startswith("toolu_") else f"toolu_{uuid.uuid4().hex[:24]}"
+                tool_id = raw_id if raw_id.startswith(TOOL_ID_PREFIX) else make_tool_id()
                 name = function.get("name", "")
                 arguments = function.get("arguments", "{}")
             else:
                 function = getattr(tool_call, "function", None)
                 raw_id = getattr(tool_call, "id", "") or ""
-                tool_id = raw_id if raw_id.startswith("toolu_") else f"toolu_{uuid.uuid4().hex[:24]}"
+                tool_id = raw_id if raw_id.startswith(TOOL_ID_PREFIX) else make_tool_id()
                 name = getattr(function, "name", "") if function else ""
                 arguments = getattr(function, "arguments", "{}") if function else "{}"
 
@@ -614,8 +605,15 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
         prompt_tokens = getattr(usage_info, "prompt_tokens", 0)
         completion_tokens = getattr(usage_info, "completion_tokens", 0)
 
-    # For no-tools models: extract XML tool calls from text response
-    if is_no_tools_model(original_request.model) and content_text:
+    # Extract XML tool calls from text response:
+    # - No-tools models: always check (they use XML simulation)
+    # - Native models: check when <tool_call present AND no native tool_calls (avoids dupes)
+    has_native_tools = bool(tool_calls)
+    should_extract = (
+        is_no_tools_model(original_request.model)
+        or (not has_native_tools and "<tool_call" in (content_text or ""))
+    )
+    if should_extract and content_text:
         request_tools = getattr(original_request, "tools", None)
         valid_names = _build_valid_tool_names(request_tools)
         xml_tool_blocks, clean_text = extract_tool_calls_from_text(content_text, valid_tool_names=valid_names, tools=request_tools)
@@ -632,29 +630,80 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
             content.extend(xml_tool_blocks)
             finish_reason = "tool_calls"
             print(f"[no-tools] Extracted {len(xml_tool_blocks)} tool calls from text response")
+        elif "<tool_call" in content_text:
+            # Extraction failed but <tool_call present → try async recovery
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Already inside async context — create a task
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        recovered = pool.submit(
+                            asyncio.run,
+                            recover_incomplete_tool_call(
+                                partial_xml=content_text,
+                                tools=[to_dict(t) for t in request_tools] if request_tools else None,
+                                model=os.environ.get("CLASSIFIER_MODEL", "openai/deepseek-chat"),
+                                api_key=os.environ.get("CLASSIFIER_API_KEY", ""),
+                                api_base=os.environ.get("CLASSIFIER_BASE_URL"),
+                            )
+                        ).result(timeout=5)
+                else:
+                    recovered = loop.run_until_complete(
+                        recover_incomplete_tool_call(
+                            partial_xml=content_text,
+                            tools=[to_dict(t) for t in request_tools] if request_tools else None,
+                            model=os.environ.get("CLASSIFIER_MODEL", "openai/deepseek-chat"),
+                            api_key=os.environ.get("CLASSIFIER_API_KEY", ""),
+                            api_base=os.environ.get("CLASSIFIER_BASE_URL"),
+                        )
+                    )
+            except Exception as e:
+                print(f"[recovery] Non-streaming recovery failed: {type(e).__name__}: {e}")
+                recovered = None
 
-    # finish_reason -> stop_reason
-    # Per Anthropic docs: stop_reason MUST be "tool_use" when tool_use blocks are present
-    # BUT if finish_reason=length and tool JSON is corrupted, use max_tokens so CC doesn't execute garbage
-    has_tool_use = any(
-        (c.get("type") if isinstance(c, dict) else getattr(c, "type", None)) == "tool_use"
-        for c in content
-    )
-    if finish_reason == "length":
-        if has_tool_use:
-            # Validate all tool_use blocks have parseable input (dict, not raw string)
-            all_valid = all(
-                isinstance(c.get("input") if isinstance(c, dict) else getattr(c, "input", None), dict)
-                for c in content
-                if (c.get("type") if isinstance(c, dict) else getattr(c, "type", None)) == "tool_use"
-            )
-            stop_reason = "tool_use" if all_valid else "max_tokens"
-        else:
-            stop_reason = "max_tokens"
-    elif finish_reason == "tool_calls" or has_tool_use:
-        stop_reason = "tool_use"
+            if recovered:
+                if valid_names:
+                    recovered = [tc for tc in recovered if validate_tool_name(tc.get("name", ""), valid_names)]
+                if recovered:
+                    content = []
+                    clean = strip_tool_call_xml(content_text)
+                    if clean:
+                        content.append({"type": "text", "text": clean})
+                    content.extend(recovered)
+                    finish_reason = "tool_calls"
+                    print(f"[recovery] Non-streaming: recovered {len(recovered)} tool(s)")
+            else:
+                # Level 3: strip XML from content text
+                clean = strip_tool_call_xml(content_text)
+                if clean != content_text:
+                    content = [{"type": "text", "text": clean}] if clean else []
+                    print(f"[recovery] Non-streaming fallback: stripped XML from content")
+
+    # When native tool model has XML fragments in content (but extraction was skipped
+    # because native tools were present), strip the XML to avoid showing raw tags to CC
+    if has_native_tools and content_text and "<tool_call" in content_text:
+        clean = strip_tool_call_xml(content_text)
+        if clean != content_text:
+            for i, block in enumerate(content):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    content[i] = {"type": "text", "text": clean}
+                    break
+            print(f"[recovery] Non-streaming: stripped XML fragments from native-tool content")
+
+    # finish_reason → stop_reason
+    # Special case: finish_reason=length with tool_use blocks — only report "tool_use"
+    # if all tool inputs are valid dicts (not corrupted JSON from truncation).
+    has_tool_use = any(bget(c, "type") == "tool_use" for c in content)
+    if finish_reason == "length" and has_tool_use:
+        all_valid = all(
+            isinstance(bget(c, "input"), dict)
+            for c in content if bget(c, "type") == "tool_use"
+        )
+        stop_reason = "tool_use" if all_valid else "max_tokens"
     else:
-        stop_reason = "end_turn"
+        stop_reason = map_stop_reason(finish_reason, has_tool_use)
 
     if not content:
         content.append({"type": "text", "text": ""})

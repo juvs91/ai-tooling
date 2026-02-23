@@ -1,0 +1,15 @@
+services:
+  proxy_cloud_school:
+    image: ghcr.io/1rgs/claude-code-proxy:main
+    container_name: ai-tooling-proxy_cloud-1-school
+    restart: unless-stopped
+    env_file:
+      - ./.env
+      - profile-envs/cloud.zai.env
+    environment:
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8084:8082"
+    volumes:
+      - ./vendor/claude-code-proxy:/claude-code-proxy
+    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-exclude '.venv'

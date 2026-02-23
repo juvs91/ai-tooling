@@ -12,11 +12,11 @@ from __future__ import annotations
 import json
 import os
 import re
-import uuid
 from functools import lru_cache
 from typing import Any, FrozenSet
 
 from json_repair import repair_json
+from utils.utils import get_tool_name, make_tool_id, to_dict
 
 
 # ---------------------------------------------------------------------------
@@ -29,9 +29,9 @@ def _build_valid_tool_names(tools: list | None) -> set[str]:
         return set()
     names = set()
     for t in tools:
-        name = getattr(t, "name", None) if not isinstance(t, dict) else t.get("name")
-        if isinstance(name, str) and name.strip():
-            names.add(name.strip())
+        name = get_tool_name(t)
+        if name:
+            names.add(name)
     return names
 
 
@@ -321,18 +321,52 @@ _TOOL_CALL_BARE_RE = re.compile(
 )
 
 
+# GLM format: <tool_call>ToolName<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>
+_TOOL_CALL_ARGKV_RE = re.compile(
+    r'<tool_call>([\w]+)((?:\s*<arg_key>[\s\S]*?</arg_key>\s*<arg_value>[\s\S]*?</arg_value>)+)\s*</tool_call>',
+    re.DOTALL,
+)
+_ARG_KV_PAIR_RE = re.compile(
+    r'<arg_key>([\s\S]*?)</arg_key>\s*<arg_value>([\s\S]*?)</arg_value>',
+    re.DOTALL,
+)
+
+
+def _parse_argkv_tool(match) -> dict:
+    """Parse a <tool_call>Name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call> match."""
+    name = match.group(1).strip()
+    args_xml = match.group(2)
+    input_dict = {}
+    for kv in _ARG_KV_PAIR_RE.finditer(args_xml):
+        input_dict[kv.group(1).strip()] = kv.group(2)
+    return {"name": name, "input": input_dict}
+
+
+_CDATA_RE = re.compile(r'^<!\[CDATA\[([\s\S]*?)\]\]>$')
+
+
 def _strip_inner_xml_tags(raw: str) -> str:
     """
     Strip wrapping XML inner tags if present.
     Handles: <input>{json}</input> → {json}
              <textarea>{json}</textarea> → {json}
+             <![CDATA[{json}]]> → {json}
+             <input><![CDATA[{json}]]></input> → {json}
              {json} → {json} (no-op)
     """
     stripped = raw.strip()
+    # Strip CDATA wrapper if present (XML standard construct)
+    cdata_match = _CDATA_RE.match(stripped)
+    if cdata_match:
+        stripped = cdata_match.group(1).strip()
     # Try to remove a matched pair of XML tags wrapping the content
     tag_match = re.match(r'^<(\w+)>([\s\S]*)</\1>$', stripped, re.DOTALL)
     if tag_match:
-        return tag_match.group(2).strip()
+        stripped = tag_match.group(2).strip()
+    # Strip CDATA again (may have been inside the XML tag)
+    cdata_match = _CDATA_RE.match(stripped)
+    if cdata_match:
+        stripped = cdata_match.group(1).strip()
     return stripped
 
 
@@ -410,7 +444,7 @@ def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = 
             parsed_input = _safe_parse_tool_input(raw_input, name, tools=tools)
             tool_blocks.append({
                 "type": "tool_use",
-                "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                "id": make_tool_id(),
                 "name": name,
                 "input": parsed_input,
             })
@@ -425,7 +459,7 @@ def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = 
                 parsed_input = _safe_parse_tool_input(raw_input, name, tools=tools)
                 tool_blocks.append({
                     "type": "tool_use",
-                    "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                    "id": make_tool_id(),
                     "name": name,
                     "input": parsed_input,
                 })
@@ -441,11 +475,26 @@ def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = 
                 parsed_input = _safe_parse_tool_input(raw_content, name, tools=tools)
                 tool_blocks.append({
                     "type": "tool_use",
-                    "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                    "id": make_tool_id(),
                     "name": name,
                     "input": parsed_input,
                 })
             used_re = _TOOL_CALL_BARE_RE
+
+        # 4th fallback: GLM arg_key/arg_value format
+        if not tool_blocks and "<tool_call>" in text:
+            for match in _TOOL_CALL_ARGKV_RE.finditer(text):
+                parsed = _parse_argkv_tool(match)
+                name = parsed["name"]
+                print(f"[no-tools] ARGKV regex match for tool '{name}' keys={list(parsed['input'].keys())}")
+                tool_blocks.append({
+                    "type": "tool_use",
+                    "id": make_tool_id(),
+                    "name": name,
+                    "input": parsed["input"],
+                })
+            if tool_blocks:
+                used_re = _TOOL_CALL_ARGKV_RE
 
     except Exception as e:
         print(f"[no-tools] Error extracting tool calls: {e}")
@@ -468,6 +517,22 @@ def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = 
     return tool_blocks, remaining
 
 
+def _type_compatible(value: Any, schema_type: str) -> bool:
+    """Check if a Python value is compatible with a JSON Schema type."""
+    type_map = {
+        "string": str,
+        "integer": int,
+        "number": (int, float),
+        "boolean": bool,
+        "array": list,
+        "object": dict,
+    }
+    expected = type_map.get(schema_type)
+    if expected is None:
+        return True  # Unknown schema type — don't block
+    return isinstance(value, expected)
+
+
 def _repair_tool_input(name: str, input_dict: dict, tools: list | None) -> dict:
     """
     Repair tool input by rewrapping {"value": ...} to the correct field name
@@ -483,7 +548,7 @@ def _repair_tool_input(name: str, input_dict: dict, tools: list | None) -> dict:
     # Find tool schema
     schema = None
     for t in tools:
-        t_name = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
+        t_name = get_tool_name(t)
         if t_name == name:
             schema = getattr(t, "input_schema", None) or (t.get("input_schema") if isinstance(t, dict) else None)
             break
@@ -504,10 +569,15 @@ def _repair_tool_input(name: str, input_dict: dict, tools: list | None) -> dict:
             print(f"[repair] Rewrapped {{'value': [...]}} → {{'{field}': [...]}} for tool '{name}'")
             return {field: value}
 
-    # Strategy 2: Single required property (any type)
+    # Strategy 2: Single required property (type-checked)
     if len(required) == 1:
         field = list(required)[0]
         if field in props:
+            expected_type = props[field].get("type") if isinstance(props[field], dict) else None
+            if expected_type and not _type_compatible(value, expected_type):
+                print(f"[repair] SKIP rewrap: value type {type(value).__name__} "
+                      f"incompatible with schema type '{expected_type}' for '{field}' in tool '{name}'")
+                return input_dict
             print(f"[repair] Rewrapped {{'value': ...}} → {{'{field}': ...}} for tool '{name}'")
             return {field: value}
 
@@ -524,14 +594,19 @@ _PARTIAL_TOOL_RE = re.compile(
     re.DOTALL,
 )
 
+# Partial argkv: <tool_call>Name<arg_key>k</arg_key><arg_value>v</arg_value>...(truncated)
+_PARTIAL_ARGKV_RE = re.compile(
+    r'<tool_call>(\w+)((?:\s*<arg_key>[\s\S]*?</arg_key>\s*<arg_value>[\s\S]*?</arg_value>)*[\s\S]*)',
+    re.DOTALL,
+)
+
 
 def _get_tool_required_fields(tool_name: str, tools: list | None) -> set[str]:
     """Get required fields from a tool's input_schema."""
     if not tools:
         return set()
     for t in tools:
-        name = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
-        if name == tool_name:
+        if get_tool_name(t) == tool_name:
             schema = getattr(t, "input_schema", None) or (t.get("input_schema") if isinstance(t, dict) else None)
             if isinstance(schema, dict):
                 return set(schema.get("required", []))
@@ -559,6 +634,22 @@ def recover_truncated_deterministic(
 
     match = _PARTIAL_TOOL_RE.search(partial_xml)
     if not match:
+        # Try argkv format: <tool_call>Name<arg_key>...
+        match_argkv = _PARTIAL_ARGKV_RE.search(partial_xml)
+        if match_argkv:
+            tool_name = match_argkv.group(1).strip()
+            args_portion = match_argkv.group(2)
+            # Extract all complete key-value pairs
+            input_dict = {}
+            for kv in _ARG_KV_PAIR_RE.finditer(args_portion):
+                input_dict[kv.group(1).strip()] = kv.group(2)
+            if input_dict:
+                required = _get_tool_required_fields(tool_name, tools)
+                missing = required - set(input_dict.keys())
+                if not missing:
+                    print(f"[no-tools] Deterministic recovery OK (argkv) for '{tool_name}': keys={list(input_dict.keys())}")
+                    return [{"type": "tool_use", "id": make_tool_id(), "name": tool_name, "input": input_dict}]
+                print(f"[no-tools] Deterministic recovery (argkv) for '{tool_name}' missing: {missing}")
         return None
 
     tool_name = match.group(1).strip()
@@ -614,7 +705,7 @@ def recover_truncated_deterministic(
     print(f"[no-tools] Deterministic recovery OK for '{tool_name}': keys={list(parsed.keys())}")
     return [{
         "type": "tool_use",
-        "id": f"toolu_{uuid.uuid4().hex[:24]}",
+        "id": make_tool_id(),
         "name": tool_name,
         "input": parsed,
     }]
@@ -661,17 +752,24 @@ async def recover_incomplete_tool_call(
     tool_def = ""
     if tools and tool_name:
         for t in tools:
-            t_name = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
-            if t_name == tool_name:
-                raw = t.model_dump() if hasattr(t, "model_dump") else (t.dict() if hasattr(t, "dict") else dict(t))
-                tool_def = json.dumps(raw, ensure_ascii=False)[:500]
+            if get_tool_name(t) == tool_name:
+                tool_def = json.dumps(to_dict(t), ensure_ascii=False)[:500]
                 break
+
+    # Extract text context before <tool_call for better model understanding
+    context_text = ""
+    tc_idx = partial_xml.find("<tool_call")
+    if tc_idx > 0:
+        context_text = partial_xml[:tc_idx].strip()[-500:]  # last 500 chars of context
 
     prompt = (
         "Complete this truncated XML tool call. "
         "Respond ONLY with the complete <tool_call> XML, nothing else.\n\n"
-        f"Partial XML:\n{partial_xml[:2000]}\n\n"
     )
+    if context_text:
+        prompt += f"Context (what the assistant was doing):\n{context_text}\n\n"
+    xml_start = tc_idx if tc_idx >= 0 else 0
+    prompt += f"Partial XML:\n{partial_xml[xml_start:xml_start + 2000]}\n\n"
     if tool_def:
         prompt += f"Tool schema:\n{tool_def}\n"
 
@@ -705,6 +803,31 @@ async def recover_incomplete_tool_call(
     return None
 
 
+def strip_tool_call_xml(text: str) -> str:
+    """Strip all <tool_call> XML variants from text. Last-resort fallback.
+
+    Handles both name= format and GLM argkv format, complete and incomplete.
+    """
+    if not text:
+        return text
+    has_tool_call = "<tool_call" in text
+    has_inner_tags = "<arg_key>" in text or "<arg_value>" in text or "</arg_key>" in text or "</arg_value>" in text
+    if not has_tool_call and not has_inner_tags:
+        return text
+    # Remove complete tool calls (all 4 formats)
+    cleaned = _TOOL_CALL_RE.sub("", text)
+    cleaned = _TOOL_CALL_FALLBACK_RE.sub("", cleaned)
+    cleaned = _TOOL_CALL_BARE_RE.sub("", cleaned)
+    cleaned = _TOOL_CALL_ARGKV_RE.sub("", cleaned)
+    # Remove incomplete <tool_call...> fragments (no closing tag)
+    # Bounded match (8000/2000 chars) prevents destroying all content after a false positive
+    cleaned = re.sub(r'<tool_call\s+[^>]*>(?:(?!</tool_call>)[\s\S]){0,8000}$', '', cleaned)
+    cleaned = re.sub(r'<tool_call>[A-Za-z]\w*(?:<arg_key>[\s\S]*?</arg_key>\s*<arg_value>[\s\S]*?</arg_value>)*(?:(?!</tool_call>)[\s\S]){0,2000}$', '', cleaned)
+    # Orphaned opening AND closing inner tags
+    cleaned = re.sub(r'</?(?:tool_call|input|textarea|arguments|params|arg_key|arg_value)>', '', cleaned)
+    return cleaned.strip()
+
+
 # ---------------------------------------------------------------------------
 # 6. Streaming XML buffer (state machine)
 # ---------------------------------------------------------------------------
@@ -731,15 +854,55 @@ class XmlToolBuffer:
         Returns list of segments in order:
             [{"type": "text", "text": "..."}, {"type": "tool_call", "name": ..., "input": {...}}, ...]
         """
+        if "<tool_call" in text or "<tool_call" in self.buffer:
+            print(f"[xml-buffer] feed(): chunk={len(text)}c buf_before={len(self.buffer)}c "
+                  f"in_tool={self.in_tool} has_tc_in_chunk={'<tool_call' in text} "
+                  f"buf_first100={self.buffer[:100]}", flush=True)
         self.buffer += text
         return self._drain()
 
+    def _has_plausible_tool_call(self) -> bool:
+        """Check if buffer contains a plausible tool call, not just documentation mentioning <tool_call>."""
+        buf = self.buffer
+        idx = buf.find("<tool_call")
+        if idx == -1:
+            return False
+        after = buf[idx + len("<tool_call"):]
+        if not after:
+            return True  # Ambiguous at buffer end — treat as possible tool (conservative)
+        first = after[0]
+        # Standard format: <tool_call name="...   or   <tool_call\n
+        if first in (' ', '\t', '\n', '\r'):
+            return True
+        # GLM format: <tool_call>ToolName...
+        if first == '>':
+            rest = after[1:]
+            if rest and rest[0].isalpha():
+                return True
+            return False  # <tool_call>` or <tool_call>\n — not a tool
+        return False  # <tool_call(, <tool_call? — not a tool
+
     def flush(self) -> list[dict]:
-        """Flush remaining buffer as text (call at stream end)."""
+        """Flush remaining buffer at stream end.
+
+        Returns: "text", "tool_call", or "incomplete_tool_call" segments.
+        """
         if not self.buffer:
             return []
-        if "<tool_call" in self.buffer:
-            print(f"[no-tools] WARNING: flushing incomplete tool call ({len(self.buffer)} chars). First 300: {self.buffer[:300]}")
+        if "<tool_call" in self.buffer and self._has_plausible_tool_call():
+            print(f"[no-tools] WARNING: flushing incomplete tool call "
+                  f"({len(self.buffer)} chars). First 300: {self.buffer[:300]}")
+            segments = []
+            idx = self.buffer.find("<tool_call")
+            if idx > 0:
+                prefix = self.buffer[:idx].strip()
+                if prefix:
+                    segments.append({"type": "text", "text": prefix})
+            incomplete = self.buffer[idx:] if idx >= 0 else self.buffer
+            segments.append({"type": "incomplete_tool_call", "text": incomplete})
+            self.buffer = ""
+            self.in_tool = False
+            return segments
         result = [{"type": "text", "text": self.buffer}]
         self.buffer = ""
         self.in_tool = False
@@ -785,9 +948,24 @@ class XmlToolBuffer:
                 return None
 
             next_char = self.buffer[end_of_tag]
-            if next_char not in (' ', '\t', '\n', '\r'):
-                # Not valid tool_call tag — either '>' (no name= attribute) or other char
-                # Our format requires <tool_call name="...">, so space after <tool_call is mandatory
+            if next_char == '>':
+                # GLM format: <tool_call>ToolName<arg_key>...
+                # Validate '>' is followed by alpha char (tool name start).
+                # Rejects: `<tool_call>` (backtick-quoted docs), <tool_call>\n, etc.
+                name_start = end_of_tag + 1
+                if name_start >= len(self.buffer):
+                    # Buffer ends at '>' — need more data to check tool name
+                    if idx > 0:
+                        text = self.buffer[:idx]
+                        self.buffer = self.buffer[idx:]
+                        return {"type": "text", "text": text}
+                    return None
+                if not self.buffer[name_start].isalpha():
+                    # Not a valid tool name start — skip this occurrence
+                    search_start = name_start
+                    continue
+            elif next_char not in (' ', '\t', '\n', '\r'):
+                # Not valid tool_call tag — requires space (name= format)
                 search_start = end_of_tag
                 continue
 
@@ -880,6 +1058,17 @@ class XmlToolBuffer:
             print(f"[xml-buffer] BARE match (no inner tags): name={name} content={len(raw_content)} chars")
             parsed = _safe_parse_tool_input(raw_content, name, tools=self.tools)
             return {"type": "tool_call", "name": name, "input": parsed}
+
+        # 4) GLM format: <tool_call>Name<arg_key>key</arg_key><arg_value>val</arg_value></tool_call>
+        argkv_match = _TOOL_CALL_ARGKV_RE.search(xml)
+        if argkv_match:
+            parsed = _parse_argkv_tool(argkv_match)
+            name = parsed["name"]
+            if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
+                print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
+                return {"type": "text", "text": xml}
+            print(f"[xml-buffer] ARGKV match: name={name} keys={list(parsed['input'].keys())}")
+            return {"type": "tool_call", "name": name, "input": parsed["input"]}
 
         print(f"[xml-buffer] FAILED all regexes ({len(xml)} chars). Full XML: {xml[:500]}", flush=True)
         return {"type": "text", "text": xml}
