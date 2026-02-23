@@ -191,7 +191,7 @@ def apply_policy_and_routing(
             f"[proxy-policy] Tools not allowed and were removed: {', '.join(dropped)}. Allowed: {', '.join(sorted(allow))}."
         )
 
-    # 4) Model mapping SIEMPRE (haiku/sonnet -> provider + big/small)
+    # 4) Model mapping (haiku/sonnet/opus -> provider prefix + big/small)
     request_obj.model = map_claude_alias_to_target(
         getattr(request_obj, "model", ""),
         preferred_provider=preferred_provider,
@@ -338,6 +338,7 @@ def _inject_credentials(
     openai_api_key: str,
     openai_base_url: Optional[str],
     anthropic_api_key: Optional[str],
+    anthropic_base_url: Optional[str] = None,
     gemini_api_key: Optional[str],
     use_vertex_auth: bool,
     vertex_project: str,
@@ -355,8 +356,10 @@ def _inject_credentials(
             litellm_request["custom_llm_provider"] = "vertex_ai"
         else:
             litellm_request["api_key"] = gemini_api_key
-    else:
+    else:  # anthropic/ prefix (or bare model names)
         litellm_request["api_key"] = anthropic_api_key
+        if anthropic_base_url:
+            litellm_request["api_base"] = anthropic_base_url
 
 
 async def run_messages(
@@ -365,6 +368,7 @@ async def run_messages(
     openai_api_key: str,
     openai_base_url: Optional[str],
     anthropic_api_key: Optional[str],
+    anthropic_base_url: Optional[str] = None,
     gemini_api_key: Optional[str],
     use_vertex_auth: bool,
     vertex_project: str,
@@ -454,7 +458,8 @@ async def run_messages(
     _inject_credentials(
         litellm_request, model=model,
         openai_api_key=openai_api_key, openai_base_url=openai_base_url,
-        anthropic_api_key=anthropic_api_key, gemini_api_key=gemini_api_key,
+        anthropic_api_key=anthropic_api_key, anthropic_base_url=anthropic_base_url,
+        gemini_api_key=gemini_api_key,
         use_vertex_auth=use_vertex_auth, vertex_project=vertex_project,
         vertex_location=vertex_location,
     )

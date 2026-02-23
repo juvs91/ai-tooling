@@ -180,6 +180,8 @@ def build_tool_prompt(tools: list[dict]) -> str:
         '- CRITICAL: You MUST use exactly <input> and </input> tags. Do NOT use <textarea>, <arguments>, <params>, or any other tag name.\n'
         '- CRITICAL: Use DOUBLE QUOTES for the name attribute: name="ToolName" (NOT name=\'ToolName\').\n'
         '- CRITICAL: The <input> must contain valid JSON (double quotes for keys and string values, NOT single quotes).\n'
+        '- CRITICAL: Do NOT include <reasoning> tags or any non-tool XML inside <tool_call> blocks. Put reasoning OUTSIDE the tool call.\n'
+        '- CRITICAL: Do NOT invent XML tag names like <tool_name>, <args>, <function>. Use ONLY <tool_call> and <input>.\n'
         "- You can include text before and after tool calls.\n"
         "- You can make multiple tool calls in a single response.\n"
         "- Always use the exact tool name as listed below.\n"
@@ -304,13 +306,15 @@ def rewrite_messages_without_tools(messages: list[dict]) -> list[dict]:
 # Accept both single and double quotes for name= attribute (deepseek-reasoner uses single quotes)
 _INNER_TAG = r"(?:input|textarea|arguments|params|json|content|parameters)"
 _NAME_ATTR = r"""name=["']([^"']+)["']"""
+# Skip optional <reasoning>...</reasoning> tags that models may inject inside <tool_call>
+_REASONING_SKIP = r'(?:<reasoning>[\s\S]*?</reasoning>\s*)*'
 _TOOL_CALL_RE = re.compile(
-    rf'<tool_call\s+{_NAME_ATTR}\s*>\s*<{_INNER_TAG}>([\s\S]*?)</{_INNER_TAG}>\s*</tool_call>',
+    rf'<tool_call\s+{_NAME_ATTR}\s*>\s*{_REASONING_SKIP}<{_INNER_TAG}>([\s\S]*?)</{_INNER_TAG}>\s*</tool_call>',
     re.DOTALL,
 )
 # Fallback regex: matches any single XML tag wrapping the content
 _TOOL_CALL_FALLBACK_RE = re.compile(
-    rf'<tool_call\s+{_NAME_ATTR}\s*>\s*<(\w+)>([\s\S]*?)</\2>\s*</tool_call>',
+    rf'<tool_call\s+{_NAME_ATTR}\s*>\s*{_REASONING_SKIP}<(\w+)>([\s\S]*?)</\2>\s*</tool_call>',
     re.DOTALL,
 )
 # Last-resort regex: NO inner tags — JSON directly inside <tool_call>
@@ -328,6 +332,14 @@ _TOOL_CALL_ARGKV_RE = re.compile(
 )
 _ARG_KV_PAIR_RE = re.compile(
     r'<arg_key>([\s\S]*?)</arg_key>\s*<arg_value>([\s\S]*?)</arg_value>',
+    re.DOTALL,
+)
+
+# 5th fallback: diluted XML format after prompt dilution — models invent their own tags
+# Handles: <tool_name>Read</tool_name><args>{"file_path": "..."}</args>
+# or:      <tool_name>Read</tool_name><arguments>{"file_path": "..."}</arguments>
+_TOOL_DILUTED_RE = re.compile(
+    r'<tool_name>([\w]+)</tool_name>\s*<(?:args|arguments|params|input)>([\s\S]*?)</(?:args|arguments|params|input)>',
     re.DOTALL,
 )
 
@@ -352,9 +364,12 @@ def _strip_inner_xml_tags(raw: str) -> str:
              <textarea>{json}</textarea> → {json}
              <![CDATA[{json}]]> → {json}
              <input><![CDATA[{json}]]></input> → {json}
+             <reasoning>...</reasoning>{json} → {json}
              {json} → {json} (no-op)
     """
     stripped = raw.strip()
+    # Strip <reasoning> tags that models may inject before/around the JSON
+    stripped = re.sub(r'<reasoning>[\s\S]*?</reasoning>', '', stripped).strip()
     # Strip CDATA wrapper if present (XML standard construct)
     cdata_match = _CDATA_RE.match(stripped)
     if cdata_match:
@@ -496,6 +511,22 @@ def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = 
             if tool_blocks:
                 used_re = _TOOL_CALL_ARGKV_RE
 
+        # 5th fallback: diluted XML format (models invent <tool_name>/<args> after prompt dilution)
+        if not tool_blocks and "<tool_name>" in text:
+            for match in _TOOL_DILUTED_RE.finditer(text):
+                name = match.group(1).strip()
+                raw_input = match.group(2)
+                print(f"[no-tools] DILUTED regex match for tool '{name}' (model used <tool_name>/<args> format)")
+                parsed_input = _safe_parse_tool_input(raw_input, name, tools=tools)
+                tool_blocks.append({
+                    "type": "tool_use",
+                    "id": make_tool_id(),
+                    "name": name,
+                    "input": parsed_input,
+                })
+            if tool_blocks:
+                used_re = _TOOL_DILUTED_RE
+
     except Exception as e:
         print(f"[no-tools] Error extracting tool calls: {e}")
         return [], text
@@ -590,7 +621,7 @@ def _repair_tool_input(name: str, input_dict: dict, tools: list | None) -> dict:
 
 # Regex to extract partial tool call: name + whatever JSON we got
 _PARTIAL_TOOL_RE = re.compile(
-    r'<tool_call\s+' + _NAME_ATTR + r'\s*>\s*<' + _INNER_TAG + r'>\s*([\s\S]*)',
+    r'<tool_call\s+' + _NAME_ATTR + r'\s*>\s*' + _REASONING_SKIP + r'<' + _INNER_TAG + r'>\s*([\s\S]*)',
     re.DOTALL,
 )
 

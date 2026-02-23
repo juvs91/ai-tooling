@@ -11,7 +11,8 @@ import os
 from llm.schemas import MessagesRequest, MessagesResponse, Usage
 from llm.tool_prompting import (
     is_no_tools_model, build_tool_prompt, rewrite_messages_without_tools,
-    extract_tool_calls_from_text, strip_tool_call_xml, recover_incomplete_tool_call,
+    extract_tool_calls_from_text, strip_tool_call_xml,
+    recover_truncated_deterministic,
     _build_valid_tool_names, validate_tool_name,
 )
 
@@ -631,38 +632,11 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
             finish_reason = "tool_calls"
             print(f"[no-tools] Extracted {len(xml_tool_blocks)} tool calls from text response")
         elif "<tool_call" in content_text:
-            # Extraction failed but <tool_call present → try async recovery
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Already inside async context — create a task
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as pool:
-                        recovered = pool.submit(
-                            asyncio.run,
-                            recover_incomplete_tool_call(
-                                partial_xml=content_text,
-                                tools=[to_dict(t) for t in request_tools] if request_tools else None,
-                                model=os.environ.get("CLASSIFIER_MODEL", "openai/deepseek-chat"),
-                                api_key=os.environ.get("CLASSIFIER_API_KEY", ""),
-                                api_base=os.environ.get("CLASSIFIER_BASE_URL"),
-                            )
-                        ).result(timeout=5)
-                else:
-                    recovered = loop.run_until_complete(
-                        recover_incomplete_tool_call(
-                            partial_xml=content_text,
-                            tools=[to_dict(t) for t in request_tools] if request_tools else None,
-                            model=os.environ.get("CLASSIFIER_MODEL", "openai/deepseek-chat"),
-                            api_key=os.environ.get("CLASSIFIER_API_KEY", ""),
-                            api_base=os.environ.get("CLASSIFIER_BASE_URL"),
-                        )
-                    )
-            except Exception as e:
-                print(f"[recovery] Non-streaming recovery failed: {type(e).__name__}: {e}")
-                recovered = None
-
+            # Extraction failed but <tool_call present → deterministic recovery (sync, no LLM)
+            recovered = recover_truncated_deterministic(
+                content_text,
+                tools=[to_dict(t) for t in request_tools] if request_tools else None,
+            )
             if recovered:
                 if valid_names:
                     recovered = [tc for tc in recovered if validate_tool_name(tc.get("name", ""), valid_names)]
@@ -673,9 +647,9 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
                         content.append({"type": "text", "text": clean})
                     content.extend(recovered)
                     finish_reason = "tool_calls"
-                    print(f"[recovery] Non-streaming: recovered {len(recovered)} tool(s)")
-            else:
-                # Level 3: strip XML from content text
+                    print(f"[recovery] Non-streaming: deterministic recovery got {len(recovered)} tool(s)")
+            if not recovered:
+                # Fallback: strip XML from content text
                 clean = strip_tool_call_xml(content_text)
                 if clean != content_text:
                     content = [{"type": "text", "text": clean}] if clean else []

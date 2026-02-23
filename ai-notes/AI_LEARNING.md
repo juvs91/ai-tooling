@@ -2,7 +2,7 @@
 > Aprendizajes iterativos del proyecto. Actualizar despues de cada sesion.
 
 ## Ultima actualizacion
-- Fecha: 2026-02-12
+- Fecha: 2026-02-22
 - Por: claude-opus-4-6 + jeguzman
 
 ---
@@ -71,6 +71,11 @@
 | 2026-02-10 | Usar original_model en responses | Response contenia `openai/deepseek-reasoner` en vez de `claude-opus-4-6`. CC no valida estrictamente pero es mas correcto | Dejar modelo mapeado (funciona pero confuso en logs) |
 | 2026-02-12 | Defensivo: stop_reason=tool_use cuando hay tool_use blocks (streaming + non-streaming) | CC requiere stop_reason="tool_use" per Anthropic docs. Providers como Z.AI pueden retornar finish_reason="stop" con tool_calls | Solo confiar en finish_reason=="tool_calls" (falla si provider no lo retorna) |
 | 2026-02-12 | Cambiar stop_reason "error" a "end_turn" en fatal stream errors | "error" no es Literal valido de Anthropic. CC podria rechazarlo silenciosamente causando freeze | Agregar "error" al Literal (rompe compatibilidad Anthropic) |
+| 2026-02-22 | Anthropic passthrough mode para Z.AI `/api/anthropic` | Elimina double conversion Anthropic→OpenAI→Anthropic. httpx directo, SSE relay, fallback a pipeline standard | Usar litellm para Anthropic (agrega su propia conversion), solo OpenAI endpoint (status quo con XML issues) |
+| 2026-02-22 | `_REASONING_SKIP` regex pattern en tool_call regexes | GLM/DeepSeek meten `<reasoning>` dentro de `<tool_call>`, corrompe JSON extraction | Stripear antes de regex (pierde contexto para debug), rechazar tool_call (pierde funcionalidad) |
+| 2026-02-22 | 5th fallback regex `_TOOL_DILUTED_RE` para `<tool_name>/<args>` | Despues de ~20 compressions el XML prompt se diluye, modelos inventan tags | Solo reforzar prompt (no catchea 100%), no soportar (pierde herramientas) |
+| 2026-02-22 | XML reinforcement en compression reassembly | El reminder se inyecta despues de cada compresion para prevenir dilution progresiva | Repetir tool prompt completo (4K tokens extra), no hacer nada (prompt dilution crash) |
+| 2026-02-22 | Reemplazar asyncio anti-pattern en converters.py con recover_truncated_deterministic | ThreadPoolExecutor+asyncio.run puede deadlock en uvicorn. Sync deterministic recovery es suficiente para non-streaming | Hacer convert_litellm_to_anthropic async (refactor grande), mantener anti-pattern (riesgo deadlock) |
 
 ---
 
