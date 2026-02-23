@@ -10,7 +10,7 @@ services:
       - "8082:8082"
     volumes:
       - ./vendor/claude-code-proxy:/claude-code-proxy
-    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload
+    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-exclude '.venv'
 
   proxy_cloud:
     image: ghcr.io/1rgs/claude-code-proxy:main
@@ -23,4 +23,4 @@ services:
       - "8083:8082"
     volumes:
       - ./vendor/claude-code-proxy:/claude-code-proxy
-    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload
+    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-exclude '.venv'

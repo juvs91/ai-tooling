@@ -1,6 +1,7 @@
 # app/proxy/proxy.py
 from __future__ import annotations
 import asyncio
+import json
 from typing import Any, Optional, Tuple
 
 import litellm
@@ -17,6 +18,7 @@ from litellm.exceptions import (
 from llm.compressor import estimate_tools_tokens
 from utils.utils import (
     approx_tokens_from_bytes,
+    get_tool_name,
     parse_allowlist,
     ensure_system_note,
     filter_tools_allowlist,
@@ -26,6 +28,7 @@ from utils.metrics import metrics
 from router.llm_router import choose_local_model
 from llm.converters import convert_anthropic_to_litellm
 from llm.compressor import compress_messages_if_needed
+from llm.tool_prompting import is_no_tools_model
 from router.model_mapper import map_claude_alias_to_target
 
 
@@ -63,7 +66,7 @@ def _build_tool_enforcement_prompt(tools: list | None) -> str:
         return ""
     tool_names = []
     for t in (tools or []):
-        name = getattr(t, "name", None) if not isinstance(t, dict) else t.get("name")
+        name = get_tool_name(t)
         if name:
             tool_names.append(name)
     if not tool_names:
@@ -170,7 +173,7 @@ def apply_policy_and_routing(
         # drop everything
         dropped = []
         for t in (getattr(request_obj, "tools", None) or []):
-            name = getattr(t, "name", None) if not isinstance(t, dict) else t.get("name")
+            name = get_tool_name(t)
             if name:
                 dropped.append(name)
         request_obj.tools = None
@@ -379,6 +382,19 @@ async def run_messages(
     model_ctx = int(os.environ.get("MODEL_CONTEXT_WINDOW", "0"))
     litellm_request = convert_anthropic_to_litellm(request_obj, model_context_window=model_ctx)
 
+    # Provider-specific extra_body params (e.g. Z.AI requires tool_stream=True)
+    # Configured via STREAM_EXTRA_BODY env var (JSON object), applied to all streaming+tools requests.
+    # Example: STREAM_EXTRA_BODY={"tool_stream": true}
+    _extra_raw = os.environ.get("STREAM_EXTRA_BODY", "").strip()
+    if _extra_raw and litellm_request.get("stream") and litellm_request.get("tools"):
+        try:
+            extra_params = json.loads(_extra_raw)
+            if isinstance(extra_params, dict) and extra_params:
+                litellm_request.setdefault("extra_body", {}).update(extra_params)
+                print(f"[tools] Applied STREAM_EXTRA_BODY: {list(extra_params.keys())}")
+        except json.JSONDecodeError:
+            print(f"[tools] WARNING: STREAM_EXTRA_BODY is not valid JSON: {_extra_raw[:100]}")
+
     # --- Context compression if needed ---
     if model_ctx > 0:
         comp_model = (os.environ.get("COMPRESSOR_MODEL", "").strip()
@@ -394,6 +410,11 @@ async def run_messages(
             trigger_ratio = float(os.environ.get("COMPRESSOR_TRIGGER_RATIO", "0.85"))
             tools_overhead = estimate_tools_tokens(litellm_request.get("tools"))
 
+            # Fallback compressor (tried if primary fails after retries)
+            fb_model = os.environ.get("COMPRESSOR_FALLBACK_MODEL", "").strip() or None
+            fb_key = os.environ.get("COMPRESSOR_FALLBACK_API_KEY", "").strip() or None
+            fb_base = os.environ.get("COMPRESSOR_FALLBACK_BASE_URL", "").strip() or None
+
             litellm_request["messages"], was_compressed = await compress_messages_if_needed(
                 messages=litellm_request["messages"],
                 model_context_window=model_ctx,
@@ -404,7 +425,31 @@ async def run_messages(
                 trigger_ratio=trigger_ratio,
                 tools_overhead_tokens=tools_overhead,
                 target_model=model,
+                fallback_model=fb_model,
+                fallback_api_key=fb_key,
+                fallback_base_url=fb_base,
             )
+
+            # Recalculate max_completion_tokens after compression.
+            # The initial cap in convert_anthropic_to_litellm() uses pre-compression
+            # message sizes — when input exceeds the context window, remaining goes
+            # negative and dynamic_cap floors to 1024.  After compression shrinks
+            # messages, recalculate so the model gets adequate output budget.
+            if was_compressed and model.startswith("openai/") and not is_no_tools_model(model):
+                provider_max = int(os.environ.get("MAX_OUTPUT_TOKENS", "8192"))
+                input_est = sum(len(str(m.get("content", ""))) for m in litellm_request["messages"]) // 4
+                tools_est = sum(
+                    len(json.dumps(t)) // 4 for t in (litellm_request.get("tools") or [])
+                )
+                remaining = model_ctx - input_est - tools_est
+                safe = int(remaining * 0.85)
+                new_cap = max(1024, min(safe, provider_max))
+                new_max = min(request_obj.max_tokens, new_cap)
+                old_max = litellm_request.get("max_completion_tokens", new_max)
+                if new_max != old_max:
+                    print(f"[compress] Recapped max_tokens: {old_max} → {new_max} "
+                          f"(post-compression input~{input_est} tools~{tools_est} remaining~{remaining})")
+                litellm_request["max_completion_tokens"] = new_max
 
     _inject_credentials(
         litellm_request, model=model,
@@ -424,15 +469,17 @@ async def run_messages(
         return is_stream, out, "primary"
 
     # --- With fallback chain: retry primary, then fallbacks ---
+    primary_error_msg = ""
     try:
         is_stream, out = await _call_provider_with_retry(
             request_obj, litellm_request, max_retries=max_retries, base_delay=base_delay,
         )
         return is_stream, out, "primary"
     except Exception as primary_err:
-        print(f"[fallback] primary failed after {max_retries} attempts: {primary_err}")
+        primary_error_msg = str(primary_err)
+        print(f"[fallback] primary failed after {max_retries} attempts: {primary_error_msg}")
 
-    errors = [f"primary: {primary_err}"]
+    errors = [f"primary: {primary_error_msg}"]
     original_model = getattr(request_obj, "original_model", None) or model
 
     for provider in fallback_providers:

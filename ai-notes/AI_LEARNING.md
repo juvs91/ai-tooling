@@ -127,6 +127,31 @@ print(urllib.request.urlopen(req, timeout=30).read().decode()[:200])
 
 ## Notas de sesiones anteriores
 
+### Sesion 2026-02-20 — ROOT CAUSE: GLM reasoning_content bypasses XmlToolBuffer + tool_stream
+**Objetivo:** Diagnosticar por que GLM-4.7 emite `<tool_call>Read<arg_key>...` como texto plano en vez de tool_use blocks
+**Root cause (3 problemas):**
+1. **reasoning_content bypass**: GLM-4.7 tiene 3 campos en delta: `reasoning_content`, `content`, `tool_calls`. Para non-no-tools models, `reasoning_content` se emitia DIRECTAMENTE como text_delta sin pasar por XmlToolBuffer. Si GLM pone `<tool_call>` XML en reasoning_content (su proceso de pensamiento), aparece como texto plano en CC
+2. **tool_stream=True no configurado**: Z.AI docs dicen que `tool_stream=True` es REQUERIDO para streaming tool calls con glm-4.6/4.7/5. Sin este parametro, GLM no puede streamear tool calls correctamente
+3. **Sin safety net**: Si CUALQUIER path bypasea el buffer (reasoning, un campo nuevo, etc.), no habia fallback para detectar tool calls en texto acumulado
+**Evidence from logs:**
+- ZERO `[xml-buffer]` entries = buffer NUNCA vio tool calls
+- ZERO `[streaming] DIAG:` entries para delta.content = tool call XML NO estaba en content
+- Multiples `end_turn` con `has_xml=False` = tool calls perdidos
+- Conclusion: XML tool calls estaban en `reasoning_content`, que bypaseaba el buffer
+**Resultado (3 fixes):**
+- Fix 1: `streaming.py` — reasoning_content para non-no-tools models ahora pasa por XmlToolBuffer (igual que content). DeepSeek (no_tools_mode=True) sigue buffereando en reasoning_buffer (sin cambio)
+- Fix 2: `proxy.py` — Agrega `tool_stream=True` via `extra_body` para endpoints Z.AI cuando hay streaming + tools
+- Fix 3: `streaming.py` — Safety net al final del stream: si `accumulated_text` contiene `<tool_call>` XML que el buffer perdio, se extraen y emiten como tool_use blocks. En ambas close paths (normal + fallback)
+**Deepseek regression analysis:**
+- DeepSeek es `no_tools_mode=True` → toma la rama `ctx.reasoning_buffer += delta_reasoning` (SIN CAMBIO)
+- `tool_stream=True` solo se agrega para URLs con "z.ai" → DeepSeek NO afectado
+- Safety net solo dispara cuando buffer perdio algo → no interfiere con flujo normal
+**Aprendizaje:**
+- GLM-4.7 usa `reasoning_content` igual que DeepSeek pero CON native tools. Cada campo del delta necesita pasar por el buffer de deteccion XML
+- `tool_stream=True` es un parametro Z.AI-especifico, NO estandar OpenAI. Sin el, tool calls streaming no funcionan correctamente
+- Defense in depth: el safety net es critico porque SIEMPRE puede haber un campo nuevo o un bypass que no anticipamos
+**Archivos modificados:** `llm/streaming.py`, `proxy/proxy.py`
+
 ### Sesion 2026-02-12 — Fix Tool Call Execution (stop_reason + guards + diagnostics)
 **Objetivo:** Diagnosticar y resolver por que CC "muere" al intentar ejecutar tool calls — la conversacion se congela y CC no ejecuta los tools
 **Analisis exhaustivo:** 39 funcionalidades inventariadas en 10 archivos. Plan completo en `.claude/plans/binary-crunching-fiddle.md`

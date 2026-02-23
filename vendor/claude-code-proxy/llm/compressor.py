@@ -7,13 +7,27 @@ When a conversation exceeds the model's context window, this module:
   2. Summarizes older messages using a cheap LLM call
   3. Reassembles: [system] + [summary] + [recent messages]
   4. Falls back to simple trimming if the compressor fails
+
+Resilience layers:
+  - Retry with exponential backoff (3 attempts per endpoint)
+  - Circuit breaker: skip compressor for 60s after 5 consecutive failures
+  - Fallback compressor: try a secondary endpoint if primary fails
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from typing import Any, Optional
 
 from litellm import token_counter
+
+
+# Circuit breaker state (module-level, persists across requests)
+_consecutive_failures: int = 0
+_circuit_open_until: float = 0.0
+_CIRCUIT_BREAKER_THRESHOLD = 5   # failures before opening circuit
+_CIRCUIT_BREAKER_COOLDOWN = 60.0  # seconds to skip compressor after circuit opens
 
 
 _COMPRESS_PROMPT = (
@@ -92,6 +106,9 @@ async def compress_messages_if_needed(
     trigger_ratio: float = 0.85,
     tools_overhead_tokens: int = 0,
     target_model: str = "",
+    fallback_model: Optional[str] = None,
+    fallback_api_key: Optional[str] = None,
+    fallback_base_url: Optional[str] = None,
 ) -> tuple[list[dict], bool]:
     """
     Compress conversation if it exceeds the model's context window.
@@ -99,13 +116,16 @@ async def compress_messages_if_needed(
     Args:
         messages: OpenAI-format messages (already converted from Anthropic)
         model_context_window: Target model's context window in tokens
-        compressor_model: LiteLLM model string for the compressor (e.g. "openai/deepseek-chat")
+        compressor_model: LiteLLM model string for the compressor (e.g. "openai/glm-4.7-flash")
         compressor_api_key: API key for the compressor
         compressor_base_url: Optional base URL for the compressor
         keep_recent: Number of recent messages to keep intact
         trigger_ratio: Compress when estimated tokens > ratio * window (default 0.85)
         tools_overhead_tokens: Extra tokens from tool definitions (not in messages)
         target_model: LiteLLM model string for the target model (used for accurate token counting)
+        fallback_model: Optional fallback compressor model (tried if primary fails)
+        fallback_api_key: Optional fallback compressor API key
+        fallback_base_url: Optional fallback compressor base URL
 
     Returns:
         (messages, was_compressed) — compressed messages and whether compression happened
@@ -146,8 +166,13 @@ async def compress_messages_if_needed(
     print(f"[compress] Triggered: {estimated_tokens} tokens > {threshold} threshold. "
           f"Compressing {len(old_messages)} old messages, keeping {len(recent_messages)} recent.")
 
-    # Try LLM compression
-    summary = await _llm_compress(old_messages, compressor_model, compressor_api_key, compressor_base_url)
+    # Try LLM compression (retry + circuit breaker + fallback)
+    summary = await _llm_compress(
+        old_messages, compressor_model, compressor_api_key, compressor_base_url,
+        fallback_model=fallback_model,
+        fallback_api_key=fallback_api_key,
+        fallback_base_url=fallback_base_url,
+    )
 
     if summary:
         compressed = _reassemble_with_summary(system_msg, summary, recent_messages)
@@ -164,43 +189,106 @@ async def compress_messages_if_needed(
     return trimmed, True
 
 
+async def _llm_compress_single(
+    prompt: str,
+    model: str,
+    api_key: str,
+    api_base: Optional[str],
+    retries: int = 3,
+    label: str = "primary",
+) -> Optional[str]:
+    """
+    Call a single compressor endpoint with retry + exponential backoff.
+    Returns summary string or None on failure.
+    """
+    import litellm
+
+    for attempt in range(retries):
+        try:
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 2048,
+                "temperature": 0,
+                "stream": False,
+            }
+            if api_key:
+                kwargs["api_key"] = api_key
+            if api_base:
+                kwargs["api_base"] = api_base
+
+            resp = await litellm.acompletion(**kwargs)
+            summary = (resp.choices[0].message.content or "").strip()
+
+            if len(summary) < 20:
+                print(f"[compress] {label} returned too-short summary ({len(summary)} chars)")
+                return None
+
+            return summary
+
+        except Exception as e:
+            wait = 2 ** attempt  # 1s, 2s, 4s
+            print(f"[compress] {label} attempt {attempt + 1}/{retries} failed: "
+                  f"{type(e).__name__}: {str(e)[:150]}"
+                  f"{f' (retry in {wait}s)' if attempt < retries - 1 else ''}")
+            if attempt < retries - 1:
+                await asyncio.sleep(wait)
+
+    return None
+
+
 async def _llm_compress(
     old_messages: list[dict],
     model: str,
     api_key: str,
     api_base: Optional[str],
+    fallback_model: Optional[str] = None,
+    fallback_api_key: Optional[str] = None,
+    fallback_base_url: Optional[str] = None,
 ) -> Optional[str]:
-    """Call compressor LLM to summarize old messages. Returns summary or None on failure."""
-    import litellm
+    """
+    Call compressor LLM with resilience: retry + circuit breaker + fallback endpoint.
+    Returns summary or None on failure.
+    """
+    global _consecutive_failures, _circuit_open_until
+
+    # Circuit breaker: skip if too many recent failures
+    now = time.monotonic()
+    if _circuit_open_until > now:
+        remaining = int(_circuit_open_until - now)
+        print(f"[compress] Circuit breaker OPEN — skipping compressor ({remaining}s remaining)")
+        return None
 
     conversation_text = _serialize_messages_for_summary(old_messages)
     prompt = _COMPRESS_PROMPT.format(conversation=conversation_text)
 
-    try:
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 2048,
-            "temperature": 0,
-            "stream": False,
-        }
-        if api_key:
-            kwargs["api_key"] = api_key
-        if api_base:
-            kwargs["api_base"] = api_base
-
-        resp = await litellm.acompletion(**kwargs)
-        summary = (resp.choices[0].message.content or "").strip()
-
-        if len(summary) < 20:
-            print(f"[compress] Compressor returned too-short summary ({len(summary)} chars)")
-            return None
-
+    # Try primary compressor (3 retries)
+    summary = await _llm_compress_single(prompt, model, api_key, api_base, label="primary")
+    if summary:
+        _consecutive_failures = 0
         return summary
 
-    except Exception as e:
-        print(f"[compress] Compressor LLM failed: {type(e).__name__}: {str(e)[:200]}")
-        return None
+    # Try fallback compressor if configured (3 retries)
+    if fallback_model and fallback_api_key:
+        print(f"[compress] Primary failed, trying fallback ({fallback_model})")
+        summary = await _llm_compress_single(
+            prompt, fallback_model, fallback_api_key, fallback_base_url, label="fallback"
+        )
+        if summary:
+            _consecutive_failures = 0
+            return summary
+
+    # Both failed — update circuit breaker
+    _consecutive_failures += 1
+    if _consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
+        _circuit_open_until = now + _CIRCUIT_BREAKER_COOLDOWN
+        print(f"[compress] Circuit breaker OPENED after {_consecutive_failures} consecutive failures "
+              f"(cooldown {_CIRCUIT_BREAKER_COOLDOWN}s)")
+    else:
+        print(f"[compress] Compressor failed ({_consecutive_failures}/{_CIRCUIT_BREAKER_THRESHOLD} "
+              f"before circuit breaker)")
+
+    return None
 
 
 def _reassemble_with_summary(
