@@ -552,7 +552,8 @@ async def handle_streaming(response_generator: Any, original_request: Any, model
                     # Safety net: catch <tool_call> XML in accumulated text that
                     # the buffer missed (e.g. arrived via reasoning_content before
                     # the buffer fix, or any other bypass path).
-                    if not ctx.has_xml_tool_calls and "<tool_call" in ctx.accumulated_text:
+                    # Also catches truncated tool calls when prior XML tools were already emitted.
+                    if "<tool_call" in ctx.accumulated_text:
                         safety_tools, _ = extract_tool_calls_from_text(
                             ctx.accumulated_text, valid_tool_names=ctx.valid_names, tools=ctx.request_tools,
                         )
@@ -562,6 +563,25 @@ async def handle_streaming(response_generator: Any, original_request: Any, model
                             for tc in safety_tools:
                                 for ev in _emit_xml_tool(ctx, tc["name"], tc["input"]):
                                     yield ev
+                        elif finish_reason == "length":
+                            # Truncated tool call that couldn't be recovered —
+                            # warn CC so the user knows an action was dropped
+                            warning = (
+                                "\n\n[proxy-warning: A tool call was truncated due to output length limits. "
+                                "The previous tool calls executed but an additional tool call was cut off. "
+                                "Please retry with the remaining action.]"
+                            )
+                            if ctx.text_block_closed:
+                                # Reopen a new text block for the warning
+                                ctx.last_tool_index += 1
+                                idx = ctx.last_tool_index
+                                yield sse.content_block_start_text(idx)
+                                yield sse.text_delta(idx, warning)
+                                yield sse.content_block_stop(idx)
+                            else:
+                                ctx.accumulated_text += warning
+                            print(f"[streaming] WARNING: Emitted truncation warning for dropped tool call "
+                                  f"({len(ctx.accumulated_text)} chars in accumulated_text)", flush=True)
 
                     tool_events, valid_tool_blocks = _close_native_tool_blocks(ctx, finish_reason)
                     for ev in tool_events:
@@ -587,7 +607,7 @@ async def handle_streaming(response_generator: Any, original_request: Any, model
                 yield ev
 
             # Safety net (fallback path)
-            if not ctx.has_xml_tool_calls and "<tool_call" in ctx.accumulated_text:
+            if "<tool_call" in ctx.accumulated_text:
                 safety_tools, _ = extract_tool_calls_from_text(
                     ctx.accumulated_text, valid_tool_names=ctx.valid_names, tools=ctx.request_tools,
                 )

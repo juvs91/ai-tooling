@@ -74,7 +74,7 @@ def estimate_tools_tokens(tools: list[dict] | None) -> int:
             total_chars += len(json.dumps(tool))
         except Exception:
             total_chars += 500  # conservative fallback per tool
-    return total_chars // 4
+    return total_chars // 3
 
 
 def _serialize_messages_for_summary(messages: list[dict], max_chars: int = 50000) -> str:
@@ -291,6 +291,20 @@ async def _llm_compress(
     return None
 
 
+_XML_REINFORCEMENT = (
+    '[REMINDER] Tool format: <tool_call name="ToolName"><input>{"key": "value"}</input></tool_call>. '
+    "Use ONLY <tool_call> and <input> tags. Do NOT invent other XML tag names.\n\n"
+)
+
+
+def _needs_xml_reinforcement(system_msg: Optional[dict]) -> bool:
+    """Check if system message contains XML tool prompt (needs reinforcement after compression)."""
+    if not system_msg:
+        return False
+    content = system_msg.get("content", "")
+    return "<tool_call" in content
+
+
 def _reassemble_with_summary(
     system_msg: Optional[dict],
     summary: str,
@@ -300,9 +314,11 @@ def _reassemble_with_summary(
     result: list[dict] = []
     if system_msg:
         result.append(system_msg)
+    # Reinforce XML tool format after compression to prevent prompt dilution
+    prefix = _XML_REINFORCEMENT if _needs_xml_reinforcement(system_msg) else ""
     result.append({
         "role": "user",
-        "content": f"[Previous conversation summary]\n{summary}",
+        "content": f"{prefix}[Previous conversation summary]\n{summary}",
     })
     result.append({
         "role": "assistant",
@@ -320,9 +336,11 @@ def _reassemble_trimmed(
     result: list[dict] = []
     if system_msg:
         result.append(system_msg)
+    # Reinforce XML tool format after trimming to prevent prompt dilution
+    prefix = _XML_REINFORCEMENT if _needs_xml_reinforcement(system_msg) else ""
     result.append({
         "role": "user",
-        "content": "[Earlier conversation context was removed to fit context window]",
+        "content": f"{prefix}[Earlier conversation context was removed to fit context window]",
     })
     result.append({
         "role": "assistant",

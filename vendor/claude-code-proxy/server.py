@@ -1,10 +1,9 @@
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 import os
 import json
 import time
 import logging
-import traceback
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -52,6 +51,10 @@ PREFERRED_PROVIDER = os.environ.get("PREFERRED_PROVIDER", "openai").lower()
 SMALL_MODEL = os.environ.get("SMALL_MODEL", "cc-local:chat")
 BIG_MODEL = os.environ.get("BIG_MODEL", SMALL_MODEL)
 BUILDING_MODEL = os.environ.get("BUILDING_MODEL", BIG_MODEL)
+
+# Anthropic-compatible base URL (for providers like Z.AI that expose /api/anthropic)
+# When set alongside ANTHROPIC_API_KEY, LiteLLM uses this as api_base for anthropic/ models.
+ANTHROPIC_BASE_URL = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip() or None
 
 # Context window scaling: Claude Code assumes 200K. If your model has a smaller
 # window, set MODEL_CONTEXT_WINDOW so token counts are scaled proportionally.
@@ -229,11 +232,13 @@ async def create_message(request: MessagesRequest, raw_request: Request):
         t0 = time.monotonic()
         original_model = getattr(request, "original_model", "") or ""
 
+        # ── Standard path (LiteLLM handles all providers: openai/, anthropic/, gemini/) ──
         is_stream, out, provider_used = await run_messages(
             request_obj=request,
             openai_api_key=OPENAI_API_KEY,
             openai_base_url=OPENAI_BASE_URL,
             anthropic_api_key=ANTHROPIC_API_KEY,
+            anthropic_base_url=ANTHROPIC_BASE_URL,
             gemini_api_key=GEMINI_API_KEY,
             use_vertex_auth=USE_VERTEX_AUTH,
             vertex_project=VERTEX_PROJECT,
@@ -245,26 +250,21 @@ async def create_message(request: MessagesRequest, raw_request: Request):
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
         if is_stream:
-            # For streaming, record metrics with tokens=0 (actual counts come from SSE)
             metrics.record(RequestLog(
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 intent=intent,
                 model_requested=original_model,
                 model_used=request.model,
                 provider=provider_used,
-                input_tokens=0,
-                output_tokens=0,
+                input_tokens=0, output_tokens=0,
                 latency_ms=elapsed_ms,
                 is_fallback=provider_used != "primary",
-                is_stream=True,
-                is_analysis=is_analysis,
+                is_stream=True, is_analysis=is_analysis,
             ))
             return StreamingResponse(handle_streaming(out, request, model_context_window=MODEL_CONTEXT_WINDOW), media_type="text/event-stream")
 
-        # non-stream: convertir respuesta a Anthropic
         anthropic_response = convert_litellm_to_anthropic(out, request, model_context_window=MODEL_CONTEXT_WINDOW)
 
-        # Extract tokens from non-streaming response
         input_tokens = getattr(anthropic_response, "usage", None)
         in_tok = input_tokens.input_tokens if input_tokens else 0
         out_tok = input_tokens.output_tokens if input_tokens else 0
@@ -275,12 +275,10 @@ async def create_message(request: MessagesRequest, raw_request: Request):
             model_requested=original_model,
             model_used=request.model,
             provider=provider_used,
-            input_tokens=in_tok,
-            output_tokens=out_tok,
+            input_tokens=in_tok, output_tokens=out_tok,
             latency_ms=elapsed_ms,
             is_fallback=provider_used != "primary",
-            is_stream=False,
-            is_analysis=is_analysis,
+            is_stream=False, is_analysis=is_analysis,
         ))
 
         return anthropic_response

@@ -13,10 +13,7 @@ def strip_provider_prefix(model: str) -> str:
     return model
 
 def _provider_prefix(preferred_provider: str) -> str:
-    """
-    preferred_provider esperado: "openai" | "google" | "anthropic"
-    OJO: para Google usamos "gemini/" porque así lo maneja LiteLLM en tu código.
-    """
+    """Map preferred_provider name to LiteLLM prefix: openai/ | anthropic/ | gemini/"""
     p = (preferred_provider or "openai").lower()
     if p == "google":
         return "gemini/"
@@ -32,16 +29,16 @@ def map_claude_alias_to_target(
     small_model: str,
 ) -> str:
     """
-    Convierte aliases estilo Claude Code ("claude-sonnet-*", "claude-haiku-*")
-    a un target real con prefijo correcto:
-      - openai/<big|small>  (incluye Groq porque es openai-compatible)
-      - gemini/<big|small>  (google)
-      - anthropic/<...>     (si de verdad quieres Anthropic directo)
+    Map Claude Code aliases (claude-sonnet-*, claude-haiku-*, claude-opus-*) to
+    a real model with the correct LiteLLM prefix:
+      - openai/<big|small>     (Z.AI OpenAI-compat, Groq, DeepSeek, etc.)
+      - anthropic/<big|small>  (Z.AI Anthropic-compat, native Anthropic)
+      - gemini/<big|small>     (Google AI / Vertex)
     """
     if not model:
         return _provider_prefix(preferred_provider) + small_model
 
-    # si ya viene con prefijo, respétalo
+    # Already has a provider prefix — keep as-is
     if has_provider_prefix(model):
         return model
 
@@ -49,7 +46,7 @@ def map_claude_alias_to_target(
     low = clean.lower()
     pref = _provider_prefix(preferred_provider)
 
-    # Alias Claude -> tus buckets
+    # Claude aliases → big/small buckets
     if "haiku" in low:
         return pref + small_model
     if "sonnet" in low:
@@ -57,5 +54,5 @@ def map_claude_alias_to_target(
     if "opus" in low:
         return pref + big_model
 
-    # Si NO es alias de claude, pero viene sin prefijo: lo mandamos al provider preferido tal cual
+    # Not a Claude alias, no prefix: route to preferred provider as-is
     return pref + clean
