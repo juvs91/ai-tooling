@@ -5,9 +5,10 @@ services:
     restart: unless-stopped
     env_file:
       - ./.env
-      - profile-envs/cloud.zai.env
+      - profile-envs/cloud.zai-anthropic.env
     environment:
       - PYTHONUNBUFFERED=1
+      - UV_LINK_MODE=copy
     ports:
       - "8084:8082"
     volumes:

@@ -8,7 +8,6 @@ factored into a small helper that returns ``list[str]`` of SSE events.
 from __future__ import annotations
 
 import json
-import os
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -176,6 +175,11 @@ class _StreamCtx:
     # Protocol state
     has_sent_stop_reason: bool = False
 
+    # Classifier config (for tool recovery LLM calls)
+    classifier_model: str = ""
+    classifier_api_key: str = ""
+    classifier_base_url: str | None = None
+
     @property
     def has_any_tools(self) -> bool:
         return self.has_xml_tool_calls or self.tool_index is not None
@@ -271,9 +275,9 @@ async def _recover_incomplete_tool(ctx: _StreamCtx, partial_xml: str) -> list[st
     recovered = await recover_incomplete_tool_call(
         partial_xml=partial_xml,
         tools=ctx.request_tools,
-        model=os.environ.get("CLASSIFIER_MODEL", "openai/deepseek-chat"),
-        api_key=os.environ.get("CLASSIFIER_API_KEY", ""),
-        api_base=os.environ.get("CLASSIFIER_BASE_URL"),
+        model=ctx.classifier_model or "openai/deepseek-chat",
+        api_key=ctx.classifier_api_key,
+        api_base=ctx.classifier_base_url,
     )
     if recovered:
         if ctx.valid_names:
@@ -402,7 +406,14 @@ def _emit_stream_end(ctx: _StreamCtx, stop_reason: str, model_context_window: in
 
 # ── Main streaming handler ───────────────────────────────────────────
 
-async def handle_streaming(response_generator: Any, original_request: Any, model_context_window: int = 0):
+async def handle_streaming(
+    response_generator: Any,
+    original_request: Any,
+    model_context_window: int = 0,
+    classifier_model: str = "",
+    classifier_api_key: str = "",
+    classifier_base_url: str | None = None,
+):
     """Convert a LiteLLM streaming response to Anthropic SSE events."""
     try:
         model = getattr(original_request, "original_model", None) or original_request.model
@@ -417,6 +428,9 @@ async def handle_streaming(response_generator: Any, original_request: Any, model
             request_tools=request_tools,
             valid_names=valid_names,
             xml_tool_buffer=XmlToolBuffer(valid_tool_names=valid_names, tools=request_tools) if request_tools else None,
+            classifier_model=classifier_model,
+            classifier_api_key=classifier_api_key,
+            classifier_base_url=classifier_base_url,
         )
         print(f"[streaming] INIT: model={original_request.model} no_tools_mode={no_tools_mode} xml_buffer={'YES' if ctx.xml_tool_buffer else 'NO'}", flush=True)
 
