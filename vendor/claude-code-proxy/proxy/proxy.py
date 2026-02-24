@@ -5,7 +5,6 @@ import json
 from typing import Any, Optional, Tuple
 
 import litellm
-import os
 from litellm.exceptions import (
     ContextWindowExceededError,
     BadRequestError as LiteLLMBadRequestError,
@@ -31,37 +30,14 @@ from llm.compressor import compress_messages_if_needed
 from llm.tool_prompting import is_no_tools_model
 from router.model_mapper import map_claude_alias_to_target
 
-
-# Base guardrail (always injected). Can be extended via GUARDRAILS_FILE env var.
-_DEFAULT_GUARD = (
-    "[proxy-guard] IMPORTANT: If you do not have tool access (filesystem/bash/etc.) "
-    "or you were not given the file contents, do NOT guess or fabricate. "
-    "Explain what you need (enable tools or paste the content) and proceed only with available info."
-)
-
-def _load_guard_system() -> str:
-    """Load guardrails from file if GUARDRAILS_FILE is set, otherwise use default."""
-    
-    gf = os.environ.get("GUARDRAILS_FILE", "").strip()
-    if gf and os.path.isfile(gf):
-        try:
-            with open(gf, "r") as f:
-                extra = f.read().strip()
-            if extra:
-                return _DEFAULT_GUARD + "\n\n" + extra
-        except Exception:
-            pass
-    return _DEFAULT_GUARD
-
-BASE_GUARD_SYSTEM = _load_guard_system()
+from config import ProxyConfig, ProviderCredentials
 
 
 # ── Tool usage enforcement ──────────────────────────────────────────
 # Injected when ANALYSIS_ENFORCEMENT=1 AND is_analysis_request() matches.
-# Dynamically reads tools from the request — no hardcoded tool names.
 
 def _build_tool_enforcement_prompt(tools: list | None) -> str:
-    """Build a dynamic prompt from the request's actual tools. No maintenance needed."""
+    """Build a dynamic prompt from the request's actual tools."""
     if not tools:
         return ""
     tool_names = []
@@ -101,16 +77,10 @@ def provider_cap_for_base_url(base_url: Optional[str]) -> int:
     if not base_url:
         return 0
     b = base_url.lower()
-
-    # Groq: TPM bajo en on_demand (tu error mostró 6000)
     if "api.groq.com" in b or "groq.com" in b:
-        return 5500  # margen vs 6000
-
-    # Ollama local: prácticamente sin TPM cap (depende de tu HW)
+        return 5500
     if "11434" in b:
-        return 25000  # ajusta a gusto
-
-    # Otros: sin cap por defecto
+        return 25000
     return 0
 
 
@@ -118,25 +88,16 @@ def apply_policy_and_routing(
     *,
     request_obj: Any,
     raw_body: bytes,
-    openai_base_url: Optional[str],
-    tool_allowlist_raw: str,
-    policy_note_in_system: bool,
-    max_input_tokens: int,
-    hard_block_oversize: bool,
-    small_model: str,
-    big_model: str,
-    building_model: str,
-    preferred_provider: str,
+    cfg: ProxyConfig,
     intent: str = "CHAT",
     is_analysis: bool = False,
 ) -> Tuple[int, list[str]]:
-    # Guardar modelo original para logging/debug
+    # Save original model for logging/debug
     if not getattr(request_obj, "original_model", None):
         setattr(request_obj, "original_model", getattr(request_obj, "model", None))
 
-
-    # 1) Guardrail system note (SIN system_content_cls)
-    ensure_system_note(request_obj, BASE_GUARD_SYSTEM)
+    # 1) Guardrail system note
+    ensure_system_note(request_obj, cfg.policy.guard_system)
 
     # 1b) Tool enforcement for analysis requests
     if is_analysis:
@@ -147,30 +108,28 @@ def apply_policy_and_routing(
 
     approx_tokens = approx_tokens_from_bytes(raw_body)
 
-    # ✅ Cap específico por proveedor (antes de llegar a LiteLLM)
-    cap = provider_cap_for_base_url(openai_base_url)
+    # Provider-specific cap (before LiteLLM)
+    cap = provider_cap_for_base_url(cfg.credentials.openai_base_url)
     if cap and approx_tokens > cap:
         msg = (
             f"[proxy-policy] Provider cap exceeded: approx_tokens={approx_tokens} > cap={cap} "
-            f"(base_url={openai_base_url}). Reduce contexto / usa otro provider."
+            f"(base_url={cfg.credentials.openai_base_url}). Reduce context or use another provider."
         )
-        if hard_block_oversize:
+        if cfg.policy.hard_block_oversize:
             raise ValueError(msg)
 
-
     # 2) Hard cap
-    if max_input_tokens > 0 and approx_tokens > max_input_tokens:
+    if cfg.policy.max_input_tokens > 0 and approx_tokens > cfg.policy.max_input_tokens:
         msg = (
             f"[proxy-policy] Oversize request: approx_tokens={approx_tokens} > "
-            f"MAX_INPUT_TOKENS={max_input_tokens}. Reduce workspace/context."
+            f"MAX_INPUT_TOKENS={cfg.policy.max_input_tokens}. Reduce workspace/context."
         )
-        if hard_block_oversize:
+        if cfg.policy.hard_block_oversize:
             raise ValueError(msg)
 
     # 3) Tools allowlist
-    allow = parse_allowlist(tool_allowlist_raw)
+    allow = parse_allowlist(cfg.policy.tool_allowlist_raw)
     if not allow:
-        # drop everything
         dropped = []
         for t in (getattr(request_obj, "tools", None) or []):
             name = get_tool_name(t)
@@ -185,7 +144,7 @@ def apply_policy_and_routing(
             getattr(request_obj, "tools", None),
         )
 
-    if dropped and policy_note_in_system:
+    if dropped and cfg.policy.policy_note_in_system:
         ensure_system_note(
             request_obj,
             f"[proxy-policy] Tools not allowed and were removed: {', '.join(dropped)}. Allowed: {', '.join(sorted(allow))}."
@@ -194,13 +153,13 @@ def apply_policy_and_routing(
     # 4) Model mapping (haiku/sonnet/opus -> provider prefix + big/small)
     request_obj.model = map_claude_alias_to_target(
         getattr(request_obj, "model", ""),
-        preferred_provider=preferred_provider,
-        big_model=big_model,
-        small_model=small_model,
+        preferred_provider=cfg.routing.preferred_provider,
+        big_model=cfg.routing.big_model,
+        small_model=cfg.routing.small_model,
     )
 
     # 5) Intent-based model override
-    if is_ollama_base(openai_base_url):
+    if is_ollama_base(cfg.credentials.openai_base_url):
         # Ollama: full scoring with intent
         chosen = choose_local_model(
             messages=getattr(request_obj, "messages", []) or [],
@@ -208,28 +167,27 @@ def apply_policy_and_routing(
             approx_tokens=approx_tokens,
             system_chars=system_chars(getattr(request_obj, "system", None)),
             tools_count=len(getattr(request_obj, "tools", None) or []),
-            small_model=small_model,
-            big_model=big_model,
-            building_model=building_model,
+            small_model=cfg.routing.small_model,
+            big_model=cfg.routing.big_model,
+            building_model=cfg.routing.building_model,
             intent=intent,
         )
         request_obj.model = f"openai/{chosen}"
     else:
         # Cloud: 3-way intent routing (Z.AI, Groq, OpenAI, DeepSeek, etc.)
-        # Note: server.py already overrides CHAT→BUILDING when tools >= TOOL_UPGRADE_THRESHOLD
         current = request_obj.model
         prefix = current.rsplit("/", 1)[0] if "/" in current else "openai"
 
-        if intent == "CHAT" and small_model != big_model:
-            request_obj.model = f"{prefix}/{small_model}"
-        elif intent == "BUILDING" and building_model != big_model:
-            request_obj.model = f"{prefix}/{building_model}"
+        if intent == "CHAT" and cfg.routing.small_model != cfg.routing.big_model:
+            request_obj.model = f"{prefix}/{cfg.routing.small_model}"
+        elif intent == "BUILDING" and cfg.routing.building_model != cfg.routing.big_model:
+            request_obj.model = f"{prefix}/{cfg.routing.building_model}"
         # PLANNING (and fallback): stays on big_model (already mapped)
 
     print("[route] approx_tokens=", approx_tokens,
       "intent=", intent,
-      "provider=", preferred_provider,
-      "is_ollama=", is_ollama_base(openai_base_url),
+      "provider=", cfg.routing.preferred_provider,
+      "is_ollama=", is_ollama_base(cfg.credentials.openai_base_url),
       "model_in=", getattr(request_obj, "original_model", None) or "n/a",
       "model_out=", request_obj.model,
       "tools_in=", len(getattr(request_obj, "tools", []) or []),
@@ -239,11 +197,9 @@ def apply_policy_and_routing(
 
 async def _call_provider(request_obj: Any, litellm_request: dict) -> Tuple[bool, Any]:
     """Execute a single litellm call. For streaming, validates the first chunk."""
-    
 
     if getattr(request_obj, "stream", False):
         gen = await litellm.acompletion(**litellm_request)
-        # Consume first chunk to validate the connection before committing
         first_chunk = await gen.__anext__()
 
         # Track cache hit from first chunk
@@ -273,21 +229,12 @@ async def _call_provider(request_obj: Any, litellm_request: dict) -> Tuple[bool,
 
 
 def _is_retryable_error(error: Exception) -> bool:
-    """Check if error should trigger a retry.
-
-    Retryable: rate limits, timeouts, connection issues, transient server errors.
-    NOT retryable: context window exceeded, bad request, auth (same input always fails).
-    """
-    # Never retry context window / bad request — same payload will always fail
+    """Check if error should trigger a retry."""
     if isinstance(error, (ContextWindowExceededError, LiteLLMBadRequestError)):
         return False
-
-    # Typed retryable exceptions
     if isinstance(error, (LiteLLMRateLimitError, LiteLLMTimeout, LiteLLMAPIConnectionError,
                           LiteLLMServiceUnavailableError, LiteLLMInternalServerError)):
         return True
-
-    # String fallback for non-LiteLLM exceptions
     error_str = str(error).lower()
     return (
         "429" in error_str
@@ -319,8 +266,8 @@ async def _call_provider_with_retry(
         except Exception as e:
             last_exception = e
             if attempt < max_retries - 1 and _is_retryable_error(e):
-                delay = base_delay * (2 ** attempt)  # 1s, 2s, 4s, 8s, 16s
-                print(f"[retry] Attempt {attempt + 1}/{max_retries} failed, retry in {delay}s: {type(e).__name__}")
+                delay = base_delay * (2 ** attempt)
+                print(f"[retry] Attempt {attempt + 1}/{max_retries} failed, retry in {delay}s: {type(e).__name__}: {str(e)[:200]}")
                 metrics.total_retries += 1
                 await asyncio.sleep(delay)
             else:
@@ -335,141 +282,91 @@ def _inject_credentials(
     litellm_request: dict,
     *,
     model: str,
-    openai_api_key: str,
-    openai_base_url: Optional[str],
-    anthropic_api_key: Optional[str],
-    anthropic_base_url: Optional[str] = None,
-    gemini_api_key: Optional[str],
-    use_vertex_auth: bool,
-    vertex_project: str,
-    vertex_location: str,
+    creds: ProviderCredentials,
 ) -> None:
     """Inject provider credentials into a litellm request dict (primary path)."""
     if model.startswith("openai/"):
-        litellm_request["api_key"] = openai_api_key
-        if openai_base_url:
-            litellm_request["api_base"] = openai_base_url
+        litellm_request["api_key"] = creds.openai_api_key
+        if creds.openai_base_url:
+            litellm_request["api_base"] = creds.openai_base_url
     elif model.startswith("gemini/"):
-        if use_vertex_auth:
-            litellm_request["vertex_project"] = vertex_project
-            litellm_request["vertex_location"] = vertex_location
+        if creds.use_vertex_auth:
+            litellm_request["vertex_project"] = creds.vertex_project
+            litellm_request["vertex_location"] = creds.vertex_location
             litellm_request["custom_llm_provider"] = "vertex_ai"
         else:
-            litellm_request["api_key"] = gemini_api_key
+            litellm_request["api_key"] = creds.gemini_api_key
     else:  # anthropic/ prefix (or bare model names)
-        litellm_request["api_key"] = anthropic_api_key
-        if anthropic_base_url:
-            litellm_request["api_base"] = anthropic_base_url
+        litellm_request["api_key"] = creds.anthropic_api_key
+        if creds.anthropic_base_url:
+            litellm_request["api_base"] = creds.anthropic_base_url
 
 
 async def run_messages(
     *,
     request_obj: Any,
-    openai_api_key: str,
-    openai_base_url: Optional[str],
-    anthropic_api_key: Optional[str],
-    anthropic_base_url: Optional[str] = None,
-    gemini_api_key: Optional[str],
-    use_vertex_auth: bool,
-    vertex_project: str,
-    vertex_location: str,
-    fallback_providers: list | None = None,
+    cfg: ProxyConfig,
     intent: str = "CHAT",
 ) -> Tuple[bool, Any, str]:
     """
     Returns: (is_streaming, response_or_generator, provider_name)
     Tries primary provider first, then fallbacks sequentially.
-    For streaming, validates the first chunk before committing.
     """
-    # --- Primary provider (uses model already set by apply_policy_and_routing) ---
     model = str(getattr(request_obj, "model", "") or "")
-    model_ctx = int(os.environ.get("MODEL_CONTEXT_WINDOW", "0"))
-    litellm_request = convert_anthropic_to_litellm(request_obj, model_context_window=model_ctx)
-
-    # Provider-specific extra_body params (e.g. Z.AI requires tool_stream=True)
-    # Configured via STREAM_EXTRA_BODY env var (JSON object), applied to all streaming+tools requests.
-    # Example: STREAM_EXTRA_BODY={"tool_stream": true}
-    _extra_raw = os.environ.get("STREAM_EXTRA_BODY", "").strip()
-    if _extra_raw and litellm_request.get("stream") and litellm_request.get("tools"):
-        try:
-            extra_params = json.loads(_extra_raw)
-            if isinstance(extra_params, dict) and extra_params:
-                litellm_request.setdefault("extra_body", {}).update(extra_params)
-                print(f"[tools] Applied STREAM_EXTRA_BODY: {list(extra_params.keys())}")
-        except json.JSONDecodeError:
-            print(f"[tools] WARNING: STREAM_EXTRA_BODY is not valid JSON: {_extra_raw[:100]}")
-
-    # --- Context compression if needed ---
-    if model_ctx > 0:
-        comp_model = (os.environ.get("COMPRESSOR_MODEL", "").strip()
-                      or os.environ.get("CLASSIFIER_MODEL", "").strip())
-        comp_key = (os.environ.get("COMPRESSOR_API_KEY", "").strip()
-                    or os.environ.get("CLASSIFIER_API_KEY", "").strip())
-        comp_base = (os.environ.get("COMPRESSOR_BASE_URL", "").strip()
-                     or os.environ.get("CLASSIFIER_BASE_URL", "").strip() or None)
-        keep_recent = int(os.environ.get("COMPRESSOR_KEEP_RECENT", "15"))
-
-        if comp_model and comp_key:
-
-            trigger_ratio = float(os.environ.get("COMPRESSOR_TRIGGER_RATIO", "0.85"))
-            tools_overhead = estimate_tools_tokens(litellm_request.get("tools"))
-
-            # Fallback compressor (tried if primary fails after retries)
-            fb_model = os.environ.get("COMPRESSOR_FALLBACK_MODEL", "").strip() or None
-            fb_key = os.environ.get("COMPRESSOR_FALLBACK_API_KEY", "").strip() or None
-            fb_base = os.environ.get("COMPRESSOR_FALLBACK_BASE_URL", "").strip() or None
-
-            litellm_request["messages"], was_compressed = await compress_messages_if_needed(
-                messages=litellm_request["messages"],
-                model_context_window=model_ctx,
-                compressor_model=comp_model,
-                compressor_api_key=comp_key,
-                compressor_base_url=comp_base,
-                keep_recent=keep_recent,
-                trigger_ratio=trigger_ratio,
-                tools_overhead_tokens=tools_overhead,
-                target_model=model,
-                fallback_model=fb_model,
-                fallback_api_key=fb_key,
-                fallback_base_url=fb_base,
-            )
-
-            # Recalculate max_completion_tokens after compression.
-            # The initial cap in convert_anthropic_to_litellm() uses pre-compression
-            # message sizes — when input exceeds the context window, remaining goes
-            # negative and dynamic_cap floors to 1024.  After compression shrinks
-            # messages, recalculate so the model gets adequate output budget.
-            if was_compressed and model.startswith("openai/") and not is_no_tools_model(model):
-                provider_max = int(os.environ.get("MAX_OUTPUT_TOKENS", "8192"))
-                input_est = sum(len(str(m.get("content", ""))) for m in litellm_request["messages"]) // 4
-                tools_est = sum(
-                    len(json.dumps(t)) // 4 for t in (litellm_request.get("tools") or [])
-                )
-                remaining = model_ctx - input_est - tools_est
-                safe = int(remaining * 0.85)
-                new_cap = max(1024, min(safe, provider_max))
-                new_max = min(request_obj.max_tokens, new_cap)
-                old_max = litellm_request.get("max_completion_tokens", new_max)
-                if new_max != old_max:
-                    print(f"[compress] Recapped max_tokens: {old_max} → {new_max} "
-                          f"(post-compression input~{input_est} tools~{tools_est} remaining~{remaining})")
-                litellm_request["max_completion_tokens"] = new_max
-
-    _inject_credentials(
-        litellm_request, model=model,
-        openai_api_key=openai_api_key, openai_base_url=openai_base_url,
-        anthropic_api_key=anthropic_api_key, anthropic_base_url=anthropic_base_url,
-        gemini_api_key=gemini_api_key,
-        use_vertex_auth=use_vertex_auth, vertex_project=vertex_project,
-        vertex_location=vertex_location,
+    model_ctx = cfg.routing.model_context_window
+    litellm_request = convert_anthropic_to_litellm(
+        request_obj, model_context_window=model_ctx, max_output_tokens=cfg.routing.max_output_tokens,
     )
 
-    max_retries = int(os.environ.get("MAX_RETRIES", "5"))
-    base_delay = float(os.environ.get("RETRY_BASE_DELAY", "1.0"))
+    # Provider-specific extra_body params (e.g. Z.AI requires tool_stream=True)
+    if cfg.stream_extra_body and litellm_request.get("stream") and litellm_request.get("tools"):
+        litellm_request.setdefault("extra_body", {}).update(cfg.stream_extra_body)
+        print(f"[tools] Applied STREAM_EXTRA_BODY: {list(cfg.stream_extra_body.keys())}")
 
-    if not fallback_providers:
+    # --- Context compression if needed ---
+    comp = cfg.compressor
+    if model_ctx > 0 and comp.model and comp.api_key:
+        trigger_ratio = comp.trigger_ratio
+        tools_overhead = estimate_tools_tokens(litellm_request.get("tools"))
+
+        litellm_request["messages"], was_compressed = await compress_messages_if_needed(
+            messages=litellm_request["messages"],
+            model_context_window=model_ctx,
+            compressor_model=comp.model,
+            compressor_api_key=comp.api_key,
+            compressor_base_url=comp.base_url,
+            keep_recent=comp.keep_recent,
+            trigger_ratio=trigger_ratio,
+            tools_overhead_tokens=tools_overhead,
+            target_model=model,
+            fallback_model=comp.fallback_model,
+            fallback_api_key=comp.fallback_api_key,
+            fallback_base_url=comp.fallback_base_url,
+        )
+
+        # Recalculate max_completion_tokens after compression
+        if was_compressed and model.startswith("openai/") and not is_no_tools_model(model):
+            provider_max = cfg.routing.max_output_tokens
+            input_est = sum(len(str(m.get("content", ""))) for m in litellm_request["messages"]) // 4
+            tools_est = sum(
+                len(json.dumps(t)) // 4 for t in (litellm_request.get("tools") or [])
+            )
+            remaining = model_ctx - input_est - tools_est
+            safe = int(remaining * 0.85)
+            new_cap = max(1024, min(safe, provider_max))
+            new_max = min(request_obj.max_tokens, new_cap)
+            old_max = litellm_request.get("max_completion_tokens", new_max)
+            if new_max != old_max:
+                print(f"[compress] Recapped max_tokens: {old_max} → {new_max} "
+                      f"(post-compression input~{input_est} tools~{tools_est} remaining~{remaining})")
+            litellm_request["max_completion_tokens"] = new_max
+
+    _inject_credentials(litellm_request, model=model, creds=cfg.credentials)
+
+    if not cfg.fallback_providers:
         is_stream, out = await _call_provider_with_retry(
-            request_obj, litellm_request, max_retries=max_retries, base_delay=base_delay,
+            request_obj, litellm_request,
+            max_retries=cfg.max_retries, base_delay=cfg.retry_base_delay,
         )
         return is_stream, out, "primary"
 
@@ -477,28 +374,32 @@ async def run_messages(
     primary_error_msg = ""
     try:
         is_stream, out = await _call_provider_with_retry(
-            request_obj, litellm_request, max_retries=max_retries, base_delay=base_delay,
+            request_obj, litellm_request,
+            max_retries=cfg.max_retries, base_delay=cfg.retry_base_delay,
         )
         return is_stream, out, "primary"
     except Exception as primary_err:
         primary_error_msg = str(primary_err)
-        print(f"[fallback] primary failed after {max_retries} attempts: {primary_error_msg}")
+        print(f"[fallback] primary failed after {cfg.max_retries} attempts: {primary_error_msg}")
 
     errors = [f"primary: {primary_error_msg}"]
     original_model = getattr(request_obj, "original_model", None) or model
 
-    for provider in fallback_providers:
+    for provider in cfg.fallback_providers:
         try:
             request_obj.model = provider.get_litellm_model(intent)
             fb_ctx = getattr(provider, "context_window", 0) or model_ctx
-            fb_request = convert_anthropic_to_litellm(request_obj, model_context_window=fb_ctx)
+            fb_request = convert_anthropic_to_litellm(
+                request_obj, model_context_window=fb_ctx, max_output_tokens=cfg.routing.max_output_tokens,
+            )
             fb_request["api_key"] = provider.api_key
             if provider.base_url:
                 fb_request["api_base"] = provider.base_url
 
             print(f"[fallback] trying {provider.name}: model={request_obj.model}")
             is_stream, out = await _call_provider_with_retry(
-                request_obj, fb_request, max_retries=max_retries, base_delay=base_delay,
+                request_obj, fb_request,
+                max_retries=cfg.max_retries, base_delay=cfg.retry_base_delay,
             )
             return is_stream, out, provider.name
         except Exception as e:
@@ -509,4 +410,3 @@ async def run_messages(
     # Restore original model for error reporting
     request_obj.model = original_model
     raise Exception(f"All providers failed: {'; '.join(errors)}")
-

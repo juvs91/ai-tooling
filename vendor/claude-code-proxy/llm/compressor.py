@@ -16,8 +16,10 @@ Resilience layers:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from litellm import token_counter
@@ -28,6 +30,34 @@ _consecutive_failures: int = 0
 _circuit_open_until: float = 0.0
 _CIRCUIT_BREAKER_THRESHOLD = 5   # failures before opening circuit
 _CIRCUIT_BREAKER_COOLDOWN = 60.0  # seconds to skip compressor after circuit opens
+
+
+# ── Compression result cache ──────────────────────────────────────────
+# CC is stateless: sends full conversation history on every request.
+# Without caching, the proxy re-compresses ~1700 identical messages via
+# a DeepSeek LLM call on every single request (2-5s + API cost each).
+# This cache stores the last compression summary and reuses it when the
+# same session sends a near-identical request.
+# Works for ALL providers (Z.AI Anthropic, Z.AI OpenAI, DeepSeek).
+
+@dataclass
+class _CompressionCache:
+    summary: str              # The compressed summary text
+    old_msg_count: int        # How many old messages were compressed
+    timestamp: float          # time.monotonic() when cached
+    prefix_hash: str          # Truncated SHA256 of first N old messages (session identity)
+
+_compression_cache: Optional[_CompressionCache] = None
+_CACHE_TTL = 300.0           # 5 minutes — covers a typical CC session
+_CACHE_MSG_TOLERANCE = 100   # Reuse if ≤100 new old messages since last compression
+_CACHE_PREFIX_SIZE = 20      # Hash first 20 messages for session identity
+
+
+def _compute_prefix_hash(messages: list[dict], n: int = _CACHE_PREFIX_SIZE) -> str:
+    """Hash the first N messages to identify the conversation session."""
+    prefix = messages[:n]
+    raw = json.dumps(prefix, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 _COMPRESS_PROMPT = (
@@ -166,6 +196,35 @@ async def compress_messages_if_needed(
     print(f"[compress] Triggered: {estimated_tokens} tokens > {threshold} threshold. "
           f"Compressing {len(old_messages)} old messages, keeping {len(recent_messages)} recent.")
 
+    # ── Check compression cache before calling LLM ──
+    global _compression_cache
+    prefix_hash = _compute_prefix_hash(old_messages)
+    now = time.monotonic()
+
+    if (_compression_cache is not None
+            and _compression_cache.prefix_hash == prefix_hash
+            and (now - _compression_cache.timestamp) < _CACHE_TTL
+            and (len(old_messages) - _compression_cache.old_msg_count) <= _CACHE_MSG_TOLERANCE):
+        # Cache hit — reuse previous summary, skip the LLM call
+        age = int(now - _compression_cache.timestamp)
+        delta = len(old_messages) - _compression_cache.old_msg_count
+        print(f"[compress] Cache HIT: reusing summary "
+              f"(cached {_compression_cache.old_msg_count} msgs, now {len(old_messages)} msgs, "
+              f"delta={delta}, age={age}s)")
+        compressed = _reassemble_with_summary(system_msg, _compression_cache.summary, recent_messages)
+        new_tokens = _count_message_tokens(compressed, model=target_model)
+        print(f"[compress] Success (cached): {estimated_tokens} → {new_tokens} tokens "
+              f"(saved {estimated_tokens - new_tokens})")
+        return compressed, True
+
+    # ── Cache miss — run LLM compression ──
+    reason = "no cache" if _compression_cache is None else (
+        "prefix mismatch" if _compression_cache.prefix_hash != prefix_hash else
+        "expired" if (now - _compression_cache.timestamp) >= _CACHE_TTL else
+        f"delta {len(old_messages) - _compression_cache.old_msg_count} > {_CACHE_MSG_TOLERANCE}"
+    )
+    print(f"[compress] Cache MISS ({reason}): compressing fresh (prefix_hash={prefix_hash})")
+
     # Try LLM compression (retry + circuit breaker + fallback)
     summary = await _llm_compress(
         old_messages, compressor_model, compressor_api_key, compressor_base_url,
@@ -175,6 +234,13 @@ async def compress_messages_if_needed(
     )
 
     if summary:
+        # Store in cache for next request
+        _compression_cache = _CompressionCache(
+            summary=summary,
+            old_msg_count=len(old_messages),
+            timestamp=now,
+            prefix_hash=prefix_hash,
+        )
         compressed = _reassemble_with_summary(system_msg, summary, recent_messages)
         new_tokens = _count_message_tokens(compressed, model=target_model)
         print(f"[compress] Success: {estimated_tokens} → {new_tokens} tokens "

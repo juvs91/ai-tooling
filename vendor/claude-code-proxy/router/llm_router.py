@@ -2,7 +2,6 @@
 from __future__ import annotations
 import asyncio
 import json
-import os
 import re
 from typing import Any, Optional
 
@@ -100,7 +99,7 @@ async def classify_intent(
     model: str,
     api_key: str = "",
     api_base: Optional[str] = None,
-    timeout_s: float = float(os.environ.get("CLASSIFIER_TIMEOUT", "5.0")),
+    timeout_s: float = 3.0,
 ) -> str:
     """
     Classify user intent using a cheap LLM call.

@@ -7,7 +7,6 @@ import uuid
 from utils.utils import bget, make_tool_id, map_stop_reason, scale_tokens, to_dict, TOOL_ID_PREFIX
 from typing import Any, Dict, List, Optional, Union
 from json_repair import repair_json
-import os
 from llm.schemas import MessagesRequest, MessagesResponse, Usage
 from llm.tool_prompting import (
     is_no_tools_model, build_tool_prompt, rewrite_messages_without_tools,
@@ -421,7 +420,7 @@ def _convert_message_blocks(msg: Any) -> List[Dict[str, Any]]:
         return [{"role": msg.role, "content": _content_blocks_to_text(msg.content)}]
 
 
-def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_context_window: int = 0) -> Dict[str, Any]:
+def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_context_window: int = 0, max_output_tokens: int = 8192) -> Dict[str, Any]:
     """
     Anthropic /v1/messages -> LiteLLM(OpenAI-style) request dict.
     """
@@ -449,7 +448,7 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_conte
             # Dynamic cap: only for providers with MODEL_CONTEXT_WINDOW set (e.g. DeepSeek 64K)
             # Groq, OpenAI, OpenRouter have MODEL_CONTEXT_WINDOW=0 → fall through to else
             
-            provider_max = int(os.environ.get("MAX_OUTPUT_TOKENS", "8192"))
+            provider_max = max_output_tokens
             input_estimate = sum(len(str(m.get("content", ""))) for m in messages) // 4
             tools_estimate = 0
             if anthropic_request.tools:

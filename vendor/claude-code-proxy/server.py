@@ -1,11 +1,13 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
-import os
-import json
 import time
 import logging
+import warnings
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+
+# Suppress LiteLLM's Pydantic serialization warnings (cosmetic, from internal validation)
+warnings.filterwarnings("ignore", message="Pydantic serializer warnings", category=UserWarning)
 
 import litellm
 from litellm import token_counter
@@ -24,116 +26,70 @@ from litellm.exceptions import (
 from utils.utils import cached_token_count, store_token_count, scale_tokens
 from proxy.proxy import apply_policy_and_routing, run_messages
 from llm.converters import convert_litellm_to_anthropic
-from llm.schemas import MessagesRequest, TokenCountRequest, TokenCountResponse, ProviderConfig
+from llm.schemas import MessagesRequest, TokenCountRequest, TokenCountResponse
 from llm.streaming import handle_streaming
 from router.model_mapper import map_claude_alias_to_target
 from router.llm_router import classify_intent, get_last_user_text, _regex_fallback_intent, is_analysis_request
 from utils.metrics import metrics, RequestLog
+from config import load_config
+
 load_dotenv()
 logger = logging.getLogger(__name__)
 app = FastAPI()
 
-# envs
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_BASE_URL = (os.environ.get("OPENAI_BASE_URL") or "").strip() or None
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-VERTEX_PROJECT = os.environ.get("VERTEX_PROJECT", "unset")
-VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "unset")
-USE_VERTEX_AUTH = os.environ.get("USE_VERTEX_AUTH", "False").lower() == "true"
+# ── Load all config once at startup ──
+cfg = load_config()
 
-TOOL_ALLOWLIST = os.environ.get("TOOL_ALLOWLIST", "").strip()
-POLICY_NOTE_IN_SYSTEM = os.environ.get("POLICY_NOTE_IN_SYSTEM", "1").strip() == "1"
-MAX_INPUT_TOKENS = int(os.environ.get("MAX_INPUT_TOKENS", "0"))
-HARD_BLOCK_OVERSIZE = os.environ.get("HARD_BLOCK_OVERSIZE", "0").strip() == "1"
-PREFERRED_PROVIDER = os.environ.get("PREFERRED_PROVIDER", "openai").lower()
+# Suppress LiteLLM's red "Provider List" / "Give Feedback" banners on unknown models
+litellm.suppress_debug_info = True
 
-SMALL_MODEL = os.environ.get("SMALL_MODEL", "cc-local:chat")
-BIG_MODEL = os.environ.get("BIG_MODEL", SMALL_MODEL)
-BUILDING_MODEL = os.environ.get("BUILDING_MODEL", BIG_MODEL)
-
-# Anthropic-compatible base URL (for providers like Z.AI that expose /api/anthropic)
-# When set alongside ANTHROPIC_API_KEY, LiteLLM uses this as api_base for anthropic/ models.
-ANTHROPIC_BASE_URL = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip() or None
-
-# Context window scaling: Claude Code assumes 200K. If your model has a smaller
-# window, set MODEL_CONTEXT_WINDOW so token counts are scaled proportionally.
-# Set to 0 to disable scaling (pass through raw counts).
-MODEL_CONTEXT_WINDOW = int(os.environ.get("MODEL_CONTEXT_WINDOW", "0"))
-
-# Intent classifier config - use a cheap model (e.g. deepseek-chat)
-# Format: "provider/model" e.g. "openai/deepseek-chat"
-# Leave empty to use regex fallback (no LLM call)
-CLASSIFIER_MODEL = os.environ.get("CLASSIFIER_MODEL", "").strip()
-CLASSIFIER_API_KEY = os.environ.get("CLASSIFIER_API_KEY", "").strip()
-CLASSIFIER_BASE_URL = os.environ.get("CLASSIFIER_BASE_URL", "").strip() or None
-CLASSIFIER_TIMEOUT = float(os.environ.get("CLASSIFIER_TIMEOUT", "3.0"))
-
-# Response cache config — in-memory, reduces duplicate API calls on retries/bursts
-CACHE_ENABLED = os.environ.get("CACHE_ENABLED", "0").strip() == "1"
-CACHE_TTL = int(os.environ.get("CACHE_TTL", "60"))
-
-# Analysis enforcement: inject tool-usage prompt when analysis request detected
-ANALYSIS_ENFORCEMENT = os.environ.get("ANALYSIS_ENFORCEMENT", "0").strip() == "1"
+# Skip LLM classifier when all models are identical (no routing benefit)
+_models_differ = (
+    cfg.routing.big_model != cfg.routing.small_model
+    or cfg.routing.building_model != cfg.routing.big_model
+)
 
 # Startup validation: warn if classifier is half-configured
-if CLASSIFIER_MODEL and not CLASSIFIER_API_KEY:
+if cfg.classifier.model and not cfg.classifier.api_key:
     logger.warning(
         "[startup] CLASSIFIER_MODEL=%s is set but CLASSIFIER_API_KEY is empty. "
         "LLM classifier will fail and fall back to regex. "
         "Set CLASSIFIER_API_KEY or remove CLASSIFIER_MODEL.",
-        CLASSIFIER_MODEL,
+        cfg.classifier.model,
     )
-if CLASSIFIER_MODEL:
+if cfg.classifier.model and _models_differ:
     logger.info(
         "[startup] Intent classifier: model=%s base=%s timeout=%.1fs",
-        CLASSIFIER_MODEL, CLASSIFIER_BASE_URL or "(default)", CLASSIFIER_TIMEOUT,
+        cfg.classifier.model, cfg.classifier.base_url or "(default)", cfg.classifier.timeout,
+    )
+elif cfg.classifier.model and not _models_differ:
+    logger.info(
+        "[startup] Intent classifier: SKIPPED (all models identical: %s) — using regex fallback",
+        cfg.routing.big_model,
     )
 else:
     logger.info("[startup] Intent classifier: regex fallback (CLASSIFIER_MODEL not set)")
 
 # Initialize LiteLLM response cache
-if CACHE_ENABLED:
-    litellm.cache = litellm.Cache(type="local", ttl=CACHE_TTL)
+if cfg.cache_enabled:
+    litellm.cache = litellm.Cache(type="local", ttl=cfg.cache_ttl)
     litellm.enable_cache()
-    logger.info("[startup] Response cache: ENABLED (TTL=%ds, in-memory)", CACHE_TTL)
+    logger.info("[startup] Response cache: ENABLED (TTL=%ds, in-memory)", cfg.cache_ttl)
 else:
     logger.info("[startup] Response cache: disabled (set CACHE_ENABLED=1 to enable)")
 
 # Retry configuration
-MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "5"))
-RETRY_BASE_DELAY = float(os.environ.get("RETRY_BASE_DELAY", "1.0"))
-logger.info("[startup] Retry: max_retries=%d, base_delay=%.1fs", MAX_RETRIES, RETRY_BASE_DELAY)
+logger.info("[startup] Retry: max_retries=%d, base_delay=%.1fs", cfg.max_retries, cfg.retry_base_delay)
 
-# Fallback provider chain (FALLBACK_1_*, FALLBACK_2_*, ... FALLBACK_9_*)
-def _load_fallback_providers() -> list[ProviderConfig]:
-    providers = []
-    for n in range(1, 10):
-        prefix = f"FALLBACK_{n}_"
-        provider = os.environ.get(f"{prefix}PROVIDER", "").strip()
-        api_key = os.environ.get(f"{prefix}API_KEY", "").strip()
-        if not provider or not api_key:
-            break  # stop at first gap
-        providers.append(ProviderConfig(
-            name=f"fallback_{n}",
-            provider_prefix=provider,
-            api_key=api_key,
-            base_url=os.environ.get(f"{prefix}BASE_URL", "").strip() or None,
-            big_model=os.environ.get(f"{prefix}BIG_MODEL", "").strip(),
-            small_model=os.environ.get(f"{prefix}SMALL_MODEL", "").strip() or os.environ.get(f"{prefix}BIG_MODEL", "").strip(),
-            building_model=os.environ.get(f"{prefix}BUILDING_MODEL", "").strip() or None,
-            context_window=int(os.environ.get(f"{prefix}CONTEXT_WINDOW", "0")),
-        ))
-    return providers
-
-FALLBACK_PROVIDERS = _load_fallback_providers()
-if FALLBACK_PROVIDERS:
+# Fallback chain
+if cfg.fallback_providers:
     logger.info(
         "[startup] Fallback chain: %s",
-        " → ".join(p.name + "(" + p.provider_prefix + "/" + p.big_model + ")" for p in FALLBACK_PROVIDERS),
+        " → ".join(p.name + "(" + p.provider_prefix + "/" + p.big_model + ")" for p in cfg.fallback_providers),
     )
 else:
     logger.info("[startup] No fallback providers configured")
+
 
 def _classify_llm_error(e: Exception) -> tuple[int, str]:
     """Map exception to (HTTP status, detail). Uses LiteLLM typed exceptions first."""
@@ -186,43 +142,35 @@ async def create_message(request: MessagesRequest, raw_request: Request):
         body = await raw_request.body()
 
         # Intent classification (LLM or regex fallback)
+        # Skip LLM classifier when all models are identical (no routing benefit)
         last_text = get_last_user_text(request.messages)
-        if CLASSIFIER_MODEL:
+        if cfg.classifier.model and _models_differ:
             intent = await classify_intent(
                 last_text,
-                model=CLASSIFIER_MODEL,
-                api_key=CLASSIFIER_API_KEY,
-                api_base=CLASSIFIER_BASE_URL,
-                timeout_s=CLASSIFIER_TIMEOUT,
+                model=cfg.classifier.model,
+                api_key=cfg.classifier.api_key,
+                api_base=cfg.classifier.base_url,
+                timeout_s=cfg.classifier.timeout,
             )
         else:
             intent = _regex_fallback_intent(last_text)
 
         # Override: many tools = agentic behavior, never downgrade to CHAT/PLANNING
         tools_count = len(getattr(request, "tools", None) or [])
-        tool_threshold = int(os.environ.get("TOOL_UPGRADE_THRESHOLD", "5"))
-        if intent in ("CHAT", "PLANNING") and tools_count >= tool_threshold:
+        if intent in ("CHAT", "PLANNING") and tools_count >= cfg.policy.tool_upgrade_threshold:
             original_intent = intent
             intent = "BUILDING"
-            print(f"[classify] {original_intent}→BUILDING override: {tools_count} tools >= {tool_threshold}")
+            print(f"[classify] {original_intent}→BUILDING override: {tools_count} tools >= {cfg.policy.tool_upgrade_threshold}")
 
         # Analysis detection (only when toggle is on)
-        is_analysis = ANALYSIS_ENFORCEMENT and is_analysis_request(last_text)
+        is_analysis = cfg.policy.analysis_enforcement and is_analysis_request(last_text)
 
         # policy + routing
         try:
             apply_policy_and_routing(
                 request_obj=request,
                 raw_body=body,
-                openai_base_url=OPENAI_BASE_URL,
-                tool_allowlist_raw=TOOL_ALLOWLIST,
-                policy_note_in_system=POLICY_NOTE_IN_SYSTEM,
-                max_input_tokens=MAX_INPUT_TOKENS,
-                hard_block_oversize=HARD_BLOCK_OVERSIZE,
-                small_model=SMALL_MODEL,
-                big_model=BIG_MODEL,
-                building_model=BUILDING_MODEL,
-                preferred_provider=PREFERRED_PROVIDER,
+                cfg=cfg,
                 intent=intent,
                 is_analysis=is_analysis,
             )
@@ -235,15 +183,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
         # ── Standard path (LiteLLM handles all providers: openai/, anthropic/, gemini/) ──
         is_stream, out, provider_used = await run_messages(
             request_obj=request,
-            openai_api_key=OPENAI_API_KEY,
-            openai_base_url=OPENAI_BASE_URL,
-            anthropic_api_key=ANTHROPIC_API_KEY,
-            anthropic_base_url=ANTHROPIC_BASE_URL,
-            gemini_api_key=GEMINI_API_KEY,
-            use_vertex_auth=USE_VERTEX_AUTH,
-            vertex_project=VERTEX_PROJECT,
-            vertex_location=VERTEX_LOCATION,
-            fallback_providers=FALLBACK_PROVIDERS or None,
+            cfg=cfg,
             intent=intent,
         )
 
@@ -261,9 +201,20 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 is_fallback=provider_used != "primary",
                 is_stream=True, is_analysis=is_analysis,
             ))
-            return StreamingResponse(handle_streaming(out, request, model_context_window=MODEL_CONTEXT_WINDOW), media_type="text/event-stream")
+            return StreamingResponse(
+                handle_streaming(
+                    out, request,
+                    model_context_window=cfg.routing.model_context_window,
+                    classifier_model=cfg.classifier.model,
+                    classifier_api_key=cfg.classifier.api_key,
+                    classifier_base_url=cfg.classifier.base_url,
+                ),
+                media_type="text/event-stream",
+            )
 
-        anthropic_response = convert_litellm_to_anthropic(out, request, model_context_window=MODEL_CONTEXT_WINDOW)
+        anthropic_response = convert_litellm_to_anthropic(
+            out, request, model_context_window=cfg.routing.model_context_window,
+        )
 
         input_tokens = getattr(anthropic_response, "usage", None)
         in_tok = input_tokens.input_tokens if input_tokens else 0
@@ -305,9 +256,9 @@ async def count_tokens_endpoint(request: TokenCountRequest):
         # Map Claude model alias to target provider model
         target_model = map_claude_alias_to_target(
             request.model,
-            preferred_provider=PREFERRED_PROVIDER,
-            big_model=BIG_MODEL,
-            small_model=SMALL_MODEL,
+            preferred_provider=cfg.routing.preferred_provider,
+            big_model=cfg.routing.big_model,
+            small_model=cfg.routing.small_model,
         )
 
         # Convert Anthropic format to LiteLLM format for counting
@@ -365,7 +316,7 @@ async def count_tokens_endpoint(request: TokenCountRequest):
                 input_tokens = max(1, total_chars // 4)
             store_token_count(litellm_messages, target_model, input_tokens, system_text_for_cache)
 
-        return TokenCountResponse(input_tokens=scale_tokens(input_tokens, MODEL_CONTEXT_WINDOW))
+        return TokenCountResponse(input_tokens=scale_tokens(input_tokens, cfg.routing.model_context_window))
 
     except Exception as e:
         logger.error(f"Token counting error: {e}")
@@ -378,21 +329,21 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "provider": PREFERRED_PROVIDER,
+        "provider": cfg.routing.preferred_provider,
         "models": {
-            "small": SMALL_MODEL,
-            "big": BIG_MODEL,
-            "building": BUILDING_MODEL,
+            "small": cfg.routing.small_model,
+            "big": cfg.routing.big_model,
+            "building": cfg.routing.building_model,
         },
         "classifier": {
-            "mode": "llm" if CLASSIFIER_MODEL else "regex",
-            "model": CLASSIFIER_MODEL or None,
-            "base_url": CLASSIFIER_BASE_URL,
-            "timeout_s": CLASSIFIER_TIMEOUT,
+            "mode": "llm" if cfg.classifier.model else "regex",
+            "model": cfg.classifier.model or None,
+            "base_url": cfg.classifier.base_url,
+            "timeout_s": cfg.classifier.timeout,
         },
         "fallbacks": [
             {"name": f.name, "provider": f.provider_prefix, "big": f.big_model}
-            for f in FALLBACK_PROVIDERS
+            for f in cfg.fallback_providers
         ],
     }
 
