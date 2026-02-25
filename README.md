@@ -88,6 +88,7 @@ ai-tooling/
 |-- cloud-provider-ymls/         # Docker compose overrides por proveedor
 |-- profiles/                    # Perfiles JSON para Claude Code CLI
 |-- templates/                   # Plantillas para AI_CONTEXT, AI_PLAN, AI_LEARNING, GUARDRAILS
+|   +-- ralph/                  #   Ralph: autonomous agent framework boilerplate
 |-- ai-notes/                    # Artefactos de sesion (scans, contextos, planes, learnings)
 |-- .env                         # Variables globales (policy defaults)
 |-- docker-compose.yml           # Servicios Docker (proxy_local + proxy_cloud)
@@ -448,6 +449,119 @@ Los scripts (`cc-agent-cloud`, `cc-plan`, `cc-scan`) actuan como wrappers que:
 - Fuerzan tools OFF donde corresponde
 - Ponen el system prompt correcto
 - Redirigen output a `ai-notes/`
+
+---
+
+## Ralph — Autonomous Agent Framework
+
+Ralph es un framework para ejecutar Claude Code en un loop automatizado con ejecucion por fases, auto-tracking de progreso, persistencia de conocimiento, y circuit breaker.
+
+### Boilerplate
+
+El boilerplate esta en `templates/ralph/` con la siguiente estructura:
+
+```
+templates/ralph/
+├── .ralphrc.template                    # Config raiz (calls/hour, timeout, tools)
+├── README.md                            # Guia de setup completa
+└── .ralph/
+    ├── claude-ralph.md                  # Identidad del agente (generico, usar as-is)
+    ├── AGENT.md.template                # Tipo de proyecto, comandos build/test
+    ├── PROMPT.md.template               # Objetivo principal y workflow
+    ├── fix_plan.md.template             # Checklist de tareas por fase [ ] / [x]
+    ├── specs/
+    │   ├── ai_learning.md.template      # Registro de conocimiento (Ralph lo llena)
+    │   └── schema_reference.md.template # Referencia de dominio (read-only)
+    ├── prompts/
+    │   └── fase-template.md             # Template generico para prompts por fase
+    ├── hooks/
+    │   └── validate-file-boundary.sh.template  # Hook PreToolUse (bloquea ediciones fuera de scope)
+    ├── status.json.template             # Estado de ejecucion inicial
+    └── progress.json.template           # Progreso general inicial
+```
+
+### Quick Start — `ralph-init`
+
+La forma mas rapida de deployar Ralph en un proyecto:
+
+```bash
+# Interactivo — te pregunta nombre, tipo, directorio de trabajo, etc.
+ralph-init --target /path/to/your/project
+
+# Non-interactivo (CI/scripted)
+ralph-init --target /path/to/your/project \
+  --name my-app --type python --workdir src/ --desc "My app"
+
+# Forzar overwrite si ya existe .ralph/
+ralph-init --target . --force
+```
+
+El script automaticamente:
+1. Copia todos los archivos de `templates/ralph/`
+2. Renombra los `.template` (quita el sufijo)
+3. Rellena los 5 placeholders de proyecto (`PROJECT_NAME`, `PROJECT_TYPE`, `PROJECT_ROOT`, `WORKING_DIRECTORY`, `PROJECT_DESCRIPTION`)
+4. Crea `.ralph/logs/`
+5. Configura el hook en `.claude/settings.json` (opcional)
+6. Imprime un resumen con los pasos restantes
+
+**Opciones:**
+
+| Flag | Descripcion | Default |
+|------|-------------|---------|
+| `--target DIR` | Directorio destino | `pwd` |
+| `--name NAME` | Nombre del proyecto | `basename $TARGET` |
+| `--type TYPE` | Tipo: sql, python, typescript, rust | `python` |
+| `--root PATH` | Root absoluto para file boundary | `$TARGET` |
+| `--workdir DIR` | Directorio de trabajo (relativo) | `src/` |
+| `--desc TEXT` | Descripcion del proyecto | `$NAME project` |
+| `--force` | Overwrite sin confirmar | - |
+| `--no-hook` | No configurar `.claude/settings.json` | - |
+
+**Despues de `ralph-init`**, quedan los placeholders de tarea por llenar:
+
+1. Editar `.ralph/AGENT.md` — comandos de build/test, checklist de validacion
+2. Editar `.ralph/PROMPT.md` — objetivo, descripcion, criterios de exito
+3. Editar `.ralph/fix_plan.md` — titulos de fases y descripciones de tareas
+4. Editar `.ralph/specs/schema_reference.md` — referencia de dominio
+5. Crear prompts por fase:
+   ```bash
+   cp .ralph/prompts/fase-template.md .ralph/prompts/fase-0.md
+   # Llenar tareas especificas de la fase
+   ```
+
+**Ejecutar Ralph:**
+
+```bash
+# Una fase especifica
+claude --print --append-system-prompt "$(cat .ralph/claude-ralph.md)" \
+  --allowedTools "$(grep ALLOWED_TOOLS .ralphrc | cut -d'"' -f2)" \
+  -p "$(cat .ralph/prompts/fase-0.md)"
+
+# Prompt principal (todas las fases)
+claude --print --append-system-prompt "$(cat .ralph/claude-ralph.md)" \
+  --allowedTools "$(grep ALLOWED_TOOLS .ralphrc | cut -d'"' -f2)" \
+  -p "$(cat .ralph/PROMPT.md)"
+```
+
+### Conceptos clave
+
+| Concepto | Descripcion |
+|----------|-------------|
+| **3 Archivos Semanticos** | `fix_plan.md` (tareas), `ai_learning.md` (conocimiento), `schema_reference.md` (referencia). Ralph los lee ANTES de cualquier accion |
+| **Ejecucion por fases** | Tareas organizadas en fases secuenciales (0, 1, 2...) con pre-requisitos |
+| **Status Protocol** | Bloques `---RALPH_STATUS---` machine-readable al final de cada fase |
+| **Circuit Breaker** | 3 loops sin progreso o 3 errores identicos = STOP automatico |
+| **File Boundary** | Hook PreToolUse bloquea ediciones fuera del directorio permitido |
+
+### Perfiles de herramientas
+
+| Perfil | Tools | Caso de uso |
+|--------|-------|-------------|
+| Solo lectura | `Read,Glob,Grep` | Analisis/auditoria |
+| Modificacion | `Write,Read,Edit,Glob,Grep` | Default — modificar codigo |
+| Acceso completo | `Write,Read,Edit,Glob,Grep,Bash` | Build, test, deploy |
+
+Para documentacion completa ver [templates/ralph/README.md](templates/ralph/README.md).
 
 ---
 

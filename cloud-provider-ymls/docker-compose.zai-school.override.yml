@@ -9,8 +9,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - UV_LINK_MODE=copy
+      - UV_PROJECT_ENVIRONMENT=/tmp/.venv-school
     ports:
       - "8084:8082"
     volumes:
       - ./vendor/claude-code-proxy:/claude-code-proxy
-    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-exclude '.venv'
+    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py' --reload-exclude '.venv'

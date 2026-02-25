@@ -113,6 +113,7 @@ create_symlink "cc-switch" "$HOME/.local/bin/cc-switch"
 create_symlink "cc-health" "$HOME/.local/bin/cc-health"
 create_symlink "cc-chat" "$HOME/.local/bin/cc-chat"
 create_symlink "cc-proxy-init.sh" "$HOME/.local/bin/cc-proxy-init"
+create_symlink "ralph-init" "$HOME/.local/bin/ralph-init"
 
 # Verificar que ~/.local/bin está en PATH
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
