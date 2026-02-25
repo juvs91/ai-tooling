@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Symlink-safe repo root discovery ──
+resolve_self() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$1" <<'PY'
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+PY
+    return 0
+  fi
+  local p="$1"
+  while [ -L "$p" ]; do
+    local next
+    next="$(readlink "$p")"
+    case "$next" in
+      /*) p="$next" ;;
+      *) p="$(cd "$(dirname "$p")" && pwd)/$next" ;;
+    esac
+  done
+  echo "$p"
+}
+
+SELF="$(resolve_self "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/_cc-lib.sh"
+ROOT_DIR="$(cc_repo_dir)"
+
+# ── Colors ──
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+log_info()    { echo -e "${BLUE}[ralph-init]${NC} $1"; }
+log_success() { echo -e "${GREEN}[ralph-init]${NC} $1"; }
+log_warn()    { echo -e "${YELLOW}[ralph-init]${NC} $1"; }
+log_error()   { echo -e "${RED}[ralph-init]${NC} $1"; }
+
+# ── Usage ──
+usage() {
+  cat <<'USAGE'
+Usage: ralph-init [OPTIONS]
+
+Deploy the Ralph autonomous agent boilerplate into a target project.
+
+Options:
+  --target DIR    Target project directory (default: current directory)
+  --name NAME     Project name (skips interactive prompt)
+  --type TYPE     Project type: sql, python, typescript, rust, etc.
+  --root PATH     Project root absolute path for file boundary hook
+  --workdir DIR   Working directory relative path
+  --desc TEXT     Project description
+  --force         Overwrite existing .ralph/ without prompting
+  --no-hook       Skip .claude/settings.json hook configuration
+  -h, --help      Show this help message
+
+Environment:
+  RALPH_TEMPLATE_DIR   Path to ralph templates (default: auto-detect)
+
+Examples:
+  ralph-init
+  ralph-init --target ~/projects/my-app
+  ralph-init --target . --name my-app --type python --workdir src/
+  ralph-init --force --no-hook
+USAGE
+}
+
+# ── Argument parsing ──
+TARGET_DIR="$(pwd)"
+PROJECT_NAME=""
+PROJECT_TYPE=""
+PROJECT_ROOT=""
+WORKING_DIRECTORY=""
+PROJECT_DESCRIPTION=""
+FORCE=false
+NO_HOOK=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target)   TARGET_DIR="$2"; shift 2 ;;
+    --name)     PROJECT_NAME="$2"; shift 2 ;;
+    --type)     PROJECT_TYPE="$2"; shift 2 ;;
+    --root)     PROJECT_ROOT="$2"; shift 2 ;;
+    --workdir)  WORKING_DIRECTORY="$2"; shift 2 ;;
+    --desc)     PROJECT_DESCRIPTION="$2"; shift 2 ;;
+    --force)    FORCE=true; shift ;;
+    --no-hook)  NO_HOOK=true; shift ;;
+    -h|--help)  usage; exit 0 ;;
+    *)          log_error "Unknown option: $1"; usage; exit 1 ;;
+  esac
+done
+
+# Validate and resolve target
+if [[ ! -d "$TARGET_DIR" ]]; then
+  log_error "Target directory does not exist: $TARGET_DIR"
+  exit 2
+fi
+TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
+
+# ── Template directory ──
+RALPH_TEMPLATE_DIR="${RALPH_TEMPLATE_DIR:-${ROOT_DIR}/templates/ralph}"
+
+if [[ ! -d "$RALPH_TEMPLATE_DIR/.ralph" ]]; then
+  log_error "Ralph templates not found at: $RALPH_TEMPLATE_DIR"
+  log_error "Set RALPH_TEMPLATE_DIR or run from ai-tooling repo."
+  exit 2
+fi
+
+# ── Idempotency check ──
+if [[ -d "$TARGET_DIR/.ralph" ]] && ! $FORCE; then
+  log_warn ".ralph/ already exists in $TARGET_DIR"
+  read -p "Overwrite? (y/N): " -n 1 -r
+  echo
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    log_info "Aborted."
+    exit 0
+  fi
+fi
+
+# ── Interactive prompts ──
+prompt_value() {
+  local var_name="$1"
+  local prompt_text="$2"
+  local default_value="$3"
+  local current_value="${!var_name}"
+
+  if [[ -n "$current_value" ]]; then
+    return
+  fi
+
+  if [[ -n "$default_value" ]]; then
+    read -p "  $prompt_text [$default_value]: " -r value
+    value="${value:-$default_value}"
+  else
+    read -p "  $prompt_text: " -r value
+  fi
+
+  eval "$var_name=\"\$value\""
+}
+
+DEFAULT_NAME="$(basename "$TARGET_DIR")"
+DEFAULT_TYPE="python"
+DEFAULT_ROOT="$TARGET_DIR"
+DEFAULT_WORKDIR="src/"
+DEFAULT_DESC=""
+
+echo ""
+log_info "Configure Ralph for: $TARGET_DIR"
+echo ""
+
+prompt_value PROJECT_NAME        "Project name"                              "$DEFAULT_NAME"
+prompt_value PROJECT_TYPE        "Project type (sql/python/typescript/rust)"  "$DEFAULT_TYPE"
+prompt_value PROJECT_ROOT        "Project root (absolute path)"              "$DEFAULT_ROOT"
+prompt_value WORKING_DIRECTORY   "Working directory (relative)"              "$DEFAULT_WORKDIR"
+
+# Set description default after PROJECT_NAME is known
+DEFAULT_DESC="${PROJECT_NAME} project"
+prompt_value PROJECT_DESCRIPTION "Project description"                       "$DEFAULT_DESC"
+
+# Strip trailing slash from workdir
+WORKING_DIRECTORY="${WORKING_DIRECTORY%/}"
+
+# ── Sed-safe escaping ──
+sed_escape() {
+  printf '%s' "$1" | sed 's/[&|/\\]/\\&/g'
+}
+
+S_NAME="$(sed_escape "$PROJECT_NAME")"
+S_TYPE="$(sed_escape "$PROJECT_TYPE")"
+S_ROOT="$(sed_escape "$PROJECT_ROOT")"
+S_WDIR="$(sed_escape "$WORKING_DIRECTORY")"
+S_DESC="$(sed_escape "$PROJECT_DESCRIPTION")"
+
+# ── Deploy files ──
+echo ""
+log_info "Deploying Ralph..."
+
+mkdir -p "$TARGET_DIR/.ralph/hooks"
+mkdir -p "$TARGET_DIR/.ralph/prompts"
+mkdir -p "$TARGET_DIR/.ralph/specs"
+mkdir -p "$TARGET_DIR/.ralph/logs"
+
+deploy_file() {
+  local src="$1"
+  local dest="$2"
+  sed \
+    -e "s|{{PROJECT_NAME}}|${S_NAME}|g" \
+    -e "s|{{PROJECT_TYPE}}|${S_TYPE}|g" \
+    -e "s|{{PROJECT_ROOT}}|${S_ROOT}|g" \
+    -e "s|{{WORKING_DIRECTORY}}|${S_WDIR}|g" \
+    -e "s|{{PROJECT_DESCRIPTION}}|${S_DESC}|g" \
+    "$src" > "$dest"
+}
+
+T="$RALPH_TEMPLATE_DIR"
+
+# Rename + replace project-level placeholders
+deploy_file "$T/.ralphrc.template"                                "$TARGET_DIR/.ralphrc"
+deploy_file "$T/.ralph/AGENT.md.template"                         "$TARGET_DIR/.ralph/AGENT.md"
+deploy_file "$T/.ralph/PROMPT.md.template"                        "$TARGET_DIR/.ralph/PROMPT.md"
+deploy_file "$T/.ralph/fix_plan.md.template"                      "$TARGET_DIR/.ralph/fix_plan.md"
+deploy_file "$T/.ralph/hooks/validate-file-boundary.sh.template"  "$TARGET_DIR/.ralph/hooks/validate-file-boundary.sh"
+deploy_file "$T/.ralph/specs/ai_learning.md.template"             "$TARGET_DIR/.ralph/specs/ai_learning.md"
+deploy_file "$T/.ralph/specs/schema_reference.md.template"        "$TARGET_DIR/.ralph/specs/schema_reference.md"
+
+# Copy + sed (has WORKING_DIRECTORY placeholder)
+deploy_file "$T/.ralph/prompts/fase-template.md"                  "$TARGET_DIR/.ralph/prompts/fase-template.md"
+
+# Copy as-is (no placeholders)
+cp "$T/.ralph/status.json.template"   "$TARGET_DIR/.ralph/status.json"
+cp "$T/.ralph/progress.json.template" "$TARGET_DIR/.ralph/progress.json"
+cp "$T/.ralph/claude-ralph.md"        "$TARGET_DIR/.ralph/claude-ralph.md"
+
+# Set permissions
+chmod +x "$TARGET_DIR/.ralph/hooks/validate-file-boundary.sh"
+
+log_success "Files deployed."
+
+# ── Optional .claude/settings.json hook ──
+if ! $NO_HOOK; then
+  settings_dir="$TARGET_DIR/.claude"
+  settings_file="$settings_dir/settings.json"
+
+  if [[ ! -f "$settings_file" ]]; then
+    read -p "  Create .claude/settings.json with Ralph hook? (Y/n): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+      mkdir -p "$settings_dir"
+      cat > "$settings_file" <<'HOOK_EOF'
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .ralph/hooks/validate-file-boundary.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+HOOK_EOF
+      log_success "Created $settings_file with Ralph hook."
+    fi
+  elif grep -q "validate-file-boundary" "$settings_file" 2>/dev/null; then
+    log_info "Ralph hook already present in $settings_file"
+  else
+    log_warn "Existing $settings_file found. Add this hook manually to .hooks.PreToolUse[]:"
+    echo ""
+    echo '      {'
+    echo '        "matcher": "Edit|Write",'
+    echo '        "hooks": [{"type": "command", "command": "bash .ralph/hooks/validate-file-boundary.sh", "timeout": 10}]'
+    echo '      }'
+    echo ""
+  fi
+fi
+
+# ── Summary ──
+echo ""
+log_success "=== Ralph deployed to $TARGET_DIR ==="
+echo ""
+echo -e "${BOLD}Created:${NC}"
+echo "  .ralphrc                                -- Project config"
+echo "  .ralph/claude-ralph.md                  -- Agent identity (generic)"
+echo "  .ralph/AGENT.md                         -- Project type & validation"
+echo "  .ralph/PROMPT.md                        -- Main objective & workflow"
+echo "  .ralph/fix_plan.md                      -- Task checklist"
+echo "  .ralph/specs/ai_learning.md             -- Knowledge registry"
+echo "  .ralph/specs/schema_reference.md        -- Domain reference"
+echo "  .ralph/hooks/validate-file-boundary.sh  -- File boundary hook"
+echo "  .ralph/prompts/fase-template.md         -- Phase template"
+echo "  .ralph/status.json                      -- Execution state"
+echo "  .ralph/progress.json                    -- Progress tracking"
+echo "  .ralph/logs/                            -- Log directory"
+echo ""
+echo -e "${BOLD}Filled:${NC}"
+echo "  PROJECT_NAME=$PROJECT_NAME"
+echo "  PROJECT_TYPE=$PROJECT_TYPE"
+echo "  PROJECT_ROOT=$PROJECT_ROOT"
+echo "  WORKING_DIRECTORY=$WORKING_DIRECTORY"
+echo "  PROJECT_DESCRIPTION=$PROJECT_DESCRIPTION"
+echo ""
+echo -e "${BOLD}Next steps:${NC}"
+echo "  1. Edit .ralph/AGENT.md        -- Fill build/test commands, validation checklist"
+echo "  2. Edit .ralph/PROMPT.md       -- Fill objective title, description, success criteria"
+echo "  3. Edit .ralph/fix_plan.md     -- Fill phase titles and task descriptions"
+echo "  4. Edit .ralph/specs/schema_reference.md -- Fill domain reference"
+echo "  5. Create phase prompts:"
+echo "       cp .ralph/prompts/fase-template.md .ralph/prompts/fase-0.md"
+echo "       # Fill in phase-specific tasks"
+echo ""
+echo "  Run Ralph:"
+echo "    claude --print --append-system-prompt \"\$(cat .ralph/claude-ralph.md)\" \\"
+echo "      --allowedTools \"\$(grep ALLOWED_TOOLS .ralphrc | cut -d'\"' -f2)\" \\"
+echo "      -p \"\$(cat .ralph/prompts/fase-0.md)\""
