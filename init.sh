@@ -86,18 +86,23 @@ check_dependency "git" "https://git-scm.com/downloads"
 # 2. Instalar dependencias Python del proxy
 log_info "2. Instalando dependencias Python del proxy..."
 
-if [ -f "$PROJECT_DIR/vendor/claude-code-proxy/requirements.txt" ]; then
-    cd "$PROJECT_DIR/vendor/claude-code-proxy"
-    pip install -r requirements.txt
+PROXY_DIR="$PROJECT_DIR/vendor/claude-code-proxy"
+
+if command -v uv >/dev/null 2>&1 && [ -f "$PROXY_DIR/pyproject.toml" ]; then
+    cd "$PROXY_DIR"
+    uv sync
+    log_success "Dependencias instaladas via uv sync"
+    cd "$PROJECT_DIR"
+elif [ -f "$PROJECT_DIR/requirements.txt" ]; then
+    pip install -r "$PROJECT_DIR/requirements.txt"
     if [ $? -eq 0 ]; then
-        log_success "Dependencias Python instaladas"
+        log_success "Dependencias Python instaladas via pip"
     else
         log_error "Error instalando dependencias Python"
         exit 1
     fi
-    cd "$PROJECT_DIR"
 else
-    log_error "No se encontró requirements.txt en vendor/claude-code-proxy/"
+    log_error "No se encontro pyproject.toml ni requirements.txt"
     exit 1
 fi
 
