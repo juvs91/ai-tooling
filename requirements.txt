@@ -1,0 +1,12 @@
+# Auto-generated from pyproject.toml — keep in sync
+# Docker uses uv run (reads pyproject.toml directly)
+# This file exists for pip-based installs (init.sh fallback)
+fastapi[standard]>=0.115.11
+uvicorn>=0.34.0
+httpx>=0.25.0
+pydantic>=2.0.0
+litellm>=1.77.7
+python-dotenv>=1.0.0
+google-auth>=2.41.1
+google-cloud-aiplatform>=1.120.0
+json-repair>=0.30.0
