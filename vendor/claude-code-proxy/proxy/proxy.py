@@ -1,9 +1,12 @@
 # app/proxy/proxy.py
 from __future__ import annotations
 import asyncio
-import json
-from typing import Any, Optional, Tuple
+import os
+from typing import Any, Tuple
 
+import logging
+
+import httpx
 import litellm
 from litellm.exceptions import (
     ContextWindowExceededError,
@@ -14,189 +17,68 @@ from litellm.exceptions import (
     ServiceUnavailableError as LiteLLMServiceUnavailableError,
     InternalServerError as LiteLLMInternalServerError,
 )
-from llm.compressor import estimate_tools_tokens
-from utils.utils import (
-    approx_tokens_from_bytes,
-    get_tool_name,
-    parse_allowlist,
-    ensure_system_note,
-    filter_tools_allowlist,
-    normalize_tool_choice,
-)
+from llm.passthrough import PassthroughClient, PassthroughError
+
+logger = logging.getLogger(__name__)
 from utils.metrics import metrics
-from router.llm_router import choose_local_model
 from llm.converters import convert_anthropic_to_litellm
-from llm.compressor import compress_messages_if_needed
-from llm.tool_prompting import is_no_tools_model
-from router.model_mapper import map_claude_alias_to_target
+from llm.pipeline import Pipeline, TransformContext
+from llm.transformers import (
+    IntentClassifierTransformer,
+    GuardrailTransformer,
+    TokenCapTransformer,
+    ToolAllowlistTransformer,
+    ModelRouterTransformer,
+    CompressionTransformer,
+    ProviderQuirksTransformer,
+    CredentialTransformer,
+)
 
-from config import ProxyConfig, ProviderCredentials
-
-
-# ── Tool usage enforcement ──────────────────────────────────────────
-# Injected when ANALYSIS_ENFORCEMENT=1 AND is_analysis_request() matches.
-
-def _build_tool_enforcement_prompt(tools: list | None) -> str:
-    """Build a dynamic prompt from the request's actual tools."""
-    if not tools:
-        return ""
-    tool_names = []
-    for t in (tools or []):
-        name = get_tool_name(t)
-        if name:
-            tool_names.append(name)
-    if not tool_names:
-        return ""
-    return (
-        f"[tool-guard] You have {len(tool_names)} tools available: {', '.join(tool_names)}\n"
-        "You MUST use these tools to gather real data before answering.\n"
-        "Do NOT answer from memory when a tool can provide actual information.\n"
-        "If a tool fails or is unavailable, say so explicitly — do NOT fabricate.\n"
-        "Cite sources (file:line) for factual claims."
-    )
-
-def is_ollama_base(base_url: Optional[str]) -> bool:
-    return bool(base_url) and ("11434" in base_url)
-
-def system_chars(system_field: Any) -> int:
-    if system_field is None:
-        return 0
-    if isinstance(system_field, str):
-        return len(system_field)
-    if isinstance(system_field, list):
-        total = 0
-        for b in system_field:
-            if hasattr(b, "text"):
-                total += len(b.text or "")
-            elif isinstance(b, dict):
-                total += len(b.get("text", "") or "")
-        return total
-    return 0
-
-def provider_cap_for_base_url(base_url: Optional[str]) -> int:
-    if not base_url:
-        return 0
-    b = base_url.lower()
-    if "api.groq.com" in b or "groq.com" in b:
-        return 5500
-    if "11434" in b:
-        return 25000
-    return 0
+from config import ProxyConfig
 
 
-def apply_policy_and_routing(
-    *,
-    request_obj: Any,
-    raw_body: bytes,
-    cfg: ProxyConfig,
-    intent: str = "CHAT",
-    is_analysis: bool = False,
-) -> Tuple[int, list[str]]:
-    # Save original model for logging/debug
-    if not getattr(request_obj, "original_model", None):
-        setattr(request_obj, "original_model", getattr(request_obj, "model", None))
+# ── Pipeline builders ────────────────────────────────────────────────
 
-    # 1) Guardrail system note
-    ensure_system_note(request_obj, cfg.policy.guard_system)
+def build_request_pipeline(cfg: ProxyConfig, models_differ: bool) -> Pipeline:
+    """Phase 1: Transformers that operate on the Anthropic-format request."""
+    return Pipeline([
+        IntentClassifierTransformer(
+            cfg.classifier, cfg.policy, models_differ,
+            synth_reads_fallback=cfg.analysis.synthesize_reads_fallback,
+        ),
+        GuardrailTransformer(cfg.policy.guard_system),
+        TokenCapTransformer(cfg.policy, cfg.credentials.openai_base_url),
+        ToolAllowlistTransformer(cfg.policy),
+        ModelRouterTransformer(cfg.routing, cfg.credentials, cfg.analysis),
+    ])
 
-    # 1b) Tool enforcement for analysis requests
-    if is_analysis:
-        tool_prompt = _build_tool_enforcement_prompt(getattr(request_obj, "tools", None))
-        if tool_prompt:
-            ensure_system_note(request_obj, tool_prompt)
-            print("[analysis-guard] Injected tool enforcement prompt")
 
-    approx_tokens = approx_tokens_from_bytes(raw_body)
+def build_litellm_pipeline(cfg: ProxyConfig) -> Pipeline:
+    """Phase 2: Transformers that operate on the LiteLLM-format request."""
+    return Pipeline([
+        CompressionTransformer(cfg.compressor, cfg.routing),
+        ProviderQuirksTransformer(cfg.stream_extra_body),
+        CredentialTransformer(cfg.credentials, cfg.analysis),
+    ])
 
-    # Provider-specific cap (before LiteLLM)
-    cap = provider_cap_for_base_url(cfg.credentials.openai_base_url)
-    if cap and approx_tokens > cap:
-        msg = (
-            f"[proxy-policy] Provider cap exceeded: approx_tokens={approx_tokens} > cap={cap} "
-            f"(base_url={cfg.credentials.openai_base_url}). Reduce context or use another provider."
-        )
-        if cfg.policy.hard_block_oversize:
-            raise ValueError(msg)
 
-    # 2) Hard cap
-    if cfg.policy.max_input_tokens > 0 and approx_tokens > cfg.policy.max_input_tokens:
-        msg = (
-            f"[proxy-policy] Oversize request: approx_tokens={approx_tokens} > "
-            f"MAX_INPUT_TOKENS={cfg.policy.max_input_tokens}. Reduce workspace/context."
-        )
-        if cfg.policy.hard_block_oversize:
-            raise ValueError(msg)
+_litellm_pipeline_cache: Pipeline | None = None
 
-    # 3) Tools allowlist
-    allow = parse_allowlist(cfg.policy.tool_allowlist_raw)
-    if not allow:
-        dropped = []
-        for t in (getattr(request_obj, "tools", None) or []):
-            name = get_tool_name(t)
-            if name:
-                dropped.append(name)
-        request_obj.tools = None
-        request_obj.tool_choice = None
-    else:
-        request_obj.tools, dropped = filter_tools_allowlist(getattr(request_obj, "tools", None), allow)
-        request_obj.tool_choice = normalize_tool_choice(
-            getattr(request_obj, "tool_choice", None),
-            getattr(request_obj, "tools", None),
-        )
 
-    if dropped and cfg.policy.policy_note_in_system:
-        ensure_system_note(
-            request_obj,
-            f"[proxy-policy] Tools not allowed and were removed: {', '.join(dropped)}. Allowed: {', '.join(sorted(allow))}."
-        )
+def _get_litellm_pipeline(cfg: ProxyConfig) -> Pipeline:
+    """Return a cached Phase 2 pipeline (built once on first call)."""
+    global _litellm_pipeline_cache
+    if _litellm_pipeline_cache is None:
+        _litellm_pipeline_cache = build_litellm_pipeline(cfg)
+    return _litellm_pipeline_cache
 
-    # 4) Model mapping (haiku/sonnet/opus -> provider prefix + big/small)
-    request_obj.model = map_claude_alias_to_target(
-        getattr(request_obj, "model", ""),
-        preferred_provider=cfg.routing.preferred_provider,
-        big_model=cfg.routing.big_model,
-        small_model=cfg.routing.small_model,
-    )
 
-    # 5) Intent-based model override
-    if is_ollama_base(cfg.credentials.openai_base_url):
-        # Ollama: full scoring with intent
-        chosen = choose_local_model(
-            messages=getattr(request_obj, "messages", []) or [],
-            max_out=int(getattr(request_obj, "max_tokens", 0) or 0),
-            approx_tokens=approx_tokens,
-            system_chars=system_chars(getattr(request_obj, "system", None)),
-            tools_count=len(getattr(request_obj, "tools", None) or []),
-            small_model=cfg.routing.small_model,
-            big_model=cfg.routing.big_model,
-            building_model=cfg.routing.building_model,
-            intent=intent,
-        )
-        request_obj.model = f"openai/{chosen}"
-    else:
-        # Cloud: 3-way intent routing (Z.AI, Groq, OpenAI, DeepSeek, etc.)
-        current = request_obj.model
-        prefix = current.rsplit("/", 1)[0] if "/" in current else "openai"
-
-        if intent == "CHAT" and cfg.routing.small_model != cfg.routing.big_model:
-            request_obj.model = f"{prefix}/{cfg.routing.small_model}"
-        elif intent == "BUILDING" and cfg.routing.building_model != cfg.routing.big_model:
-            request_obj.model = f"{prefix}/{cfg.routing.building_model}"
-        # PLANNING (and fallback): stays on big_model (already mapped)
-
-    print("[route] approx_tokens=", approx_tokens,
-      "intent=", intent,
-      "provider=", cfg.routing.preferred_provider,
-      "is_ollama=", is_ollama_base(cfg.credentials.openai_base_url),
-      "model_in=", getattr(request_obj, "original_model", None) or "n/a",
-      "model_out=", request_obj.model,
-      "tools_in=", len(getattr(request_obj, "tools", []) or []),
-      "dropped=", dropped)
-
-    return approx_tokens, dropped
+# ── Execution layer (retry + fallback — unchanged) ──────────────────
 
 async def _call_provider(request_obj: Any, litellm_request: dict) -> Tuple[bool, Any]:
     """Execute a single litellm call. For streaming, validates the first chunk."""
+    # Timeout protects against provider hangs (e.g., MiniMax 92.6s spike)
+    litellm_request.setdefault("timeout", 60)
 
     if getattr(request_obj, "stream", False):
         gen = await litellm.acompletion(**litellm_request)
@@ -216,7 +98,7 @@ async def _call_provider(request_obj: Any, litellm_request: dict) -> Tuple[bool,
 
         return True, _chain(first_chunk, gen)
 
-    resp = litellm.completion(**litellm_request)
+    resp = await litellm.acompletion(**litellm_request)
 
     # Track cache hit from response
     hidden = getattr(resp, "_hidden_params", {}) or {}
@@ -278,94 +160,170 @@ async def _call_provider_with_retry(
     raise last_exception
 
 
-def _inject_credentials(
-    litellm_request: dict,
-    *,
-    model: str,
-    creds: ProviderCredentials,
-) -> None:
-    """Inject provider credentials into a litellm request dict (primary path)."""
-    if model.startswith("openai/"):
-        litellm_request["api_key"] = creds.openai_api_key
-        if creds.openai_base_url:
-            litellm_request["api_base"] = creds.openai_base_url
-    elif model.startswith("gemini/"):
-        if creds.use_vertex_auth:
-            litellm_request["vertex_project"] = creds.vertex_project
-            litellm_request["vertex_location"] = creds.vertex_location
-            litellm_request["custom_llm_provider"] = "vertex_ai"
-        else:
-            litellm_request["api_key"] = creds.gemini_api_key
-    else:  # anthropic/ prefix (or bare model names)
-        litellm_request["api_key"] = creds.anthropic_api_key
-        if creds.anthropic_base_url:
-            litellm_request["api_base"] = creds.anthropic_base_url
+# ── Passthrough helpers ───────────────────────────────────────────────
 
+def _is_passthrough_compatible(model: str, cfg: ProxyConfig) -> bool:
+    """Auto-detect if model targets an Anthropic endpoint that supports passthrough.
+
+    Passthrough bypasses LiteLLM by sending Anthropic format directly via httpx.
+    Only activates when: (1) not disabled, (2) custom anthropic base_url exists,
+    and (3) model uses anthropic/ prefix or is a bare model name.
+    """
+    if cfg.passthrough_disabled:
+        return False
+    # Need a custom Anthropic endpoint (Z.AI, etc.) — actual Anthropic API
+    # is handled natively by LiteLLM with no conversion overhead.
+    if not cfg.credentials.anthropic_base_url:
+        return False
+    if not cfg.credentials.anthropic_api_key:
+        return False
+    # Check model prefix
+    if "/" not in model:
+        return True  # bare model → assume primary provider
+    return model.split("/", 1)[0].lower() == "anthropic"
+
+
+async def _empty_stream():
+    """Yield nothing — used when passthrough stream is immediately exhausted."""
+    return
+    yield  # noqa: unreachable — makes this an async generator
+
+
+def _build_passthrough_body(
+    request: Any,
+    model: str,
+    ctx: TransformContext | None = None,
+    analysis_thinking: dict | None = None,
+) -> dict:
+    """Convert MessagesRequest to Anthropic API body dict for passthrough.
+
+    When ctx.analysis_phase == "ANALYZING" and analysis_thinking is provided,
+    merges thinking params into the body (model-agnostic activation).
+    """
+    body: dict[str, Any] = {
+        "model": model,
+        "max_tokens": getattr(request, "max_tokens", 4096),
+        "messages": [
+            m if isinstance(m, dict) else m.dict()
+            for m in (request.messages or [])
+        ],
+    }
+    if getattr(request, "system", None):
+        system = request.system
+        if isinstance(system, list):
+            body["system"] = [
+                s if isinstance(s, dict) else s.dict() for s in system
+            ]
+        else:
+            body["system"] = system
+    if getattr(request, "tools", None):
+        body["tools"] = [
+            t if isinstance(t, dict) else t.dict() for t in request.tools
+        ]
+    if getattr(request, "temperature", None) is not None:
+        body["temperature"] = request.temperature
+    # Inject thinking params for ANALYZING phase (model-agnostic)
+    if ctx and ctx.analysis_phase in ("ANALYZING", "READ") and analysis_thinking:
+        # Skip thinking for very large contexts — reasoning overhead causes timeouts
+        thinking_cap = int(os.environ.get("THINKING_MAX_INPUT_CHARS", "0"))
+        if thinking_cap > 0:
+            body_chars = sum(len(str(m)) for m in body.get("messages", []))
+            if body_chars > thinking_cap:
+                logger.info("[passthrough] SKIP thinking: body_chars=%d > cap=%d", body_chars, thinking_cap)
+                return body
+        body.update(analysis_thinking)
+        logger.info("[passthrough] injected thinking params: %s", list(analysis_thinking.keys()))
+    return body
+
+
+# ── Main entry point ─────────────────────────────────────────────────
 
 async def run_messages(
     *,
     request_obj: Any,
     cfg: ProxyConfig,
-    intent: str = "CHAT",
+    ctx: TransformContext,
 ) -> Tuple[bool, Any, str]:
     """
+    Bridge + Phase 2 + Execution.
+
+    1. Convert Anthropic → LiteLLM format
+    2. Run litellm_pipeline (compression, quirks, credentials)
+    3. Execute with retry + fallback chain
+
     Returns: (is_streaming, response_or_generator, provider_name)
-    Tries primary provider first, then fallbacks sequentially.
     """
     model = str(getattr(request_obj, "model", "") or "")
-    model_ctx = cfg.routing.model_context_window
-    litellm_request = convert_anthropic_to_litellm(
-        request_obj, model_context_window=model_ctx, max_output_tokens=cfg.routing.max_output_tokens,
+    model_ctx = ctx.effective_context_window or cfg.routing.model_context_window
+
+    # ── Passthrough: auto-detect Anthropic-compatible endpoints ──
+    if _is_passthrough_compatible(model, cfg):
+        pt_model = model.split("/")[-1] if "/" in model else model
+        try:
+            is_stream = getattr(request_obj, "stream", False)
+            has_thinking = (
+                is_stream
+                and ctx and ctx.analysis_phase in ("ANALYZING", "READ")
+                and cfg.analysis.thinking_params
+            )
+            # Dynamic timeout: reasoning models need more time with large contexts
+            timeout = cfg.passthrough_thinking_timeout if has_thinking else cfg.passthrough_timeout
+            pt = PassthroughClient(cfg.credentials.anthropic_base_url, cfg.credentials.anthropic_api_key, timeout=timeout)
+            body = _build_passthrough_body(
+                request_obj, pt_model,
+                ctx=ctx,
+                analysis_thinking=cfg.analysis.thinking_params if is_stream else None,
+            )
+            if is_stream:
+                logger.info("[passthrough] streaming phase=%s model=%s analysis=%s timeout=%.0fs", ctx.phase, body.get("model"), ctx.analysis_phase, timeout)
+                # Don't strip reasoning during analysis — the reasoning IS the value
+                strip = cfg.policy.strip_reasoning and not ctx.is_analysis
+                raw_stream = pt.stream_message(body, strip_reasoning=strip)
+                # Eagerly fetch first chunk to detect connection/timeout errors
+                # BEFORE returning StreamingResponse (enables litellm fallback)
+                try:
+                    first_chunk = await raw_stream.__anext__()
+                except StopAsyncIteration:
+                    return True, _empty_stream(), "passthrough"
+                except Exception as stream_err:
+                    logger.warning("[passthrough] stream failed on first chunk (timeout=%.0fs): %s", timeout, stream_err)
+                    raise PassthroughError(str(stream_err)) from stream_err
+
+                async def _prepend_stream():
+                    yield first_chunk
+                    async for chunk in raw_stream:
+                        yield chunk
+
+                return True, _prepend_stream(), "passthrough"
+            else:
+                # Non-streaming passthrough: use actual max_tokens to support
+                # quality refinement loop in server.py. The original max_tokens=1
+                # cap was a "preflight" optimization but broke quality scoring.
+                body["max_tokens"] = getattr(request_obj, "max_tokens", 4096)
+                logger.info("[passthrough] non-stream phase=%s model=%s max_tokens=%d",
+                            ctx.phase, body.get("model"), body["max_tokens"])
+                result = await pt.create_message(body)
+                return False, result, "passthrough"
+        except (httpx.HTTPError, PassthroughError) as e:
+            logger.warning("[passthrough] FALLBACK to litellm: %s: %s", type(e).__name__, e)
+            # Fall through to normal litellm pipeline
+    elif cfg.credentials.anthropic_base_url and not cfg.passthrough_disabled:
+        logger.info("[passthrough] SKIP: model=%s not anthropic-compatible", model)
+
+    # Bridge: Anthropic → LiteLLM format
+    ctx.litellm_request = convert_anthropic_to_litellm(
+        request_obj, model_context_window=model_ctx,
+        max_output_tokens=cfg.routing.max_output_tokens,
+        reasoning_max_tokens=cfg.routing.reasoning_max_tokens,
     )
 
-    # Provider-specific extra_body params (e.g. Z.AI requires tool_stream=True)
-    if cfg.stream_extra_body and litellm_request.get("stream") and litellm_request.get("tools"):
-        litellm_request.setdefault("extra_body", {}).update(cfg.stream_extra_body)
-        print(f"[tools] Applied STREAM_EXTRA_BODY: {list(cfg.stream_extra_body.keys())}")
+    # Phase 2: LiteLLM transformers (compression, provider quirks, credentials)
+    await _get_litellm_pipeline(cfg).process(request_obj, ctx)
 
-    # --- Context compression if needed ---
-    comp = cfg.compressor
-    if model_ctx > 0 and comp.model and comp.api_key:
-        trigger_ratio = comp.trigger_ratio
-        tools_overhead = estimate_tools_tokens(litellm_request.get("tools"))
-
-        litellm_request["messages"], was_compressed = await compress_messages_if_needed(
-            messages=litellm_request["messages"],
-            model_context_window=model_ctx,
-            compressor_model=comp.model,
-            compressor_api_key=comp.api_key,
-            compressor_base_url=comp.base_url,
-            keep_recent=comp.keep_recent,
-            trigger_ratio=trigger_ratio,
-            tools_overhead_tokens=tools_overhead,
-            target_model=model,
-            fallback_model=comp.fallback_model,
-            fallback_api_key=comp.fallback_api_key,
-            fallback_base_url=comp.fallback_base_url,
-        )
-
-        # Recalculate max_completion_tokens after compression
-        if was_compressed and model.startswith("openai/") and not is_no_tools_model(model):
-            provider_max = cfg.routing.max_output_tokens
-            input_est = sum(len(str(m.get("content", ""))) for m in litellm_request["messages"]) // 4
-            tools_est = sum(
-                len(json.dumps(t)) // 4 for t in (litellm_request.get("tools") or [])
-            )
-            remaining = model_ctx - input_est - tools_est
-            safe = int(remaining * 0.85)
-            new_cap = max(1024, min(safe, provider_max))
-            new_max = min(request_obj.max_tokens, new_cap)
-            old_max = litellm_request.get("max_completion_tokens", new_max)
-            if new_max != old_max:
-                print(f"[compress] Recapped max_tokens: {old_max} → {new_max} "
-                      f"(post-compression input~{input_est} tools~{tools_est} remaining~{remaining})")
-            litellm_request["max_completion_tokens"] = new_max
-
-    _inject_credentials(litellm_request, model=model, creds=cfg.credentials)
-
+    # Execution: primary provider
     if not cfg.fallback_providers:
         is_stream, out = await _call_provider_with_retry(
-            request_obj, litellm_request,
+            request_obj, ctx.litellm_request,
             max_retries=cfg.max_retries, base_delay=cfg.retry_base_delay,
         )
         return is_stream, out, "primary"
@@ -374,7 +332,7 @@ async def run_messages(
     primary_error_msg = ""
     try:
         is_stream, out = await _call_provider_with_retry(
-            request_obj, litellm_request,
+            request_obj, ctx.litellm_request,
             max_retries=cfg.max_retries, base_delay=cfg.retry_base_delay,
         )
         return is_stream, out, "primary"
@@ -387,10 +345,12 @@ async def run_messages(
 
     for provider in cfg.fallback_providers:
         try:
-            request_obj.model = provider.get_litellm_model(intent)
+            request_obj.model = provider.get_litellm_model(ctx.intent)
             fb_ctx = getattr(provider, "context_window", 0) or model_ctx
             fb_request = convert_anthropic_to_litellm(
-                request_obj, model_context_window=fb_ctx, max_output_tokens=cfg.routing.max_output_tokens,
+                request_obj, model_context_window=fb_ctx,
+                max_output_tokens=cfg.routing.max_output_tokens,
+                reasoning_max_tokens=cfg.routing.reasoning_max_tokens,
             )
             fb_request["api_key"] = provider.api_key
             if provider.base_url:

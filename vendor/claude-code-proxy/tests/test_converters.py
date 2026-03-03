@@ -7,8 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils.utils import bget as _bget
 from llm.converters import (
-    _bget,
     _safe_json,
     _extract_tool_fields,
     _convert_assistant_blocks,

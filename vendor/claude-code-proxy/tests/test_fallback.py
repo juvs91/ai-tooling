@@ -66,7 +66,7 @@ class TestProviderConfigGetLitellmModel:
 class TestLoadFallbackProviders:
     def test_no_env_vars_returns_empty(self):
         with patch.dict("os.environ", {}, clear=True):
-            from server import _load_fallback_providers
+            from config import _load_fallback_providers
             result = _load_fallback_providers()
             assert result == []
 
@@ -79,7 +79,7 @@ class TestLoadFallbackProviders:
             "FALLBACK_1_SMALL_MODEL": "llama-70b",
         }
         with patch.dict("os.environ", env, clear=True):
-            from server import _load_fallback_providers
+            from config import _load_fallback_providers
             result = _load_fallback_providers()
             assert len(result) == 1
             assert result[0].name == "fallback_1"
@@ -96,7 +96,7 @@ class TestLoadFallbackProviders:
             "FALLBACK_2_BIG_MODEL": "model2",
         }
         with patch.dict("os.environ", env, clear=True):
-            from server import _load_fallback_providers
+            from config import _load_fallback_providers
             result = _load_fallback_providers()
             assert len(result) == 2
             assert result[0].name == "fallback_1"
@@ -113,7 +113,7 @@ class TestLoadFallbackProviders:
             "FALLBACK_3_BIG_MODEL": "model3",
         }
         with patch.dict("os.environ", env, clear=True):
-            from server import _load_fallback_providers
+            from config import _load_fallback_providers
             result = _load_fallback_providers()
             assert len(result) == 1  # stops at gap
 
@@ -124,6 +124,6 @@ class TestLoadFallbackProviders:
             "FALLBACK_1_BIG_MODEL": "model1",
         }
         with patch.dict("os.environ", env, clear=True):
-            from server import _load_fallback_providers
+            from config import _load_fallback_providers
             result = _load_fallback_providers()
             assert len(result) == 0

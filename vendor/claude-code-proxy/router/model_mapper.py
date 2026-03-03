@@ -21,6 +21,7 @@ def _provider_prefix(preferred_provider: str) -> str:
         return "anthropic/"
     return "openai/"
 
+
 def map_claude_alias_to_target(
     model: str,
     *,
@@ -34,6 +35,9 @@ def map_claude_alias_to_target(
       - openai/<big|small>     (Z.AI OpenAI-compat, Groq, DeepSeek, etc.)
       - anthropic/<big|small>  (Z.AI Anthropic-compat, native Anthropic)
       - gemini/<big|small>     (Google AI / Vertex)
+
+    Note: model names are always bare (no embedded provider prefix).
+    Cross-provider routing is handled by RouteOverride in ModelRouterTransformer.
     """
     if not model:
         return _provider_prefix(preferred_provider) + small_model
