@@ -20,8 +20,22 @@ from utils.utils import get_tool_name, make_tool_id, to_dict
 
 
 # ---------------------------------------------------------------------------
-# 0. Tool name validation helpers
+# 0. Tool name normalization + validation helpers
 # ---------------------------------------------------------------------------
+
+# Normalize legacy/model-generated tool names to current Claude Code names.
+# Models trained on older CC versions may emit "Task" instead of "Agent".
+_TOOL_NAME_ALIASES: dict[str, str] = {
+    "Task": "Agent",
+}
+
+
+def _normalize_tool_name(name: str) -> str:
+    """Normalize legacy tool names to current Claude Code names (deterministic fallback)."""
+    normalized = _TOOL_NAME_ALIASES.get(name, name)
+    if normalized != name:
+        print(f"[no-tools] Normalized tool name: '{name}' → '{normalized}'")
+    return normalized
 
 def _build_valid_tool_names(tools: list | None) -> set[str]:
     """Extract set of valid tool names from request tools."""
@@ -159,6 +173,73 @@ def _build_tool_quick_reference(tools: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# Pre-defined few-shot examples for CC core tools (parameters as JSON, not XML tags)
+_FEW_SHOT_EXAMPLES: dict[str, dict] = {
+    "Read": {"file_path": "/src/main.py"},
+    "Write": {"file_path": "/src/main.py", "content": "print('hello')"},
+    "Edit": {"file_path": "/src/main.py", "old_string": "hello", "new_string": "world"},
+    "Bash": {"command": "ls -la", "description": "List files"},
+    "Grep": {"pattern": "def main", "path": "/src"},
+    "Glob": {"pattern": "**/*.py"},
+    "TodoWrite": {"todos": [{"content": "Fix bug", "status": "in_progress", "activeForm": "Fixing bug"}]},
+    "Agent": {"description": "Search codebase", "prompt": "Find all API endpoints", "subagent_type": "Explore"},
+    "AskUserQuestion": {"questions": [{"question": "Which approach?", "header": "Approach", "options": [{"label": "A", "description": "First"}, {"label": "B", "description": "Second"}], "multiSelect": False}]},
+    "EnterPlanMode": {},
+    "ExitPlanMode": {},
+    "WebSearch": {"query": "python async best practices 2025"},
+    "WebFetch": {"url": "https://example.com/docs", "prompt": "Extract the API reference"},
+    "Skill": {"skill": "commit"},
+    "NotebookEdit": {"notebook_path": "/notebooks/analysis.ipynb", "new_source": "print('hello')", "cell_type": "code", "edit_mode": "replace"},
+}
+
+
+def _build_few_shot_examples(tools: list[dict]) -> str:
+    """Build few-shot examples for CC core tools present in the request.
+
+    Only includes examples for tools that are actually in the request.
+    Reuses _build_valid_tool_names() to filter dynamically.
+    """
+    valid_names = _build_valid_tool_names(tools)
+    lines = [
+        "EXAMPLES (follow this EXACT format for EVERY tool call — "
+        "parameters are ALWAYS a JSON object inside <input> tags):\n"
+    ]
+    found = False
+    for name, example_input in _FEW_SHOT_EXAMPLES.items():
+        if name in valid_names:
+            found = True
+            lines.append(f'<tool_call name="{name}">')
+            lines.append("<input>")
+            lines.append(json.dumps(example_input))
+            lines.append("</input>")
+            lines.append("</tool_call>\n")
+
+    if not found:
+        # Fallback: generic example if no core tools matched
+        lines.append('<tool_call name="ToolName">')
+        lines.append("<input>")
+        lines.append('{"param1": "value1", "param2": "value2"}')
+        lines.append("</input>")
+        lines.append("</tool_call>\n")
+
+    # Negative examples to prevent common hallucinations
+    lines.append(
+        "WRONG FORMAT (NEVER do this — parameters are NOT XML tags):\n"
+        '<tool_call name="Read">\n'
+        "<file_path>/path/to/file.py</file_path>\n"
+        "</tool_call>\n\n"
+        "WRONG FORMAT (NEVER do this — do NOT use single quotes):\n"
+        "<tool_call name='Read'>\n"
+        "<input>{'file_path': '/path/to/file.py'}</input>\n"
+        "</tool_call>\n\n"
+        'WRONG FORMAT (NEVER do this — do NOT use <parameter> attributed tags):\n'
+        '<tool_call name="Read">\n'
+        '<parameter name="file_path">/path/to/file.py</parameter>\n'
+        "</tool_call>\n\n"
+    )
+    return "\n".join(lines)
+
+
 def build_tool_prompt(tools: list[dict]) -> str:
     """
     Convert Anthropic tool definitions to an XML-format prompt.
@@ -178,6 +259,9 @@ def build_tool_prompt(tools: list[dict]) -> str:
         "</tool_call>\n\n"
         "RULES:\n"
         '- CRITICAL: You MUST use exactly <input> and </input> tags. Do NOT use <textarea>, <arguments>, <params>, or any other tag name.\n'
+        '- CRITICAL: Tool parameters MUST be a JSON object inside <input> tags. '
+        'NEVER use XML tags for parameters (e.g., <file_path>, <content>, <command>). '
+        'Do NOT use <parameter name="X">value</parameter> format either.\n'
         '- CRITICAL: Use DOUBLE QUOTES for the name attribute: name="ToolName" (NOT name=\'ToolName\').\n'
         '- CRITICAL: The <input> must contain valid JSON (double quotes for keys and string values, NOT single quotes).\n'
         '- CRITICAL: Do NOT include <reasoning> tags or any non-tool XML inside <tool_call> blocks. Put reasoning OUTSIDE the tool call.\n'
@@ -199,15 +283,8 @@ def build_tool_prompt(tools: list[dict]) -> str:
             "If a tool you need is not in this list, explain what you need — do NOT fabricate a tool name.\n\n"
         )
 
-    # Single generic format example
-    header += (
-        "EXAMPLE (this is the exact format you must follow):\n"
-        '<tool_call name="ToolName">\n'
-        '<input>\n'
-        '{"param1": "value1", "param2": "value2"}\n'
-        '</input>\n'
-        '</tool_call>\n\n'
-    )
+    # Few-shot examples from actual tools in the request
+    header += _build_few_shot_examples(tools)
 
     # Compact reference of ALL available tools
     if tools:
@@ -312,6 +389,12 @@ _TOOL_CALL_RE = re.compile(
     rf'<tool_call\s+{_NAME_ATTR}\s*>\s*{_REASONING_SKIP}<{_INNER_TAG}>([\s\S]*?)</{_INNER_TAG}>\s*</tool_call>',
     re.DOTALL,
 )
+# Greedy variant: matches the LAST </input></tool_call> instead of first.
+# Used when JSON content contains nested <tool_call>/<input> XML examples.
+_TOOL_CALL_GREEDY_RE = re.compile(
+    rf'<tool_call\s+{_NAME_ATTR}\s*>\s*{_REASONING_SKIP}<{_INNER_TAG}>([\s\S]*)</{_INNER_TAG}>\s*</tool_call>',
+    re.DOTALL,
+)
 # Fallback regex: matches any single XML tag wrapping the content
 _TOOL_CALL_FALLBACK_RE = re.compile(
     rf'<tool_call\s+{_NAME_ATTR}\s*>\s*{_REASONING_SKIP}<(\w+)>([\s\S]*?)</\2>\s*</tool_call>',
@@ -354,6 +437,18 @@ def _parse_argkv_tool(match) -> dict:
     return {"name": name, "input": input_dict}
 
 
+# 6th fallback: XML-as-tags format — model uses XML param tags instead of JSON
+# Handles: <file_path>/path</file_path> <content>text</content>
+_XML_PARAM_TAG_RE = re.compile(r'<(\w+)>([\s\S]*?)</\1>', re.DOTALL)
+
+# 7th fallback: Attributed XML parameter format (Anthropic SDK style)
+# Handles: <parameter name="file_path">/path</parameter>
+_XML_ATTR_PARAM_RE = re.compile(
+    r'<parameter\s+name=["\'](\w+)["\']\s*>([\s\S]*?)</parameter>',
+    re.DOTALL,
+)
+
+
 _CDATA_RE = re.compile(r'^<!\[CDATA\[([\s\S]*?)\]\]>$')
 
 
@@ -385,6 +480,144 @@ def _strip_inner_xml_tags(raw: str) -> str:
     return stripped
 
 
+def _parse_xml_as_tags(raw: str, tool_name: str, tools: list | None = None) -> dict | None:
+    """
+    Convert XML-as-tags format to JSON dict.
+
+    Some models (DeepSeek-reasoner) generate parameters as XML tags instead of JSON:
+        Format A: <file_path>/path/to/file</file_path><content>text</content>
+        Format B: <parameter name="file_path">/path</parameter><parameter name="content">text</parameter>
+    instead of:
+        {"file_path": "/path/to/file", "content": "text"}
+
+    Returns dict if XML-as-tags detected and validated against schema, None otherwise.
+    """
+    stripped = raw.strip()
+    # Quick check: must start with < and contain at least one <tag>...</tag> pair
+    if not stripped.startswith("<") or "</" not in stripped:
+        return None
+
+    # Try Format A: <param_name>value</param_name>
+    matches = list(_XML_PARAM_TAG_RE.finditer(stripped))
+    use_attr_format = False
+    if not matches:
+        # Try Format B: <parameter name="param_name">value</parameter>
+        matches = list(_XML_ATTR_PARAM_RE.finditer(stripped))
+        use_attr_format = True
+    if not matches:
+        return None
+
+    result = {}
+    for m in matches:
+        param_name = m.group(1)
+        if not use_attr_format:
+            # Format A: skip known non-param tags (reasoning, input, tool_call)
+            if param_name in ("reasoning", "input", "tool_call", "textarea", "arguments", "params"):
+                return None
+        result[param_name] = m.group(2)
+
+    if not result:
+        return None
+
+    # Schema validation: extracted keys must overlap with tool schema properties
+    props = _get_tool_properties(tool_name, tools)
+    if props:
+        overlap = set(result.keys()) & set(props.keys())
+        if not overlap:
+            return None  # No schema overlap — not XML-as-tags for this tool
+
+    fmt = "xml-attr" if use_attr_format else "xml-as-tags"
+    print(f"[no-tools] Parsed {fmt} format for tool '{tool_name}': keys={list(result.keys())}")
+    return result
+
+
+def _greedy_extract_json_fields(raw: str, tool_name: str, tools: list | None) -> dict | None:
+    """
+    Greedy field extraction for tools with large string content (Write, Edit).
+
+    When json.loads and repair_json fail (e.g. DeepSeek emits unescaped quotes
+    inside the 'content' field), extract fields using regex that tolerates broken JSON.
+
+    Strategy: extract each field value by finding the key, then greedily capturing
+    the value up to the next key or end of JSON.
+    """
+    if not tools:
+        return None
+    props = _get_tool_properties(tool_name, tools)
+    required = _get_tool_required_fields(tool_name, tools)
+    if not props or len(required) < 2:
+        return None  # Only needed for multi-field tools like Write/Edit
+
+    result = {}
+    prop_names = list(props.keys())
+
+    for i, field in enumerate(prop_names):
+        expected_type = props[field].get("type") if isinstance(props[field], dict) else None
+        # Build regex: "field_name"\s*:\s*"(value)"
+        # For the LAST string field, capture greedily to the end of the JSON
+        if expected_type == "string":
+            # Find all potential next-field boundaries
+            next_fields = prop_names[i + 1:]
+            if next_fields:
+                # Non-greedy: capture until the next field key
+                boundary = "|".join(re.escape(f'"{nf}"') for nf in next_fields)
+                pattern = rf'"{re.escape(field)}"\s*:\s*"([\s\S]*?)"\s*,\s*(?:{boundary})'
+                m = re.search(pattern, raw)
+                if not m:
+                    # Greedy fallback: capture to end of JSON
+                    pattern = rf'"{re.escape(field)}"\s*:\s*"([\s\S]+?)"\s*[,}}]\s*$'
+                    m = re.search(pattern, raw)
+            else:
+                # Last field: capture greedily to the closing brace
+                pattern = rf'"{re.escape(field)}"\s*:\s*"([\s\S]+?)"\s*\}}\s*$'
+                m = re.search(pattern, raw)
+            if m:
+                val = m.group(1)
+                # Unescape JSON sequences
+                val = val.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace('\\\\', '\\')
+                result[field] = val
+        elif expected_type == "boolean":
+            m = re.search(rf'"{re.escape(field)}"\s*:\s*(true|false)', raw, re.IGNORECASE)
+            if m:
+                result[field] = m.group(1).lower() == "true"
+
+    # Validate: all required fields must be present
+    missing = required - set(result.keys())
+    if missing:
+        return None
+
+    print(f"[no-tools] Greedy field extraction OK for '{tool_name}': keys={list(result.keys())}")
+    return result
+
+
+def _schema_aware_cleanup(parsed: dict, tool_name: str, tools: list | None) -> dict:
+    """
+    Filter parsed dict to only include keys from the tool's schema.
+
+    When repair_json produces extra keys from misinterpreted string boundaries,
+    keep only schema-valid keys. Returns original dict if no schema available
+    or if cleanup would remove required fields.
+    """
+    if not tools:
+        return parsed
+    props = _get_tool_properties(tool_name, tools)
+    if not props:
+        return parsed
+
+    extra_keys = set(parsed.keys()) - set(props.keys())
+    if not extra_keys:
+        return parsed  # All keys are valid
+
+    required = _get_tool_required_fields(tool_name, tools)
+    cleaned = {k: v for k, v in parsed.items() if k in props}
+    missing = required - set(cleaned.keys())
+    if missing:
+        return parsed  # Cleanup would lose required fields — keep original
+
+    print(f"[no-tools] Schema cleanup for '{tool_name}': removed extra keys {extra_keys}")
+    return cleaned
+
+
 def _safe_parse_tool_input(raw_input: str, tool_name: str, tools: list | None = None) -> dict:
     """
     Parse tool input JSON with multiple fallback strategies.
@@ -400,6 +633,11 @@ def _safe_parse_tool_input(raw_input: str, tool_name: str, tools: list | None = 
     # 0) Strip any wrapping XML tags (e.g. <input>...</input>)
     raw = _strip_inner_xml_tags(raw)
 
+    # 0.5) Detect XML-as-tags format: <param>value</param> instead of JSON
+    xml_tags_result = _parse_xml_as_tags(raw, tool_name, tools=tools)
+    if xml_tags_result is not None:
+        return xml_tags_result
+
     def _wrap_and_repair(parsed: Any) -> dict:
         """Wrap non-dict parsed value and attempt schema-based repair."""
         wrapped = {"value": parsed}
@@ -411,7 +649,7 @@ def _safe_parse_tool_input(raw_input: str, tool_name: str, tools: list | None = 
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, dict):
-            return parsed
+            return _schema_aware_cleanup(parsed, tool_name, tools)
         return _wrap_and_repair(parsed)
     except json.JSONDecodeError:
         pass
@@ -421,12 +659,17 @@ def _safe_parse_tool_input(raw_input: str, tool_name: str, tools: list | None = 
         repaired = repair_json(raw, return_objects=True)
         if isinstance(repaired, dict):
             print(f"[no-tools] Repaired malformed JSON for tool '{tool_name}'")
-            return repaired
+            return _schema_aware_cleanup(repaired, tool_name, tools)
         return _wrap_and_repair(repaired)
     except Exception:
         pass
 
-    # 3) Last resort: wrap raw string
+    # 3) Greedy field extraction (for Write/Edit with unescaped quotes in content)
+    greedy = _greedy_extract_json_fields(raw, tool_name, tools)
+    if greedy is not None:
+        return greedy
+
+    # 4) Last resort: wrap raw string
     print(f"[no-tools] Could not parse tool input for '{tool_name}', wrapping as raw")
     return {"raw_input": raw}
 
@@ -454,7 +697,7 @@ def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = 
     used_re = _TOOL_CALL_RE
     try:
         for match in _TOOL_CALL_RE.finditer(text):
-            name = match.group(1).strip()
+            name = _normalize_tool_name(match.group(1).strip())
             raw_input = match.group(2)
             parsed_input = _safe_parse_tool_input(raw_input, name, tools=tools)
             tool_blocks.append({
@@ -467,7 +710,7 @@ def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = 
         # Fallback: try permissive regex if primary found nothing
         if not tool_blocks and "<tool_call" in text:
             for match in _TOOL_CALL_FALLBACK_RE.finditer(text):
-                name = match.group(1).strip()
+                name = _normalize_tool_name(match.group(1).strip())
                 inner_tag = match.group(2)
                 raw_input = match.group(3)
                 print(f"[no-tools] WARNING: Model used <{inner_tag}> instead of <input> for tool '{name}' — parsed via fallback regex")
@@ -484,7 +727,7 @@ def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = 
         # Also handles tool calls with NO input (e.g. EnterPlanMode, ExitPlanMode)
         if not tool_blocks and "<tool_call" in text:
             for match in _TOOL_CALL_BARE_RE.finditer(text):
-                name = match.group(1).strip()
+                name = _normalize_tool_name(match.group(1).strip())
                 raw_content = match.group(2).strip()
                 print(f"[no-tools] BARE regex match for tool '{name}' (no inner tags, content={len(raw_content)} chars)")
                 parsed_input = _safe_parse_tool_input(raw_content, name, tools=tools)
@@ -500,7 +743,7 @@ def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = 
         if not tool_blocks and "<tool_call>" in text:
             for match in _TOOL_CALL_ARGKV_RE.finditer(text):
                 parsed = _parse_argkv_tool(match)
-                name = parsed["name"]
+                name = _normalize_tool_name(parsed["name"])
                 print(f"[no-tools] ARGKV regex match for tool '{name}' keys={list(parsed['input'].keys())}")
                 tool_blocks.append({
                     "type": "tool_use",
@@ -514,7 +757,7 @@ def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = 
         # 5th fallback: diluted XML format (models invent <tool_name>/<args> after prompt dilution)
         if not tool_blocks and "<tool_name>" in text:
             for match in _TOOL_DILUTED_RE.finditer(text):
-                name = match.group(1).strip()
+                name = _normalize_tool_name(match.group(1).strip())
                 raw_input = match.group(2)
                 print(f"[no-tools] DILUTED regex match for tool '{name}' (model used <tool_name>/<args> format)")
                 parsed_input = _safe_parse_tool_input(raw_input, name, tools=tools)
@@ -576,15 +819,8 @@ def _repair_tool_input(name: str, input_dict: dict, tools: list | None) -> dict:
     if not tools or "value" not in input_dict or len(input_dict) != 1:
         return input_dict
 
-    # Find tool schema
-    schema = None
-    for t in tools:
-        t_name = get_tool_name(t)
-        if t_name == name:
-            schema = getattr(t, "input_schema", None) or (t.get("input_schema") if isinstance(t, dict) else None)
-            break
-
-    if not schema or not isinstance(schema, dict):
+    schema = _get_tool_schema(name, tools)
+    if not schema:
         return input_dict
 
     props = schema.get("properties", {})
@@ -599,6 +835,13 @@ def _repair_tool_input(name: str, input_dict: dict, tools: list | None) -> dict:
             field = required_array[0]
             print(f"[repair] Rewrapped {{'value': [...]}} → {{'{field}': [...]}} for tool '{name}'")
             return {field: value}
+        # Strategy 1b: List with single string element → unwrap for string fields
+        if len(value) == 1 and isinstance(value[0], str) and len(required) == 1:
+            field = list(required)[0]
+            expected_type = props.get(field, {}).get("type") if isinstance(props.get(field), dict) else None
+            if expected_type == "string":
+                print(f"[repair] Unwrapped single-element list → string for '{field}' in tool '{name}'")
+                return {field: value[0]}
 
     # Strategy 2: Single required property (type-checked)
     if len(required) == 1:
@@ -611,6 +854,15 @@ def _repair_tool_input(name: str, input_dict: dict, tools: list | None) -> dict:
                 return input_dict
             print(f"[repair] Rewrapped {{'value': ...}} → {{'{field}': ...}} for tool '{name}'")
             return {field: value}
+
+    # Strategy 3: value is a dict with keys matching schema (multi-field tools like Write/Edit)
+    # Handles: {"value": {"file_path": "...", "content": "..."}} → {"file_path": "...", "content": "..."}
+    if isinstance(value, dict):
+        overlap = set(value.keys()) & set(props.keys())
+        missing = required - set(value.keys())
+        if overlap and not missing:
+            print(f"[repair] Unwrapped {{'value': dict}} for tool '{name}': keys={list(value.keys())}")
+            return value
 
     return input_dict
 
@@ -631,17 +883,39 @@ _PARTIAL_ARGKV_RE = re.compile(
     re.DOTALL,
 )
 
+# Partial XML-as-tags: <tool_call name="Write"><file_path>...</file_path><content>...(truncated)
+_PARTIAL_XML_TAGS_RE = re.compile(
+    r'<tool_call\s+' + _NAME_ATTR + r'\s*>\s*((?:<\w+>[\s\S]*?</\w+>\s*)*)',
+    re.DOTALL,
+)
 
-def _get_tool_required_fields(tool_name: str, tools: list | None) -> set[str]:
-    """Get required fields from a tool's input_schema."""
+
+def _get_tool_schema(tool_name: str, tools: list | None) -> dict | None:
+    """Get a tool's input_schema by name. Returns None if not found."""
     if not tools:
-        return set()
+        return None
     for t in tools:
         if get_tool_name(t) == tool_name:
             schema = getattr(t, "input_schema", None) or (t.get("input_schema") if isinstance(t, dict) else None)
             if isinstance(schema, dict):
-                return set(schema.get("required", []))
-    return set()
+                return schema
+    return None
+
+
+def _get_tool_required_fields(tool_name: str, tools: list | None) -> set[str]:
+    """Get required fields from a tool's input_schema."""
+    schema = _get_tool_schema(tool_name, tools)
+    if not schema:
+        return set()
+    return set(schema.get("required", []))
+
+
+def _get_tool_properties(tool_name: str, tools: list | None) -> dict:
+    """Get properties dict from a tool's input_schema."""
+    schema = _get_tool_schema(tool_name, tools)
+    if not schema:
+        return {}
+    return schema.get("properties", {})
 
 
 def recover_truncated_deterministic(
@@ -681,6 +955,36 @@ def recover_truncated_deterministic(
                     print(f"[no-tools] Deterministic recovery OK (argkv) for '{tool_name}': keys={list(input_dict.keys())}")
                     return [{"type": "tool_use", "id": make_tool_id(), "name": tool_name, "input": input_dict}]
                 print(f"[no-tools] Deterministic recovery (argkv) for '{tool_name}' missing: {missing}")
+
+        # Try XML-as-tags format: <tool_call name="Write"><file_path>...</file_path><content>...</content>
+        # Also handles attributed format: <parameter name="file_path">...</parameter>
+        match_xml_tags = _PARTIAL_XML_TAGS_RE.search(partial_xml)
+        if match_xml_tags:
+            tool_name = match_xml_tags.group(1).strip()
+            tags_content = match_xml_tags.group(2)
+            remaining = partial_xml[match_xml_tags.end():]
+            all_content = tags_content + remaining
+            input_dict = {}
+            # Try simple XML-as-tags first
+            for tag_match in _XML_PARAM_TAG_RE.finditer(all_content):
+                input_dict[tag_match.group(1)] = tag_match.group(2)
+            # Try attributed format as fallback
+            if not input_dict:
+                for attr_match in _XML_ATTR_PARAM_RE.finditer(all_content):
+                    input_dict[attr_match.group(1)] = attr_match.group(2)
+            # Also try to capture a truncated last param (unclosed tag)
+            if remaining.strip():
+                open_tag = re.search(r'<(\w+)>([\s\S]*)$', remaining)
+                if open_tag and open_tag.group(1) not in input_dict:
+                    input_dict[open_tag.group(1)] = open_tag.group(2)
+            if input_dict:
+                required = _get_tool_required_fields(tool_name, tools)
+                missing = required - set(input_dict.keys())
+                if not missing:
+                    print(f"[no-tools] Deterministic recovery OK (xml-as-tags) for '{tool_name}': keys={list(input_dict.keys())}")
+                    return [{"type": "tool_use", "id": make_tool_id(), "name": tool_name, "input": input_dict}]
+                print(f"[no-tools] Deterministic recovery (xml-as-tags) for '{tool_name}' missing: {missing}")
+
         return None
 
     tool_name = match.group(1).strip()
@@ -865,6 +1169,28 @@ def strip_tool_call_xml(text: str) -> str:
 
 _TOOL_CALL_OPEN = "<tool_call"
 
+# Detects if opening <tool_call has REAL (unescaped) quotes in name= attribute
+# Used in _try_extract_tool to distinguish real tools from escaped examples
+_REAL_NAME_RE = re.compile(r'<tool_call\s+name=["\'][^"\']+["\']')
+
+
+def _normalize_escaped_xml(xml: str) -> str | None:
+    """Unescape JSON-encoded XML that leaked from content strings.
+
+    Handles: name=\\"Read\\" → name="Read", \\n → newline, \\t → tab.
+    Returns None if no escaping detected (no work needed).
+    """
+    if '\\"' not in xml and '\\n' not in xml:
+        return None
+    result = xml
+    # Handle double-escaped first (\\\\\" → \\\", then \\" → ")
+    while '\\\\"' in result:
+        result = result.replace('\\\\"', '\\"')
+    while '\\\\n' in result:
+        result = result.replace('\\\\n', '\\n')
+    result = result.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
+    return result if result != xml else None
+
 
 class XmlToolBuffer:
     """
@@ -877,6 +1203,7 @@ class XmlToolBuffer:
         self.in_tool: bool = False
         self.valid_tool_names: set[str] = valid_tool_names or set()
         self.tools: list | None = tools
+        self._chunk_count: int = 0
 
     def feed(self, text: str) -> list[dict]:
         """
@@ -885,11 +1212,12 @@ class XmlToolBuffer:
         Returns list of segments in order:
             [{"type": "text", "text": "..."}, {"type": "tool_call", "name": ..., "input": {...}}, ...]
         """
-        if "<tool_call" in text or "<tool_call" in self.buffer:
-            print(f"[xml-buffer] feed(): chunk={len(text)}c buf_before={len(self.buffer)}c "
-                  f"in_tool={self.in_tool} has_tc_in_chunk={'<tool_call' in text} "
-                  f"buf_first100={self.buffer[:100]}", flush=True)
         self.buffer += text
+        self._chunk_count += 1
+        # Throttled logging: only every 50th chunk to avoid log noise
+        # (a 5K tool call generates ~1500 chunks of 1-10 chars each)
+        if self._chunk_count % 50 == 0 and self.in_tool:
+            print(f"[xml-buffer] accumulating: {len(self.buffer)}c in_tool={self.in_tool}", flush=True)
         return self._drain()
 
     def _has_plausible_tool_call(self) -> bool:
@@ -1017,23 +1345,94 @@ class XmlToolBuffer:
     _MAX_TOOL_BUFFER = 16_000  # Real tool calls shouldn't exceed this
 
     def _try_extract_tool(self) -> dict | None:
-        """Try to extract a complete </tool_call> block, or return None if incomplete."""
+        """Try to extract a complete </tool_call> block, or return None if incomplete.
+
+        v4 algorithm: handles nested </tool_call> inside JSON content (e.g. Write tool
+        that contains XML examples). Validates extraction with structural regexes before
+        accepting a </tool_call> boundary.
+        """
         end_tag = "</tool_call>"
-        end_idx = self.buffer.find(end_tag)
-        if end_idx == -1:
-            # Safety: if buffer grows too large without closing tag, it's a false positive
-            if len(self.buffer) > self._MAX_TOOL_BUFFER:
-                print(f"[xml-buffer] Buffer overflow ({len(self.buffer)} chars > {self._MAX_TOOL_BUFFER}) — false positive <tool_call>, emitting as text")
-                text = self.buffer
-                self.buffer = ""
+        search_start = 0
+        while True:
+            end_idx = self.buffer.find(end_tag, search_start)
+            if end_idx == -1:
+                # No closing tag found — check for buffer overflow
+                if len(self.buffer) > self._MAX_TOOL_BUFFER:
+                    print(f"[xml-buffer] Buffer overflow ({len(self.buffer)} chars > "
+                          f"{self._MAX_TOOL_BUFFER}) — false positive <tool_call>, emitting as text")
+                    text = self.buffer
+                    self.buffer = ""
+                    self.in_tool = False
+                    return {"type": "text", "text": text}
+                return None  # Need more data
+
+            candidate_end = end_idx + len(end_tag)
+            tool_xml = self.buffer[:candidate_end]
+
+            # Fast path: PRIMARY or FALLBACK regex matches (correct <input>...</input> structure)
+            if _TOOL_CALL_RE.search(tool_xml) or _TOOL_CALL_FALLBACK_RE.search(tool_xml):
+                # Guard: nested <tool_call in JSON content (e.g. Write with XML examples)
+                # The non-greedy regex may match inner </input></tool_call> prematurely
+                if tool_xml.count(_TOOL_CALL_OPEN) > 1:
+                    if end_tag in self.buffer[candidate_end:]:
+                        search_start = candidate_end
+                        continue
+                    # Last </tool_call> but multiple <tool_call — check if some are separate tools
+                    real_opens = [m.start() for m in _REAL_NAME_RE.finditer(tool_xml)]
+                    if len(real_opens) > 1:
+                        # Split: extract first tool only, return rest to buffer
+                        split_pos = real_opens[1]
+                        first_end = tool_xml.rfind(end_tag, 0, split_pos)
+                        if first_end != -1:
+                            first_xml = tool_xml[:first_end + len(end_tag)]
+                            remaining = tool_xml[first_end + len(end_tag):]
+                            self.buffer = remaining + self.buffer[candidate_end:]
+                            self.in_tool = False
+                            return self._parse_tool_xml(first_xml)
+                self.buffer = self.buffer[candidate_end:]
                 self.in_tool = False
-                return {"type": "text", "text": text}
-            return None
-        end_idx += len(end_tag)
-        tool_xml = self.buffer[:end_idx]
-        self.buffer = self.buffer[end_idx:]
-        self.in_tool = False
-        return self._parse_tool_xml(tool_xml)
+                return self._parse_tool_xml(tool_xml)
+
+            # More </tool_call> tags in buffer → the one we found might be inside JSON content
+            if end_tag in self.buffer[candidate_end:]:
+                search_start = candidate_end
+                continue
+
+            # Last </tool_call> — determine if this is the real closing tag
+            has_real_name = bool(_REAL_NAME_RE.search(self.buffer[:60]))
+
+            if has_real_name:
+                # Real tool call (unescaped quotes in name=) — check for premature extraction
+                # If <input> is present but unclosed (no </input>), outer structure
+                # hasn't arrived yet. If both <input> AND </input> are present,
+                # the structure is complete but PRIMARY failed for another reason
+                # (e.g. <system-reminder> prefix tag) — proceed to parse.
+                inner = tool_xml[tool_xml.find('>') + 1:end_idx] if '>' in tool_xml else ""
+                if '<input>' in inner and '</input>' not in inner:
+                    # Unmatched <input> — outer closing tags haven't arrived yet
+                    if len(self.buffer) > self._MAX_TOOL_BUFFER:
+                        print(f"[xml-buffer] Buffer overflow ({len(self.buffer)} chars > "
+                              f"{self._MAX_TOOL_BUFFER}) — premature </tool_call>, emitting as text")
+                        text = self.buffer
+                        self.buffer = ""
+                        self.in_tool = False
+                        return {"type": "text", "text": text}
+                    return None  # WAIT for outer closing tag
+                # No inner XML tags → genuine BARE format
+                self.buffer = self.buffer[candidate_end:]
+                self.in_tool = False
+                return self._parse_tool_xml(tool_xml)
+
+            # Escaped name= (backslash-quotes from JSON content) → parse with normalization
+            if '\\"' in tool_xml or '\\n' in tool_xml:
+                self.buffer = self.buffer[candidate_end:]
+                self.in_tool = False
+                return self._parse_tool_xml(tool_xml)  # _parse_tool_xml handles normalization
+
+            # BARE/ARGKV format (no inner tags, no escaping)
+            self.buffer = self.buffer[candidate_end:]
+            self.in_tool = False
+            return self._parse_tool_xml(tool_xml)
 
     def _is_backtick_quoted(self, idx: int) -> bool:
         """Check if <tool_call at position idx is inside backtick-quoted text."""
@@ -1049,60 +1448,101 @@ class XmlToolBuffer:
         return False
 
     def _parse_tool_xml(self, xml: str) -> dict:
-        """Parse a complete <tool_call> XML string. Falls back to text on parse failure."""
+        """Parse a complete <tool_call> XML string. Falls back to clean text on parse failure.
+
+        Tries the original XML first, then a normalized (unescaped) version if the XML
+        contains JSON-escaped quotes or newlines from content strings.
+        """
         print(f"[xml-buffer] _parse_tool_xml: {len(xml)} chars. First 200: {xml[:200]}", flush=True)
 
-        # 1) Primary: known inner tags (<input>, <textarea>, etc.)
-        match = _TOOL_CALL_RE.search(xml)
-        if match:
-            name = match.group(1).strip()
-            if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
-                print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
-                return {"type": "text", "text": xml}
-            raw_input = match.group(2)
-            parsed = _safe_parse_tool_input(raw_input, name, tools=self.tools)
-            print(f"[xml-buffer] PRIMARY match: name={name} keys={list(parsed.keys())}")
-            return {"type": "tool_call", "name": name, "input": parsed}
+        # Build attempt list: original first, then normalized if escaping detected
+        normalized = _normalize_escaped_xml(xml)
+        attempts = [("orig", xml)]
+        if normalized is not None:
+            attempts.append(("normalized", normalized))
 
-        # 2) Fallback: any matched pair of XML tags
-        fallback_match = _TOOL_CALL_FALLBACK_RE.search(xml)
-        if fallback_match:
-            name = fallback_match.group(1).strip()
-            if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
-                print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
-                return {"type": "text", "text": xml}
-            inner_tag = fallback_match.group(2)
-            raw_input = fallback_match.group(3)
-            print(f"[xml-buffer] FALLBACK match ({inner_tag}): name={name}")
-            parsed = _safe_parse_tool_input(raw_input, name, tools=self.tools)
-            return {"type": "tool_call", "name": name, "input": parsed}
+        for label, attempt_xml in attempts:
+            # 1) Primary: known inner tags (<input>, <textarea>, etc.)
+            match = _TOOL_CALL_RE.search(attempt_xml)
+            if match:
+                raw_input = match.group(2)
+                # Nested XML in captured content? Use greedy regex to get full outer content.
+                # Triggers when: embedded <tool_call, or multiple </input> or </tool_call> tags
+                # (common when Write content describes XML tool format)
+                _has_embedded_xml = (
+                    _TOOL_CALL_OPEN in raw_input
+                    or attempt_xml.count('</input>') > 1
+                    or attempt_xml.count('</tool_call>') > 1
+                )
+                if _has_embedded_xml:
+                    # Bound greedy search to first tool only (avoid consuming subsequent tools)
+                    real_opens = [m.start() for m in _REAL_NAME_RE.finditer(attempt_xml)]
+                    if len(real_opens) > 1:
+                        # Multiple real tools — restrict greedy to first tool's boundary
+                        boundary = attempt_xml.rfind('</tool_call>', 0, real_opens[1])
+                        if boundary != -1:
+                            bounded_xml = attempt_xml[:boundary + len('</tool_call>')]
+                            greedy_match = _TOOL_CALL_GREEDY_RE.search(bounded_xml)
+                        else:
+                            greedy_match = _TOOL_CALL_GREEDY_RE.search(attempt_xml)
+                    else:
+                        greedy_match = _TOOL_CALL_GREEDY_RE.search(attempt_xml)
+                    if greedy_match:
+                        match = greedy_match
+                        raw_input = match.group(2)
+                name = match.group(1).strip()
+                if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
+                    print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
+                    return {"type": "text", "text": xml}
+                parsed = _safe_parse_tool_input(raw_input, name, tools=self.tools)
+                tag = f"PRIMARY({label})" if label != "orig" else "PRIMARY"
+                print(f"[xml-buffer] {tag} match: name={name} keys={list(parsed.keys())}")
+                return {"type": "tool_call", "name": name, "input": parsed}
 
-        # 3) Bare: no inner tags, JSON directly inside <tool_call>
-        # Also handles tool calls with NO input (e.g. EnterPlanMode, ExitPlanMode)
-        bare_match = _TOOL_CALL_BARE_RE.search(xml)
-        if bare_match:
-            name = bare_match.group(1).strip()
-            if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
-                print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
-                return {"type": "text", "text": xml}
-            raw_content = bare_match.group(2).strip()
-            print(f"[xml-buffer] BARE match (no inner tags): name={name} content={len(raw_content)} chars")
-            parsed = _safe_parse_tool_input(raw_content, name, tools=self.tools)
-            return {"type": "tool_call", "name": name, "input": parsed}
+            # 2) Fallback: any matched pair of XML tags
+            fallback_match = _TOOL_CALL_FALLBACK_RE.search(attempt_xml)
+            if fallback_match:
+                name = fallback_match.group(1).strip()
+                if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
+                    print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
+                    return {"type": "text", "text": xml}
+                inner_tag = fallback_match.group(2)
+                raw_input = fallback_match.group(3)
+                tag = f"FALLBACK({label})" if label != "orig" else "FALLBACK"
+                print(f"[xml-buffer] {tag} match ({inner_tag}): name={name}")
+                parsed = _safe_parse_tool_input(raw_input, name, tools=self.tools)
+                return {"type": "tool_call", "name": name, "input": parsed}
 
-        # 4) GLM format: <tool_call>Name<arg_key>key</arg_key><arg_value>val</arg_value></tool_call>
-        argkv_match = _TOOL_CALL_ARGKV_RE.search(xml)
-        if argkv_match:
-            parsed = _parse_argkv_tool(argkv_match)
-            name = parsed["name"]
-            if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
-                print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
-                return {"type": "text", "text": xml}
-            print(f"[xml-buffer] ARGKV match: name={name} keys={list(parsed['input'].keys())}")
-            return {"type": "tool_call", "name": name, "input": parsed["input"]}
+            # 3) Bare: no inner tags, JSON directly inside <tool_call>
+            bare_match = _TOOL_CALL_BARE_RE.search(attempt_xml)
+            if bare_match:
+                name = bare_match.group(1).strip()
+                if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
+                    print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
+                    return {"type": "text", "text": xml}
+                raw_content = bare_match.group(2).strip()
+                tag = f"BARE({label})" if label != "orig" else "BARE"
+                parsed = _safe_parse_tool_input(raw_content, name, tools=self.tools)
+                print(f"[xml-buffer] {tag} match (no inner tags): name={name} content={len(raw_content)} chars keys={list(parsed.keys())}")
+                return {"type": "tool_call", "name": name, "input": parsed}
 
-        print(f"[xml-buffer] FAILED all regexes ({len(xml)} chars). Full XML: {xml[:500]}", flush=True)
-        return {"type": "text", "text": xml}
+            # 4) GLM format: <tool_call>Name<arg_key>key</arg_key><arg_value>val</arg_value></tool_call>
+            argkv_match = _TOOL_CALL_ARGKV_RE.search(attempt_xml)
+            if argkv_match:
+                parsed = _parse_argkv_tool(argkv_match)
+                name = parsed["name"]
+                if self.valid_tool_names and not validate_tool_name(name, self.valid_tool_names):
+                    print(f"[xml-buffer] WARNING: Hallucinated tool '{name}' not in valid tools, emitting as text")
+                    return {"type": "text", "text": xml}
+                tag = f"ARGKV({label})" if label != "orig" else "ARGKV"
+                print(f"[xml-buffer] {tag} match: name={name} keys={list(parsed['input'].keys())}")
+                return {"type": "tool_call", "name": name, "input": parsed["input"]}
+
+        # All regexes failed on all attempts — emit as CLEAN text (strip XML tags)
+        clean = strip_tool_call_xml(xml)
+        print(f"[xml-buffer] FAILED all regexes ({len(xml)} chars), emitting {len(clean)} chars clean text. "
+              f"First 200: {xml[:200]}", flush=True)
+        return {"type": "text", "text": clean or ""}
 
     def _safe_text_end(self) -> int:
         """Find safe end position, avoiding partial '<tool_call' matches at buffer end."""

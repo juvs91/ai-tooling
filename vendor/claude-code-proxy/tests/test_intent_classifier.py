@@ -1,0 +1,1409 @@
+# tests/test_intent_classifier.py
+"""Tests for IntentClassifierTransformer and _detect_phase."""
+import pytest
+from unittest.mock import patch, AsyncMock, MagicMock
+from types import SimpleNamespace
+
+from llm.pipeline import TransformContext
+from llm.transformers.intent_classifier import (
+    IntentClassifierTransformer,
+    _detect_phase,
+    _detect_analysis_from_history,
+    _count_consecutive_reads,
+)
+from config import ClassifierConfig, PolicyConfig
+
+
+def _classifier_cfg(model="", api_key="", base_url=None, timeout=3.0):
+    return ClassifierConfig(model=model, api_key=api_key, base_url=base_url, timeout=timeout)
+
+
+def _policy_cfg(analysis=False, threshold=5):
+    return PolicyConfig(
+        tool_allowlist_raw="*", policy_note_in_system=True,
+        max_input_tokens=0, hard_block_oversize=False,
+        analysis_enforcement=analysis, tool_upgrade_threshold=threshold,
+        guard_system="",
+    )
+
+
+def _request(text="Hello", tools=None, messages=None):
+    if messages is None:
+        msg = SimpleNamespace(role="user", content=text)
+        messages = [msg]
+    return SimpleNamespace(messages=messages, tools=tools)
+
+
+class TestRegexFallback:
+    """When classifier_model is empty or models_differ=False → regex."""
+
+    @pytest.mark.asyncio
+    async def test_chat_intent(self):
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request("How are you?"), ctx)
+        assert ctx.intent == "CHAT"
+
+    @pytest.mark.asyncio
+    async def test_building_intent(self):
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request("Fix the authentication bug"), ctx)
+        assert ctx.intent == "BUILD"
+
+    @pytest.mark.asyncio
+    async def test_planning_intent(self):
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request("Design the architecture for this system"), ctx)
+        assert ctx.intent == "PLAN"
+
+    @pytest.mark.asyncio
+    async def test_models_same_skips_llm(self):
+        """Even if classifier_model is set, models_differ=False → regex."""
+        t = IntentClassifierTransformer(
+            _classifier_cfg(model="openai/deepseek-chat", api_key="k"),
+            _policy_cfg(), models_differ=False,
+        )
+        ctx = TransformContext()
+        with patch("llm.transformers.intent_classifier.classify_intent") as mock:
+            await t.transform(_request("hello"), ctx)
+            mock.assert_not_called()
+        assert ctx.intent == "CHAT"
+
+
+class TestLLMClassifier:
+    """When classifier_model is set AND models_differ=True → LLM."""
+
+    @pytest.mark.asyncio
+    async def test_llm_called(self):
+        t = IntentClassifierTransformer(
+            _classifier_cfg(model="openai/deepseek-chat", api_key="k", base_url="http://x", timeout=2.0),
+            _policy_cfg(), models_differ=True,
+        )
+        ctx = TransformContext()
+        with patch("llm.transformers.intent_classifier.classify_intent", new_callable=AsyncMock, return_value="BUILD") as mock:
+            await t.transform(_request("implement the feature"), ctx)
+            mock.assert_called_once()
+            assert ctx.intent == "BUILD"
+
+
+class TestDetectPhase:
+    """_detect_phase() returns (HAS_WRITES | READS_ONLY | None, [tool_names])."""
+
+    def test_no_messages_returns_none(self):
+        phase, tools = _detect_phase([])
+        assert phase is None
+        assert tools == []
+        phase2, tools2 = _detect_phase(None)
+        assert phase2 is None
+        assert tools2 == []
+
+    def test_no_tool_use_returns_none(self):
+        msgs = [SimpleNamespace(role="assistant", content="just text")]
+        phase, tools = _detect_phase(msgs)
+        assert phase is None
+        assert tools == []
+
+    def test_write_tool_returns_has_writes(self):
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+                SimpleNamespace(type="tool_use", name="Edit"),
+            ]),
+        ]
+        phase, tools = _detect_phase(msgs)
+        assert phase == "HAS_WRITES"
+        assert "Read" in tools and "Edit" in tools
+
+    def test_read_only_returns_reads_only(self):
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+                SimpleNamespace(type="tool_use", name="Grep"),
+            ]),
+        ]
+        phase, tools = _detect_phase(msgs)
+        assert phase == "READS_ONLY"
+        assert "Read" in tools and "Grep" in tools
+
+    def test_dict_messages(self):
+        """Works with dict-based messages (from JSON)."""
+        msgs = [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Write"},
+            ]},
+        ]
+        phase, tools = _detect_phase(msgs)
+        assert phase == "HAS_WRITES"
+        assert tools == ["Write"]
+
+    def test_skips_user_messages(self):
+        msgs = [
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_use", name="Write"),
+            ]),
+        ]
+        phase, tools = _detect_phase(msgs)
+        assert phase is None
+        assert tools == []
+
+    def test_caps_at_5_tools(self):
+        """Only inspects up to 5 recent tools from assistant messages."""
+        msgs = [
+            # Older message with Write — should NOT be reached (reversed() starts from end)
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Write"),
+            ]),
+            # Recent message with 5 reads (processed first by reversed())
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+                SimpleNamespace(type="tool_use", name="Grep"),
+                SimpleNamespace(type="tool_use", name="Glob"),
+                SimpleNamespace(type="tool_use", name="Read"),
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+        ]
+        phase, tools = _detect_phase(msgs)
+        assert phase == "READS_ONLY"
+        assert len(tools) == 5
+
+
+class TestPhaseInTransform:
+    """Phase detection in transform() combines history + text classification."""
+
+    @pytest.mark.asyncio
+    async def test_no_history_chat_becomes_explore(self):
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request("Hello"), ctx)
+        assert ctx.intent == "CHAT"
+        assert ctx.phase == "EXPLORE"
+
+    @pytest.mark.asyncio
+    async def test_no_history_planning_becomes_plan(self):
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request("Design the architecture for this system"), ctx)
+        assert ctx.intent == "PLAN"
+        assert ctx.phase == "PLAN"
+
+    @pytest.mark.asyncio
+    async def test_no_history_building_becomes_execute(self):
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request("Fix the authentication bug"), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    @pytest.mark.asyncio
+    async def test_history_writes_chat_overrides_to_building(self):
+        """Agentic routing: CHAT intent after writes → BUILDING (any write = active execution)."""
+        msgs = [
+            SimpleNamespace(role="user", content="Hello"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Edit"),
+            ]),
+            SimpleNamespace(role="user", content="How are you?"),
+        ]
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    @pytest.mark.asyncio
+    async def test_history_reads_with_planning_text_becomes_plan(self):
+        """Read tools + PLANNING text → PLAN."""
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+                SimpleNamespace(type="tool_use", name="Grep"),
+            ]),
+            SimpleNamespace(role="user", content="Design the architecture for this"),
+        ]
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request(messages=msgs), ctx)
+        assert ctx.phase == "PLAN"
+
+    @pytest.mark.asyncio
+    async def test_history_reads_with_chat_text_becomes_explore(self):
+        """Read tools + CHAT text → EXPLORE."""
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content="What does this function do?"),
+        ]
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request(messages=msgs), ctx)
+        assert ctx.phase == "EXPLORE"
+
+
+class TestOverrideCAnalysisFallbackToAnalyzing:
+    """Override C: analysis_detected + classifier missed → ANALYZING (was Override 3 → PLANNING)."""
+
+    @pytest.mark.asyncio
+    async def test_mixed_analysis_building_becomes_building(self):
+        """Mixed keywords: 'Lee exhaustivamente... Propón un fix...'
+        BUILDING_RE matches 'fix'+'bug', ANALYSIS_RE matches 'exhaustiv'.
+        _is_explicit_analysis=False (has building keywords) → BUILDING wins.
+        CC phase: user wants to ACT (fix), not just Gather (analyze)."""
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(
+            _request("Lee exhaustivamente todos los archivos. Haz un análisis arquitectónico. Identifica los 3 bugs más críticos. Propón un fix para cada uno."),
+            ctx,
+        )
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_mixed_analysis_building_reads_only_becomes_building(self):
+        """Mixed keywords with read-only history → BUILDING (user wants to fix, not just analyze)."""
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+                SimpleNamespace(type="tool_use", name="Grep"),
+            ]),
+            SimpleNamespace(role="user", content="Fix all bugs in the codebase. Be thorough and exhaustive."),
+        ]
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    @pytest.mark.asyncio
+    async def test_building_analysis_with_writes_stays_building(self):
+        """Analysis + HAS_WRITES → Override 3 does NOT fire (mid-execution guard)."""
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Edit"),
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content="Now analyze the codebase exhaustively and fix the bugs"),
+        ]
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    @pytest.mark.asyncio
+    async def test_building_non_analysis_stays_building(self):
+        """Pure BUILDING (no analysis keywords) → Override 3 does NOT fire."""
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request("Fix the authentication bug in server.py"), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.is_analysis is False
+
+
+class TestAnalysisDetection:
+
+    @pytest.mark.asyncio
+    async def test_analysis_detected(self):
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(analysis=True), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request("Analyze the codebase exhaustively"), ctx)
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_analysis_detected_even_when_enforcement_disabled(self):
+        """Detection is always active for routing; enforcement only controls guardrails."""
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(analysis=False), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request("Analyze the codebase exhaustively"), ctx)
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_non_analysis_request(self):
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(analysis=True), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request("Hello, how are you?"), ctx)
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_analysis_propagated_from_history(self):
+        """Analysis detected from earlier user message, not just last."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="x", content="file contents..."),
+            ]),
+        ]
+        t = IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+        ctx = TransformContext()
+        await t.transform(_request(messages=msgs), ctx)
+        assert ctx.is_analysis is True
+
+
+class TestDetectAnalysisFromHistory:
+    def test_finds_analysis_in_earlier_message(self):
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the system exhaustively"),
+            SimpleNamespace(role="assistant", content="Sure."),
+            SimpleNamespace(role="user", content="continue"),
+        ]
+        assert _detect_analysis_from_history(msgs) is True
+
+    def test_no_analysis_in_history(self):
+        msgs = [
+            SimpleNamespace(role="user", content="Fix the bug"),
+            SimpleNamespace(role="user", content="yes do it"),
+        ]
+        assert _detect_analysis_from_history(msgs) is False
+
+    def test_empty_messages(self):
+        assert _detect_analysis_from_history([]) is False
+        assert _detect_analysis_from_history(None) is False
+
+    def test_caps_at_10_user_messages(self):
+        """Only checks last 10 user messages to avoid sticky analysis detection."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+        ] + [
+            SimpleNamespace(role="user", content="ok")
+            for _ in range(11)
+        ]
+        # Analysis request is 12 user messages back → beyond 10-message limit
+        assert _detect_analysis_from_history(msgs) is False
+
+    def test_within_10_user_messages(self):
+        """Analysis request within 10 user messages is detected."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+        ] + [
+            SimpleNamespace(role="user", content="ok")
+            for _ in range(8)
+        ]
+        # Analysis request is 9 user messages back → within limit
+        assert _detect_analysis_from_history(msgs) is True
+
+    def test_dict_messages(self):
+        msgs = [
+            {"role": "user", "content": "Review the code comprehensively"},
+            {"role": "user", "content": "thanks"},
+        ]
+        assert _detect_analysis_from_history(msgs) is True
+
+
+# ──────────────────────────────────────────────────────────────────────
+# E2E: Count Consecutive Reads
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCountConsecutiveReads:
+    """_count_consecutive_reads counts read-only assistant turns from the end."""
+
+    def test_empty(self):
+        assert _count_consecutive_reads([]) == 0
+        assert _count_consecutive_reads(None) == 0
+
+    def test_no_assistant_tool_use(self):
+        msgs = [SimpleNamespace(role="assistant", content="just text")]
+        assert _count_consecutive_reads(msgs) == 0
+
+    def test_single_read_turn(self):
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+        ]
+        assert _count_consecutive_reads(msgs) == 1
+
+    def test_multiple_read_turns(self):
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content="continue"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Grep"),
+            ]),
+            SimpleNamespace(role="user", content="continue"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Glob"),
+            ]),
+        ]
+        assert _count_consecutive_reads(msgs) == 3
+
+    def test_stops_at_write(self):
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content="ok"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Edit"),
+            ]),
+            SimpleNamespace(role="user", content="ok"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+        ]
+        # Reversed: Read(1) → Edit(stop) — only 1 consecutive read from end
+        assert _count_consecutive_reads(msgs) == 1
+
+    def test_many_reads_for_synthesize_fallback(self):
+        """Simulates 16 consecutive reads — should trigger Override D (>= 15)."""
+        msgs = []
+        for i in range(16):
+            msgs.append(SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]))
+            msgs.append(SimpleNamespace(role="user", content="continue"))
+        assert _count_consecutive_reads(msgs) == 16
+
+
+# ──────────────────────────────────────────────────────────────────────
+# E2E: Five-Intent Classification Matrix
+# ──────────────────────────────────────────────────────────────────────
+
+class TestFiveIntentMapping:
+    """Verify all 5 intents map to correct phase, analysis_phase, and is_analysis."""
+
+    def _make_transformer(self, synth_fallback=15):
+        return IntentClassifierTransformer(
+            _classifier_cfg(), _policy_cfg(), models_differ=False,
+            synth_reads_fallback=synth_fallback,
+        )
+
+    @pytest.mark.asyncio
+    async def test_chat_maps_to_explore(self):
+        """CHAT → phase=EXPLORE, analysis_phase=NONE, is_analysis=False."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request("Hello there!"), ctx)
+        assert ctx.intent == "CHAT"
+        assert ctx.phase == "EXPLORE"
+        assert ctx.analysis_phase == "NONE"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_planning_maps_to_plan(self):
+        """PLANNING → phase=PLAN, analysis_phase=NONE, is_analysis=False."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Design the architecture for the new microservice"), ctx,
+        )
+        assert ctx.intent == "PLAN"
+        assert ctx.phase == "PLAN"
+        assert ctx.analysis_phase == "NONE"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_building_maps_to_execute(self):
+        """BUILDING → phase=EXECUTE, analysis_phase=NONE, is_analysis=False."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Fix the authentication bug in server.py"), ctx,
+        )
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.analysis_phase == "NONE"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_analyzing_maps_to_plan_with_analysis(self):
+        """ANALYZING → phase=PLAN, analysis_phase=ANALYZING, is_analysis=True.
+        Triggered by analysis keywords (Override C catches regex CHAT/BUILDING→ANALYZING)."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Analyze the codebase exhaustively"), ctx,
+        )
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.analysis_phase == "READ"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_synthesizing_via_override_d(self):
+        """SYNTHESIZING → phase=PLAN, analysis_phase=SYNTHESIZING, is_analysis=True.
+        Triggered by Override D when consecutive reads >= synth_fallback.
+        Note: uses synth_fallback=5 to stay within the 10-user-message lookback
+        window of _detect_analysis_from_history."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+        ]
+        for _ in range(6):
+            msgs.append(SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]))
+            msgs.append(SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="x", content="file contents..."),
+            ]))
+
+        ctx = TransformContext()
+        await self._make_transformer(synth_fallback=5).transform(
+            _request(messages=msgs), ctx,
+        )
+        assert ctx.intent == "SYNTHESIZING"
+        assert ctx.phase == "PLAN"
+        assert ctx.analysis_phase == "SYNTHESIZING"
+        assert ctx.is_analysis is True
+
+
+# ──────────────────────────────────────────────────────────────────────
+# E2E: Override A — HAS_WRITES trumps everything → BUILDING
+# ──────────────────────────────────────────────────────────────────────
+
+class TestOverrideA_HasWritesForcesBuilding:
+    """Override A: any write in tool history → BUILDING/EXECUTE, regardless of text intent."""
+
+    def _make_transformer(self):
+        return IntentClassifierTransformer(
+            _classifier_cfg(), _policy_cfg(), models_differ=False,
+        )
+
+    def _msgs_with_writes(self, user_text):
+        """Helper: assistant wrote files, then user sends text."""
+        return [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Edit"),
+            ]),
+            SimpleNamespace(role="user", content=user_text),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_chat_after_writes_becomes_building(self):
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request(messages=self._msgs_with_writes("How are you?")), ctx,
+        )
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    @pytest.mark.asyncio
+    async def test_planning_after_writes_becomes_building(self):
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request(messages=self._msgs_with_writes("Design the architecture")), ctx,
+        )
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    @pytest.mark.asyncio
+    async def test_analysis_after_writes_becomes_building_with_done(self):
+        """Explicit analysis request + HAS_WRITES → ANALYZING (build→analysis pivot).
+
+        Override A is narrowed: _is_explicit_analysis bypasses it.
+        Override C1 fires: pure analysis intent ignores HAS_WRITES.
+        """
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request(messages=self._msgs_with_writes("Analyze the codebase exhaustively")), ctx,
+        )
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is True
+        assert ctx.analysis_phase == "READ"
+
+    @pytest.mark.asyncio
+    async def test_building_after_writes_stays_building(self):
+        """BUILDING + writes → stays BUILDING (no override needed)."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request(messages=self._msgs_with_writes("Fix the bug")), ctx,
+        )
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# E2E: Override B — CHAT + 3+ read tools → BUILDING
+# ──────────────────────────────────────────────────────────────────────
+
+class TestOverrideB_ChatWithToolActivity:
+    """Override B: CHAT intent + READS_ONLY + >= 3 tools → BUILDING."""
+
+    def _make_transformer(self):
+        return IntentClassifierTransformer(
+            _classifier_cfg(), _policy_cfg(), models_differ=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_chat_with_3_read_tools_becomes_building(self):
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+                SimpleNamespace(type="tool_use", name="Grep"),
+                SimpleNamespace(type="tool_use", name="Glob"),
+            ]),
+            SimpleNamespace(role="user", content="What is this?"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    @pytest.mark.asyncio
+    async def test_chat_with_2_read_tools_stays_chat(self):
+        """< 3 tools → Override B does NOT fire."""
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+                SimpleNamespace(type="tool_use", name="Grep"),
+            ]),
+            SimpleNamespace(role="user", content="What is this?"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        # CHAT stays CHAT (only 2 tools, below threshold)
+        assert ctx.intent == "CHAT"
+        assert ctx.phase == "EXPLORE"
+
+    @pytest.mark.asyncio
+    async def test_chat_with_write_tools_uses_override_a_not_b(self):
+        """HAS_WRITES + CHAT → Override A fires (not B)."""
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+                SimpleNamespace(type="tool_use", name="Grep"),
+                SimpleNamespace(type="tool_use", name="Edit"),
+            ]),
+            SimpleNamespace(role="user", content="What is this?"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# E2E: Override C — analysis_detected + classifier missed → ANALYZING
+# ──────────────────────────────────────────────────────────────────────
+
+class TestOverrideC_AnalysisFallback:
+    """Override C: analysis_detected=True but classifier returned non-analysis intent → ANALYZING."""
+
+    def _make_transformer(self):
+        return IntentClassifierTransformer(
+            _classifier_cfg(), _policy_cfg(), models_differ=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_chat_analysis_no_history_becomes_analyzing(self):
+        """Regex returns CHAT (no building/planning keywords), but ANALYSIS_RE matches → ANALYZING."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Haz un análisis exhaustivo del codebase"), ctx,
+        )
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_planning_analysis_no_history_becomes_analyzing(self):
+        """Regex returns PLANNING, but ANALYSIS_RE matches → Override C → ANALYZING."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Analyze the system architecture comprehensively"), ctx,
+        )
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_mixed_analysis_building_no_history_stays_building(self):
+        """Mixed keywords: 'Fix all bugs exhaustively' — BUILDING_RE matches 'fix'+'bug',
+        ANALYSIS_RE matches 'exhaustiv'. _is_explicit_analysis=False → C1 doesn't fire.
+        Not tool_result → C2 doesn't fire. User wants to FIX → BUILDING."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Fix all bugs exhaustively in the codebase"), ctx,
+        )
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_analysis_from_history_with_tool_result_last(self):
+        """Last message is tool_result, but analysis request in history → Override C fires."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="x", content="file contents..."),
+            ]),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is True
+        assert ctx.analysis_phase == "READ"
+
+    @pytest.mark.asyncio
+    async def test_override_c_does_not_fire_with_writes(self):
+        """analysis_detected=True + HAS_WRITES → Override A wins, not C."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Edit"),
+            ]),
+            SimpleNamespace(role="user", content="continue"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.analysis_phase == "NONE"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# E2E: Override D — ANALYZING + reads >= threshold → SYNTHESIZING
+# ──────────────────────────────────────────────────────────────────────
+
+class TestOverrideD_SynthesizingFallback:
+    """Override D: ANALYZING + consecutive_reads >= synth_fallback → SYNTHESIZING."""
+
+    def _build_read_history(self, n_reads, analysis_text="Analyze exhaustively"):
+        """Build history with N consecutive read turns + analysis request."""
+        msgs = [SimpleNamespace(role="user", content=analysis_text)]
+        for _ in range(n_reads):
+            msgs.append(SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]))
+            msgs.append(SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="x", content="contents"),
+            ]))
+        return msgs
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_stays_analyzing(self):
+        """4 reads < 5 threshold → stays ANALYZING.
+        Uses small threshold to stay within _detect_analysis_from_history's 10-user-message lookback."""
+        msgs = self._build_read_history(4)
+        ctx = TransformContext()
+        t = IntentClassifierTransformer(
+            _classifier_cfg(), _policy_cfg(), models_differ=False,
+            synth_reads_fallback=5,
+        )
+        await t.transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "READ"
+        assert ctx.analysis_phase == "READ"
+
+    @pytest.mark.asyncio
+    async def test_at_threshold_triggers_synthesizing(self):
+        """5 reads >= 5 threshold → Override D fires → SYNTHESIZING."""
+        msgs = self._build_read_history(5)
+        ctx = TransformContext()
+        t = IntentClassifierTransformer(
+            _classifier_cfg(), _policy_cfg(), models_differ=False,
+            synth_reads_fallback=5,
+        )
+        await t.transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "SYNTHESIZING"
+        assert ctx.analysis_phase == "SYNTHESIZING"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_above_threshold_triggers_synthesizing(self):
+        """8 reads >= 7 threshold → Override D fires → SYNTHESIZING."""
+        msgs = self._build_read_history(8)
+        ctx = TransformContext()
+        t = IntentClassifierTransformer(
+            _classifier_cfg(), _policy_cfg(), models_differ=False,
+            synth_reads_fallback=7,
+        )
+        await t.transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "SYNTHESIZING"
+        assert ctx.analysis_phase == "SYNTHESIZING"
+
+    @pytest.mark.asyncio
+    async def test_override_d_does_not_fire_without_analysis(self):
+        """Many reads but no analysis_detected → no Override D."""
+        msgs = []
+        for _ in range(20):
+            msgs.append(SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]))
+            msgs.append(SimpleNamespace(role="user", content="continue"))
+        ctx = TransformContext()
+        t = IntentClassifierTransformer(
+            _classifier_cfg(), _policy_cfg(), models_differ=False,
+            synth_reads_fallback=5,
+        )
+        await t.transform(_request(messages=msgs), ctx)
+        # No analysis_detected → intent stays whatever regex returns (CHAT for "continue")
+        # Override B might fire (CHAT + 5 read tools) → BUILDING
+        assert ctx.intent in ("CHAT", "BUILD")
+        assert ctx.analysis_phase == "NONE"
+        assert ctx.is_analysis is False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# E2E: LLM Classifier returns ANALYZING/SYNTHESIZING
+# ──────────────────────────────────────────────────────────────────────
+
+class TestLLMClassifierFiveIntents:
+    """When LLM classifier is active and returns ANALYZING/SYNTHESIZING."""
+
+    def _make_llm_transformer(self, synth_fallback=15):
+        return IntentClassifierTransformer(
+            _classifier_cfg(model="openai/deepseek-chat", api_key="k", base_url="http://x"),
+            _policy_cfg(), models_differ=True,
+            synth_reads_fallback=synth_fallback,
+        )
+
+    @pytest.mark.asyncio
+    async def test_llm_returns_analyzing(self):
+        """LLM returns ANALYZING → analysis_phase=ANALYZING, phase=PLAN."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="x", content="file..."),
+            ]),
+        ]
+        ctx = TransformContext()
+        with patch(
+            "llm.transformers.intent_classifier.classify_intent",
+            new_callable=AsyncMock, return_value="READ",
+        ):
+            await self._make_llm_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.analysis_phase == "READ"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_llm_returns_synthesizing(self):
+        """LLM returns SYNTHESIZING → analysis_phase=SYNTHESIZING, phase=PLAN."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+        ]
+        # Add 10 read turns
+        for _ in range(10):
+            msgs.append(SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]))
+            msgs.append(SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="x", content="file..."),
+            ]))
+
+        ctx = TransformContext()
+        with patch(
+            "llm.transformers.intent_classifier.classify_intent",
+            new_callable=AsyncMock, return_value="SYNTHESIZING",
+        ):
+            await self._make_llm_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "SYNTHESIZING"
+        assert ctx.phase == "PLAN"
+        assert ctx.analysis_phase == "SYNTHESIZING"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_llm_returns_building_mixed_keywords_stays_building(self):
+        """LLM returns BUILDING, text has mixed analysis+building keywords.
+        _is_explicit_analysis=False → C1 doesn't fire. Not tool_result → C2 doesn't fire.
+        CC phase: user wants to ACT (fix bugs), LLM decision respected."""
+        ctx = TransformContext()
+        with patch(
+            "llm.transformers.intent_classifier.classify_intent",
+            new_callable=AsyncMock, return_value="BUILD",
+        ):
+            await self._make_llm_transformer().transform(
+                _request("Analyze the codebase exhaustively and fix bugs"), ctx,
+            )
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_llm_returns_chat_no_analysis_stays_chat(self):
+        """LLM returns CHAT, no analysis detected → stays CHAT."""
+        ctx = TransformContext()
+        with patch(
+            "llm.transformers.intent_classifier.classify_intent",
+            new_callable=AsyncMock, return_value="CHAT",
+        ):
+            await self._make_llm_transformer().transform(
+                _request("Hello, how are you?"), ctx,
+            )
+        assert ctx.intent == "CHAT"
+        assert ctx.phase == "EXPLORE"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_llm_returns_analyzing_with_writes_override_a(self):
+        """LLM returns ANALYZING but HAS_WRITES → Override A → BUILDING."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Edit"),
+            ]),
+            SimpleNamespace(role="user", content="continue"),
+        ]
+        ctx = TransformContext()
+        with patch(
+            "llm.transformers.intent_classifier.classify_intent",
+            new_callable=AsyncMock, return_value="READ",
+        ):
+            await self._make_llm_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.analysis_phase == "NONE"
+        assert ctx.is_analysis is False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# E2E: Full CC Session Simulations
+# ──────────────────────────────────────────────────────────────────────
+
+class TestFullSessionSimulations:
+    """Simulate realistic Claude Code conversation patterns."""
+
+    def _make_transformer(self, synth_fallback=15):
+        return IntentClassifierTransformer(
+            _classifier_cfg(), _policy_cfg(), models_differ=False,
+            synth_reads_fallback=synth_fallback,
+        )
+
+    @pytest.mark.asyncio
+    async def test_session_analysis_gather_phase(self):
+        """Turn 3 of analysis: user asked for analysis, agent read 2 files, user sends tool_result.
+        Should be ANALYZING (Override C catches)."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the proxy codebase exhaustively"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+                SimpleNamespace(type="tool_use", name="Grep"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="a", content="server.py contents"),
+                SimpleNamespace(type="tool_result", tool_use_id="b", content="grep results"),
+            ]),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is True
+        assert ctx.analysis_read_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_session_analysis_to_building_transition(self):
+        """Agent analyzed, then started writing → switches to BUILDING."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase and fix the bugs"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="a", content="file..."),
+            ]),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Edit"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="b", content="ok"),
+            ]),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.analysis_phase == "DONE"
+
+    @pytest.mark.asyncio
+    async def test_session_pure_building_no_analysis(self):
+        """Normal building session: user asks to fix, agent reads + edits."""
+        msgs = [
+            SimpleNamespace(role="user", content="Fix the authentication bug in server.py"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="a", content="file..."),
+            ]),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Edit"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="b", content="ok"),
+            ]),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_session_chat_greeting(self):
+        """Simple greeting — no tools, no analysis."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request("Hi! Can you help me?"), ctx)
+        assert ctx.intent == "CHAT"
+        assert ctx.phase == "EXPLORE"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_session_spanish_analysis(self):
+        """Spanish: 'Lee exhaustivamente todos los archivos del proxy'."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Lee exhaustivamente todos los archivos del proxy y analiza la arquitectura"), ctx,
+        )
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_session_spanish_building(self):
+        """Spanish building request without analysis keywords."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Arregla el error de login en server.py"), ctx,
+        )
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_session_spanish_planning(self):
+        """Spanish planning request. Uses 'plan' which matches PLANNING_RE as exact word."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Haz un plan de la arquitectura para el nuevo microservicio"), ctx,
+        )
+        assert ctx.intent == "PLAN"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_session_continue_during_analysis_reads(self):
+        """User says 'continue' during analysis gather phase → ANALYZING (via history detection)."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the proxy codebase comprehensively"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="a", content="file..."),
+            ]),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Grep"),
+            ]),
+            SimpleNamespace(role="user", content="continue"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_session_synthesize_after_many_reads(self):
+        """After reads >= threshold in analysis session → SYNTHESIZING.
+        Uses synth_fallback=5 to stay within 10-user-message lookback window."""
+        msgs = [SimpleNamespace(role="user", content="Analyze the codebase exhaustively")]
+        for _ in range(6):
+            msgs.append(SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]))
+            msgs.append(SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="x", content="contents"),
+            ]))
+        ctx = TransformContext()
+        await self._make_transformer(synth_fallback=5).transform(
+            _request(messages=msgs), ctx,
+        )
+        assert ctx.intent == "SYNTHESIZING"
+        assert ctx.analysis_phase == "SYNTHESIZING"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_session_mixed_deep_think_analysis(self):
+        """'Think deeply about the architecture' — matches ANALYSIS_RE."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Think deeply about the system architecture and identify problems"), ctx,
+        )
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_analysis_read_count_tracked(self):
+        """Verify analysis_read_count is populated correctly."""
+        msgs = [SimpleNamespace(role="user", content="Analyze the codebase exhaustively")]
+        for _ in range(7):
+            msgs.append(SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]))
+            msgs.append(SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="x", content="file"),
+            ]))
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.analysis_read_count == 7
+
+    @pytest.mark.asyncio
+    async def test_non_analysis_read_count_zero(self):
+        """Non-analysis sessions don't count reads."""
+        msgs = [
+            SimpleNamespace(role="user", content="Fix the bug"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="x", content="file"),
+            ]),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.analysis_read_count == 0
+
+
+class TestCCPhaseAwareClassification:
+    """Tests for CC Gather-Act-Verify phase-aware classification.
+
+    Validates that the classifier correctly maps CC phases:
+    - Gather: ANALYZING (pure analysis) or continuation (tool_results, "continue")
+    - Act: BUILDING (write/implement intent)
+    - Verify: BUILDING (post-write testing)
+    - Plan: PLANNING (strategy without analysis)
+    - Explore: CHAT (simple questions)
+    """
+
+    def _make_transformer(self, synth_fallback=15):
+        return IntentClassifierTransformer(
+            _classifier_cfg(), _policy_cfg(), models_differ=False,
+            synth_reads_fallback=synth_fallback,
+        )
+
+    # --- Gather phase: explicit analysis entry ---
+
+    @pytest.mark.asyncio
+    async def test_gather_pure_analysis_request(self):
+        """Pure analysis text (no building keywords) → ANALYZING via C1."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Lee exhaustivamente todos los archivos del proxy"), ctx,
+        )
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is True
+        assert ctx.analysis_phase == "READ"
+
+    @pytest.mark.asyncio
+    async def test_gather_analysis_pivot_from_building(self):
+        """Pure analysis request with HAS_WRITES → ANALYZING (C1 pivot).
+        User can pivot from Act to Gather phase at any time."""
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Edit"),
+            ]),
+            SimpleNamespace(role="user", content="Ahora analiza exhaustivamente todo el codebase"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is True
+
+    # --- Gather continuation: tool_results and short text ---
+
+    @pytest.mark.asyncio
+    async def test_gather_continuation_tool_result(self):
+        """Pure tool_result during analysis session → ANALYZING (C2).
+        Agent is still in Gather loop reading files."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="a", content="file contents"),
+            ]),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "READ"
+        assert ctx.phase == "PLAN"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_gather_continuation_short_yes(self):
+        """'yes' during analysis session → ANALYZING (short ambiguous continuation)."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the proxy codebase comprehensively"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="a", content="file..."),
+            ]),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Grep"),
+            ]),
+            SimpleNamespace(role="user", content="yes"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "READ"
+        assert ctx.is_analysis is True
+
+    @pytest.mark.asyncio
+    async def test_gather_continuation_si(self):
+        """'sí' during analysis session → ANALYZING (short ambiguous continuation)."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analiza exhaustivamente el sistema"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content="sí"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "READ"
+        assert ctx.is_analysis is True
+
+    # --- Gather→Act transition: new text with building intent ---
+
+    @pytest.mark.asyncio
+    async def test_gather_to_act_new_building_text(self):
+        """New text with building intent during analysis session → BUILDING.
+        'Explora los tests' is a building/explore task, not analysis continuation."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="a", content="file contents"),
+            ]),
+            SimpleNamespace(role="user", content="Now implement the fix for the auth bug"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    @pytest.mark.asyncio
+    async def test_gather_to_act_mixed_keywords(self):
+        """Mixed analysis+building keywords → BUILDING (user wants to ACT).
+        C1 doesn't fire (_is_explicit_analysis=False), C2 doesn't fire (text, not tool_result)."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("Analyze exhaustively and fix all the bugs"), ctx,
+        )
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.is_analysis is False
+
+    # --- Act phase: HAS_WRITES override ---
+
+    @pytest.mark.asyncio
+    async def test_act_phase_has_writes_forces_building(self):
+        """HAS_WRITES + non-analysis text → BUILDING (Override A).
+        Agent is in Act phase, 'continue' means keep writing."""
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Write"),
+            ]),
+            SimpleNamespace(role="user", content="continue"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    @pytest.mark.asyncio
+    async def test_act_phase_has_writes_chat_becomes_building(self):
+        """HAS_WRITES + 'what is this?' → BUILDING (Override A).
+        Even CHAT is overridden to BUILDING during Act phase."""
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Edit"),
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content="What is this?"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    # --- Context injection: no bias for non-analysis messages ---
+
+    @pytest.mark.asyncio
+    async def test_no_analysis_context_for_building_text_in_analysis_session(self):
+        """Building text during analysis session → no 'ANALYSIS SESSION ACTIVE' injected.
+        Prevents classifier bias. The classifier decides by CONTENT, not session history."""
+        msgs = [
+            SimpleNamespace(role="user", content="Analyze the codebase exhaustively"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+            ]),
+            SimpleNamespace(role="user", content="Now deploy the fix to production"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        # Should be BUILDING (deploy/fix keywords), not ANALYZING
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    # --- Verify phase: post-write tool results ---
+
+    @pytest.mark.asyncio
+    async def test_verify_phase_tool_result_after_writes(self):
+        """Tool result after writes → BUILDING (Override A, verify phase)."""
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Edit"),
+            ]),
+            SimpleNamespace(role="user", content=[
+                SimpleNamespace(type="tool_result", tool_use_id="a", content="test output"),
+            ]),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    # --- Short text without analysis session → no override ---
+
+    @pytest.mark.asyncio
+    async def test_short_text_no_analysis_session_stays_chat(self):
+        """'continue' without analysis session → CHAT (no override).
+        Short ambiguous continuation only applies IN analysis sessions."""
+        ctx = TransformContext()
+        await self._make_transformer().transform(
+            _request("continue"), ctx,
+        )
+        assert ctx.intent == "CHAT"
+        assert ctx.phase == "EXPLORE"
+        assert ctx.is_analysis is False
+
+    @pytest.mark.asyncio
+    async def test_short_text_with_reads_no_analysis_stays_building(self):
+        """'yes' with read history but NO analysis session → BUILDING (Override B).
+        Short text only triggers Gather continuation when analysis_detected=True."""
+        msgs = [
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read"),
+                SimpleNamespace(type="tool_use", name="Grep"),
+                SimpleNamespace(type="tool_use", name="Glob"),
+            ]),
+            SimpleNamespace(role="user", content="yes"),
+        ]
+        ctx = TransformContext()
+        await self._make_transformer().transform(_request(messages=msgs), ctx)
+        # Override B: CHAT + READS_ONLY + 3 tools → BUILDING
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.is_analysis is False

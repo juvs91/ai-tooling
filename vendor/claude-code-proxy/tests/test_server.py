@@ -1,7 +1,7 @@
 # tests/test_server.py
 """Tests for server.py endpoints using FastAPI TestClient."""
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
 
@@ -79,7 +79,8 @@ class TestCountTokensEndpoint:
             assert response.status_code == 200
 
     def test_count_tokens_returns_input_tokens(self, client, basic_request):
-        with patch("server.token_counter", return_value=42):
+        with patch("server.token_counter", return_value=42), \
+             patch("server.cached_token_count", return_value=None):
             response = client.post("/v1/messages/count_tokens", json=basic_request)
             data = response.json()
             assert "input_tokens" in data
@@ -150,8 +151,8 @@ class TestMessagesEndpoint:
             ]
         }
 
-    def test_messages_applies_policy(self, client, basic_message_request):
-        """Test that policy is applied to requests."""
+    def test_messages_runs_pipeline(self, client, basic_message_request):
+        """Test that the request pipeline is applied to requests."""
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "Hello!"
@@ -160,15 +161,16 @@ class TestMessagesEndpoint:
         mock_response.id = "test-id"
         mock_response.model = "gpt-4"
 
-        with patch("proxy.proxy.apply_policy_and_routing") as mock_policy:
-            with patch("litellm.completion", return_value=mock_response):
-                mock_policy.return_value = (100, [])
+        with patch("server._request_pipeline") as mock_pipeline:
+            mock_pipeline.process = AsyncMock(return_value=None)
+            with patch("proxy.proxy.run_messages", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (False, mock_response, "primary")
                 response = client.post("/v1/messages", json=basic_message_request)
-                mock_policy.assert_called_once()
+                mock_pipeline.process.assert_called_once()
 
     def test_messages_returns_413_on_oversize(self, client, basic_message_request):
         """Test that oversized requests return 413."""
-        with patch("proxy.proxy.apply_policy_and_routing") as mock_policy:
-            mock_policy.side_effect = ValueError("Request too large")
+        with patch("server._request_pipeline") as mock_pipeline:
+            mock_pipeline.process = AsyncMock(side_effect=ValueError("Request too large"))
             response = client.post("/v1/messages", json=basic_message_request)
             assert response.status_code == 413

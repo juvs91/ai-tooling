@@ -16,7 +16,76 @@ from typing import Any
 from json_repair import repair_json
 
 from utils.utils import bget, make_tool_id, map_stop_reason, scale_tokens, TOOL_ID_PREFIX
+from utils.metrics import metrics
 import llm.sse as sse
+# Pre-compiled for performance (called per streaming chunk)
+_THINK_TAG_RE = re.compile(r'</?think>')
+
+def _strip_think_tags(text: str) -> str:
+    """Strip <think></think> reasoning tags that some models emit (Qwen, GLM)."""
+    if "<think>" in text or "</think>" in text:
+        return _THINK_TAG_RE.sub('', text)
+    return text
+
+
+class _ReasoningStripper:
+    """Stateful stripper for <reasoning>...</reasoning> tags in streaming text.
+
+    Handles tags split across multiple chunks. When STRIP_REASONING=1,
+    all content between <reasoning> and </reasoning> is suppressed.
+    """
+
+    def __init__(self):
+        self._inside = False
+        self._buffer = ""
+
+    def process(self, text: str) -> str:
+        """Process a text chunk, stripping reasoning content.
+
+        Returns the text with reasoning tags and their content removed.
+        """
+        if not text:
+            return text
+
+        result = []
+        self._buffer += text
+
+        while self._buffer:
+            if not self._inside:
+                # Look for opening <reasoning> tag
+                idx = self._buffer.find("<reasoning>")
+                if idx == -1:
+                    # No opening tag — check for partial tag at end
+                    safe_end = len(self._buffer)
+                    for i in range(1, min(len("<reasoning>"), len(self._buffer)) + 1):
+                        if "<reasoning>".startswith(self._buffer[-i:]):
+                            safe_end = len(self._buffer) - i
+                            break
+                    if safe_end > 0:
+                        result.append(self._buffer[:safe_end])
+                        self._buffer = self._buffer[safe_end:]
+                    break
+                else:
+                    # Emit text before the tag
+                    if idx > 0:
+                        result.append(self._buffer[:idx])
+                    self._buffer = self._buffer[idx + len("<reasoning>"):]
+                    self._inside = True
+            else:
+                # Inside reasoning — look for closing tag
+                idx = self._buffer.find("</reasoning>")
+                if idx == -1:
+                    # No closing tag yet — discard buffered reasoning content
+                    self._buffer = ""
+                    break
+                else:
+                    # Skip everything up to and including the closing tag
+                    self._buffer = self._buffer[idx + len("</reasoning>"):]
+                    self._inside = False
+
+        return "".join(result)
+
+
 from llm.tool_prompting import (
     is_no_tools_model,
     XmlToolBuffer,
@@ -62,8 +131,19 @@ def _close_json_brackets(text: str) -> str:
     return suffix
 
 
+_DANGEROUS_EMPTY_KEYS = frozenset({
+    "file_path", "content", "old_string", "new_string", "command",
+    "notebook_path", "new_source", "pattern", "query", "url",
+})
+
+
 def _has_truncation_artifacts(json_str: str) -> bool:
-    """Detect if repaired JSON has truncation artifacts (all-empty string values)."""
+    """Detect if repaired JSON has truncation artifacts.
+
+    Checks for:
+    1. All-empty string values in dicts with 2+ strings (original check)
+    2. Empty values for known-dangerous tool parameters (file_path, content, etc.)
+    """
     try:
         parsed = json.loads(json_str)
     except Exception:
@@ -74,6 +154,10 @@ def _has_truncation_artifacts(json_str: str) -> bool:
             string_vals = [v for v in obj.values() if isinstance(v, str)]
             if len(string_vals) >= 2 and all(v == '' for v in string_vals):
                 return True
+            # Check for empty dangerous parameters (e.g. Write with empty file_path)
+            for key in _DANGEROUS_EMPTY_KEYS:
+                if key in obj and obj[key] == '':
+                    return True
             return any(_check(v) for v in obj.values() if isinstance(v, (dict, list)))
         if isinstance(obj, list):
             return any(_check(item) for item in obj if isinstance(item, (dict, list)))
@@ -171,14 +255,21 @@ class _StreamCtx:
 
     # Token accounting
     output_tokens: int = 0
+    thinking_chars: int = 0  # chars in reasoning_content (for cost estimation)
 
     # Protocol state
     has_sent_stop_reason: bool = False
+
+    # Model identification (for per-model metrics)
+    model_id: str = ""
 
     # Classifier config (for tool recovery LLM calls)
     classifier_model: str = ""
     classifier_api_key: str = ""
     classifier_base_url: str | None = None
+
+    # Reasoning tag stripping (STRIP_REASONING=1)
+    reasoning_stripper: _ReasoningStripper | None = None
 
     @property
     def has_any_tools(self) -> bool:
@@ -230,10 +321,49 @@ def _emit_text_segment(ctx: _StreamCtx, text: str) -> list[str]:
 def _emit_xml_tool(ctx: _StreamCtx, name: str, input_dict: dict) -> list[str]:
     """Close text block and emit a tool_use block from XML parsing."""
     ctx.has_xml_tool_calls = True
+    metrics.increment_tool_counter("xml_extracted")
+    if ctx.model_id:
+        metrics.record_model_event(ctx.model_id, "tool_success")
     events = _close_text_block(ctx)
     ctx.last_tool_index += 1
     print(f"[streaming] XML tool_use emitted: name={name} index={ctx.last_tool_index}", flush=True)
     events.extend(_emit_tool_use_block(name, input_dict, ctx.last_tool_index))
+    return events
+
+
+def _process_buffer_segments(
+    ctx: _StreamCtx,
+    chunk: str,
+    emit_text: bool,
+) -> list[str]:
+    """Feed a chunk through XmlToolBuffer and process resulting segments.
+
+    Used for both reasoning_content and content streams.
+    - emit_text=True: text goes to accumulated_text + text_delta SSE (content, GLM reasoning)
+    - emit_text=False: text goes to reasoning_buffer only (DeepSeek reasoning)
+    Tool call segments always emit via _emit_xml_tool.
+    """
+    if not ctx.xml_tool_buffer:
+        return []
+    events: list[str] = []
+    for segment in ctx.xml_tool_buffer.feed(chunk):
+        if segment["type"] == "text":
+            text = segment["text"]
+            # Never leak raw <tool_call> XML as text to Claude Code
+            if "<tool_call" in text:
+                text = strip_tool_call_xml(text)
+            text = _strip_think_tags(text)
+            if not text:
+                continue
+            if emit_text:
+                ctx.accumulated_text += text
+                if ctx.tool_index is None and not ctx.text_block_closed:
+                    ctx.text_sent = True
+                    events.append(sse.text_delta(0, text))
+            else:
+                ctx.reasoning_buffer += text
+        elif segment["type"] == "tool_call":
+            events.extend(_emit_xml_tool(ctx, segment["name"], segment["input"]))
     return events
 
 
@@ -284,12 +414,16 @@ async def _recover_incomplete_tool(ctx: _StreamCtx, partial_xml: str) -> list[st
             recovered = [tc for tc in recovered
                          if validate_tool_name(tc.get("name", ""), ctx.valid_names)]
         if recovered:
+            metrics.increment_tool_counter("recovered")
             print(f"[recovery] OK: {len(recovered)} tool(s) recovered from incomplete XML")
             for tc in recovered:
                 events.extend(_emit_xml_tool(ctx, tc["name"], tc["input"]))
             return events
 
     # Level 3: strip XML, emit clean text (never raw XML to CC)
+    metrics.increment_tool_counter("truncated")
+    if ctx.model_id:
+        metrics.record_model_event(ctx.model_id, "tool_failure")
     clean = strip_tool_call_xml(partial_xml)
     if clean:
         print(f"[recovery] FALLBACK: emitting {len(clean)} chars clean text "
@@ -404,6 +538,19 @@ def _emit_stream_end(ctx: _StreamCtx, stop_reason: str, model_context_window: in
     ]
 
 
+def _estimate_output_tokens(ctx: _StreamCtx) -> int:
+    """Estimate output tokens from all accumulated content when provider didn't report.
+
+    Counts text + native tool arguments + reasoning buffer (chars/3 heuristic).
+    Does NOT include thinking_chars (those are tracked separately for cost).
+    """
+    total_chars = len(ctx.accumulated_text)
+    for args in ctx.tool_args_buffer.values():
+        total_chars += len(args)
+    total_chars += len(ctx.reasoning_buffer)
+    return max(1, total_chars // 3) if total_chars > 0 else 0
+
+
 # ── Main streaming handler ───────────────────────────────────────────
 
 async def handle_streaming(
@@ -413,6 +560,7 @@ async def handle_streaming(
     classifier_model: str = "",
     classifier_api_key: str = "",
     classifier_base_url: str | None = None,
+    strip_reasoning: bool = False,
 ):
     """Convert a LiteLLM streaming response to Anthropic SSE events."""
     try:
@@ -428,11 +576,14 @@ async def handle_streaming(
             request_tools=request_tools,
             valid_names=valid_names,
             xml_tool_buffer=XmlToolBuffer(valid_tool_names=valid_names, tools=request_tools) if request_tools else None,
+            model_id=original_request.model,
             classifier_model=classifier_model,
             classifier_api_key=classifier_api_key,
             classifier_base_url=classifier_base_url,
+            reasoning_stripper=_ReasoningStripper() if strip_reasoning else None,
         )
-        print(f"[streaming] INIT: model={original_request.model} no_tools_mode={no_tools_mode} xml_buffer={'YES' if ctx.xml_tool_buffer else 'NO'}", flush=True)
+        print(f"[streaming] INIT: model={original_request.model} no_tools_mode={no_tools_mode} "
+              f"xml_buffer={'YES' if ctx.xml_tool_buffer else 'NO'} strip_reasoning={strip_reasoning}", flush=True)
 
         # Open the stream
         yield sse.message_start(msg_id, model)
@@ -457,23 +608,24 @@ async def handle_streaming(
                 # ── Reasoning content (deepseek-reasoner, GLM-4.7) ──
                 delta_reasoning = bget(delta, "reasoning_content")
                 if delta_reasoning:
+                    ctx.thinking_chars += len(delta_reasoning)
                     if "<tool_call" in delta_reasoning:
                         print(f"[streaming] DIAG: <tool_call in reasoning_content! "
                               f"({len(delta_reasoning)} chars) no_tools={no_tools_mode}", flush=True)
                     if no_tools_mode:
-                        ctx.reasoning_buffer += delta_reasoning
+                        # DeepSeek-reasoner: emit_text=False → reasoning_buffer
+                        # (reasoning is 5-15K tokens, crashes CC's SSE parser)
+                        if ctx.xml_tool_buffer:
+                            for ev in _process_buffer_segments(ctx, delta_reasoning, emit_text=False):
+                                yield ev
+                        else:
+                            delta_reasoning = _strip_think_tags(delta_reasoning)
+                            if delta_reasoning:
+                                ctx.reasoning_buffer += delta_reasoning
                     elif ctx.xml_tool_buffer:
-                        # GLM-4.7 may put <tool_call> XML in reasoning_content.
-                        # Feed through buffer to detect and extract tool calls.
-                        for segment in ctx.xml_tool_buffer.feed(delta_reasoning):
-                            if segment["type"] == "text":
-                                ctx.accumulated_text += segment["text"]
-                                if ctx.tool_index is None and not ctx.text_block_closed:
-                                    ctx.text_sent = True
-                                    yield sse.text_delta(0, segment["text"])
-                            elif segment["type"] == "tool_call":
-                                for ev in _emit_xml_tool(ctx, segment["name"], segment["input"]):
-                                    yield ev
+                        # GLM-4.7: emit_text=True → accumulated_text + text_delta
+                        for ev in _process_buffer_segments(ctx, delta_reasoning, emit_text=True):
+                            yield ev
                     elif ctx.tool_index is None and not ctx.text_block_closed:
                         ctx.text_sent = True
                         yield sse.text_delta(0, delta_reasoning)
@@ -486,20 +638,18 @@ async def handle_streaming(
                               f"({len(delta_content)} chars) buffer={'YES' if ctx.xml_tool_buffer else 'NO'} "
                               f"text_closed={ctx.text_block_closed} first200={delta_content[:200]}", flush=True)
                     if ctx.xml_tool_buffer:
-                        for segment in ctx.xml_tool_buffer.feed(delta_content):
-                            if segment["type"] == "text":
-                                ctx.accumulated_text += segment["text"]
-                                if ctx.tool_index is None and not ctx.text_block_closed:
-                                    ctx.text_sent = True
-                                    yield sse.text_delta(0, segment["text"])
-                            elif segment["type"] == "tool_call":
-                                for ev in _emit_xml_tool(ctx, segment["name"], segment["input"]):
-                                    yield ev
+                        for ev in _process_buffer_segments(ctx, delta_content, emit_text=True):
+                            yield ev
                     else:
-                        ctx.accumulated_text += delta_content
-                        if ctx.tool_index is None and not ctx.text_block_closed:
-                            ctx.text_sent = True
-                            yield sse.text_delta(0, delta_content)
+                        delta_content = _strip_think_tags(delta_content)
+                        # Strip <reasoning>...</reasoning> tags from streaming text
+                        if delta_content and ctx.reasoning_stripper:
+                            delta_content = ctx.reasoning_stripper.process(delta_content)
+                        if delta_content:
+                            ctx.accumulated_text += delta_content
+                            if ctx.tool_index is None and not ctx.text_block_closed:
+                                ctx.text_sent = True
+                                yield sse.text_delta(0, delta_content)
 
                 # ── Native tool calls ────────────────────────────────
                 delta_tool_calls = bget(delta, "tool_calls")
@@ -539,6 +689,16 @@ async def handle_streaming(
                                 print(f"[streaming] WARNING: Skipping tool_call with empty name (index={current_index})")
                                 continue
 
+                            # Validate tool name against request tools (detect hallucinated names)
+                            if ctx.valid_names and not validate_tool_name(name, ctx.valid_names):
+                                metrics.increment_tool_counter("hallucinated")
+                                if ctx.model_id:
+                                    metrics.record_model_event(ctx.model_id, "tool_hallucination")
+                                print(f"[streaming] WARNING: Hallucinated tool name '{name}' from {ctx.model_id}")
+
+                            metrics.increment_tool_counter("native")
+                            if ctx.model_id:
+                                metrics.record_model_event(ctx.model_id, "tool_success")
                             yield sse.content_block_start_tool(ctx.last_tool_index, tool_id, name)
                             yield sse.input_json_delta(ctx.last_tool_index, "")
 
@@ -563,13 +723,13 @@ async def handle_streaming(
                     for ev in await _flush_xml_buffer(ctx):
                         yield ev
 
-                    # Safety net: catch <tool_call> XML in accumulated text that
-                    # the buffer missed (e.g. arrived via reasoning_content before
-                    # the buffer fix, or any other bypass path).
+                    # Safety net: catch <tool_call> XML in accumulated text or
+                    # reasoning buffer that the XmlToolBuffer missed.
                     # Also catches truncated tool calls when prior XML tools were already emitted.
-                    if "<tool_call" in ctx.accumulated_text:
+                    safety_text = ctx.accumulated_text + ctx.reasoning_buffer
+                    if "<tool_call" in safety_text:
                         safety_tools, _ = extract_tool_calls_from_text(
-                            ctx.accumulated_text, valid_tool_names=ctx.valid_names, tools=ctx.request_tools,
+                            safety_text, valid_tool_names=ctx.valid_names, tools=ctx.request_tools,
                         )
                         if safety_tools:
                             print(f"[streaming] SAFETY NET: {len(safety_tools)} tool(s) in accumulated text "
@@ -580,6 +740,7 @@ async def handle_streaming(
                         elif finish_reason == "length":
                             # Truncated tool call that couldn't be recovered —
                             # warn CC so the user knows an action was dropped
+                            metrics.increment_tool_counter("truncated")
                             warning = (
                                 "\n\n[proxy-warning: A tool call was truncated due to output length limits. "
                                 "The previous tool calls executed but an additional tool call was cut off. "
@@ -605,8 +766,18 @@ async def handle_streaming(
                     for ev in _close_text_block(ctx):
                         yield ev
 
+                    # Estimate output tokens if provider didn't report them
+                    if ctx.output_tokens == 0:
+                        ctx.output_tokens = _estimate_output_tokens(ctx)
+
                     stop_reason = _compute_stream_stop_reason(ctx, finish_reason, valid_tool_blocks)
-                    print(f"[streaming] CLOSE: stop_reason={stop_reason} finish_reason={finish_reason} tool_index={ctx.tool_index} has_xml={ctx.has_xml_tool_calls} no_tools={no_tools_mode}", flush=True)
+                    # Store thinking chars on request for cost tracking by _tracked_stream
+                    if ctx.thinking_chars > 0:
+                        setattr(original_request, "_thinking_chars", ctx.thinking_chars)
+                    print(f"[streaming] CLOSE: stop_reason={stop_reason} finish_reason={finish_reason} "
+                          f"tool_index={ctx.tool_index} has_xml={ctx.has_xml_tool_calls} "
+                          f"no_tools={no_tools_mode} output_tokens={ctx.output_tokens} "
+                          f"thinking_chars={ctx.thinking_chars}", flush=True)
                     for ev in _emit_stream_end(ctx, stop_reason, model_context_window):
                         yield ev
                     return
@@ -620,10 +791,11 @@ async def handle_streaming(
             for ev in await _flush_xml_buffer(ctx):
                 yield ev
 
-            # Safety net (fallback path)
-            if "<tool_call" in ctx.accumulated_text:
+            # Safety net (fallback path) — check both accumulated text and reasoning buffer
+            safety_text = ctx.accumulated_text + ctx.reasoning_buffer
+            if "<tool_call" in safety_text:
                 safety_tools, _ = extract_tool_calls_from_text(
-                    ctx.accumulated_text, valid_tool_names=ctx.valid_names, tools=ctx.request_tools,
+                    safety_text, valid_tool_names=ctx.valid_names, tools=ctx.request_tools,
                 )
                 if safety_tools:
                     print(f"[streaming] SAFETY NET (fallback): {len(safety_tools)} tool(s) in accumulated text!", flush=True)
@@ -643,8 +815,17 @@ async def handle_streaming(
             for ev in _close_text_block(ctx):
                 yield ev
 
+            # Estimate output tokens if provider didn't report them
+            if ctx.output_tokens == 0:
+                ctx.output_tokens = _estimate_output_tokens(ctx)
+
             fallback_stop = "tool_use" if ctx.has_any_tools else "end_turn"
-            print(f"[streaming] FALLBACK CLOSE: stop_reason={fallback_stop} tool_index={ctx.tool_index} has_xml={ctx.has_xml_tool_calls} no_tools={no_tools_mode}", flush=True)
+            if ctx.thinking_chars > 0:
+                setattr(original_request, "_thinking_chars", ctx.thinking_chars)
+            print(f"[streaming] FALLBACK CLOSE: stop_reason={fallback_stop} "
+                  f"tool_index={ctx.tool_index} has_xml={ctx.has_xml_tool_calls} "
+                  f"no_tools={no_tools_mode} output_tokens={ctx.output_tokens} "
+                  f"thinking_chars={ctx.thinking_chars}", flush=True)
             for ev in _emit_stream_end(ctx, fallback_stop, model_context_window):
                 yield ev
 

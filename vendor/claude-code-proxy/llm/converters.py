@@ -8,6 +8,7 @@ from utils.utils import bget, make_tool_id, map_stop_reason, scale_tokens, to_di
 from typing import Any, Dict, List, Optional, Union
 from json_repair import repair_json
 from llm.schemas import MessagesRequest, MessagesResponse, Usage
+from utils.metrics import metrics
 from llm.tool_prompting import (
     is_no_tools_model, build_tool_prompt, rewrite_messages_without_tools,
     extract_tool_calls_from_text, strip_tool_call_xml,
@@ -420,7 +421,7 @@ def _convert_message_blocks(msg: Any) -> List[Dict[str, Any]]:
         return [{"role": msg.role, "content": _content_blocks_to_text(msg.content)}]
 
 
-def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_context_window: int = 0, max_output_tokens: int = 8192) -> Dict[str, Any]:
+def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_context_window: int = 0, max_output_tokens: int = 8192, reasoning_max_tokens: int = 0) -> Dict[str, Any]:
     """
     Anthropic /v1/messages -> LiteLLM(OpenAI-style) request dict.
     """
@@ -437,23 +438,25 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_conte
     max_tokens = anthropic_request.max_tokens
     no_tools = is_no_tools_model(anthropic_request.model)
 
-    # Cap max_tokens for openai/ non-reasoning models to avoid absurd requests.
-    # Skip: gemini/ (1M context), no_tools/reasoning models (reasoning_content consumes output tokens).
-    if (
-        isinstance(anthropic_request.model, str)
-        and anthropic_request.model.startswith("openai/")
-        and not no_tools
-    ):
-        if model_context_window > 0:
+    # Cap max_tokens for all models to avoid absurd requests.
+    # Skip: gemini/ (1M context, handles its own limits).
+    if isinstance(anthropic_request.model, str) and not anthropic_request.model.startswith("gemini/"):
+        if no_tools and reasoning_max_tokens > 0:
+            # Reasoning/no_tools models: cap to REASONING_MAX_TOKENS.
+            # reasoning_content consumes output budget, so cap prevents runaway cost.
+            max_tokens = min(max_tokens, reasoning_max_tokens)
+            print(f"[no-tools] max_completion_tokens={max_tokens} (capped at {reasoning_max_tokens})")
+        elif no_tools:
+            print(f"[no-tools] max_completion_tokens={max_tokens} (uncapped, reasoning model)")
+        elif model_context_window > 0:
             # Dynamic cap: only for providers with MODEL_CONTEXT_WINDOW set (e.g. DeepSeek 64K)
             # Groq, OpenAI, OpenRouter have MODEL_CONTEXT_WINDOW=0 → fall through to else
-            
             provider_max = max_output_tokens
-            input_estimate = sum(len(str(m.get("content", ""))) for m in messages) // 4
+            input_estimate = sum(len(str(m.get("content", ""))) for m in messages) // 3
             tools_estimate = 0
             if anthropic_request.tools:
                 for t in anthropic_request.tools:
-                    tools_estimate += len(json.dumps(to_dict(t))) // 4
+                    tools_estimate += len(json.dumps(to_dict(t))) // 3
             remaining = model_context_window - input_estimate - tools_estimate
             safe_remaining = int(remaining * 0.85)  # 15% margin for overhead
             dynamic_cap = max(1024, min(safe_remaining, provider_max))
@@ -463,9 +466,6 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_conte
         else:
             # Providers WITHOUT MODEL_CONTEXT_WINDOW: identical to current behavior
             max_tokens = min(max_tokens, 16384)
-
-    if no_tools:
-        print(f"[no-tools] max_completion_tokens={max_tokens} (uncapped, reasoning model)")
 
     litellm_request: Dict[str, Any] = {
         "model": anthropic_request.model,
@@ -523,7 +523,7 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_conte
     return litellm_request
 
 
-def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], original_request: MessagesRequest, model_context_window: int = 0) -> MessagesResponse:
+def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], original_request: MessagesRequest, model_context_window: int = 0, strip_reasoning: bool = False) -> MessagesResponse:
     """
     LiteLLM(OpenAI-ish) response -> Anthropic /v1/messages response object
     """
@@ -547,8 +547,8 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
 
     content: List[Dict[str, Any]] = []
 
-    # reasoning_content (deepseek-reasoner): surface as text block
-    if reasoning_text:
+    # reasoning_content (deepseek-reasoner): surface as text block (unless stripped)
+    if reasoning_text and not strip_reasoning:
         content.append({"type": "text", "text": f"<reasoning>\n{reasoning_text}\n</reasoning>\n\n"})
 
     if content_text is not None and content_text != "":
@@ -579,6 +579,18 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
                 print(f"[converters] WARNING: Skipping tool_call with empty name (id={raw_id})")
                 continue
 
+            # Validate tool name against request tools (detect hallucinated names)
+            request_tools = getattr(original_request, "tools", None)
+            if request_tools:
+                valid_names = _build_valid_tool_names(request_tools)
+                if valid_names and not validate_tool_name(name, valid_names):
+                    metrics.increment_tool_counter("hallucinated")
+                    metrics.record_model_event(
+                        getattr(original_request, "model", "unknown"), "tool_hallucination",
+                    )
+                    print(f"[converters] WARNING: Hallucinated tool name '{name}' "
+                          f"(valid: {sorted(list(valid_names)[:5])}...)")
+
             if isinstance(arguments, str):
                 try:
                     arguments = json.loads(arguments)
@@ -593,6 +605,7 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
                     except Exception:
                         arguments = {"raw": arguments}
 
+            metrics.increment_tool_counter("native")
             content.append(
                 {"type": "tool_use", "id": tool_id, "name": name, "input": arguments}
             )
@@ -608,15 +621,20 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
     # Extract XML tool calls from text response:
     # - No-tools models: always check (they use XML simulation)
     # - Native models: check when <tool_call present AND no native tool_calls (avoids dupes)
+    # For no-tools models, also search reasoning_text (DeepSeek-reasoner sometimes
+    # puts <tool_call> XML in reasoning_content instead of content).
     has_native_tools = bool(tool_calls)
+    search_text = content_text or ""
+    if is_no_tools_model(original_request.model) and reasoning_text and "<tool_call" in reasoning_text:
+        search_text = reasoning_text + "\n" + search_text
     should_extract = (
         is_no_tools_model(original_request.model)
         or (not has_native_tools and "<tool_call" in (content_text or ""))
     )
-    if should_extract and content_text:
+    if should_extract and search_text:
         request_tools = getattr(original_request, "tools", None)
         valid_names = _build_valid_tool_names(request_tools)
-        xml_tool_blocks, clean_text = extract_tool_calls_from_text(content_text, valid_tool_names=valid_names, tools=request_tools)
+        xml_tool_blocks, clean_text = extract_tool_calls_from_text(search_text, valid_tool_names=valid_names, tools=request_tools)
         if xml_tool_blocks:
             # Rebuild content: clean text + tool_use blocks
             # OMIT reasoning_content when tool calls present — 5-15K tokens of reasoning
@@ -629,11 +647,13 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
                 content.append({"type": "text", "text": clean_text})
             content.extend(xml_tool_blocks)
             finish_reason = "tool_calls"
+            for _ in xml_tool_blocks:
+                metrics.increment_tool_counter("xml_extracted")
             print(f"[no-tools] Extracted {len(xml_tool_blocks)} tool calls from text response")
-        elif "<tool_call" in content_text:
+        elif "<tool_call" in search_text:
             # Extraction failed but <tool_call present → deterministic recovery (sync, no LLM)
             recovered = recover_truncated_deterministic(
-                content_text,
+                search_text,
                 tools=[to_dict(t) for t in request_tools] if request_tools else None,
             )
             if recovered:
@@ -641,16 +661,17 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
                     recovered = [tc for tc in recovered if validate_tool_name(tc.get("name", ""), valid_names)]
                 if recovered:
                     content = []
-                    clean = strip_tool_call_xml(content_text)
+                    clean = strip_tool_call_xml(search_text)
                     if clean:
                         content.append({"type": "text", "text": clean})
                     content.extend(recovered)
                     finish_reason = "tool_calls"
+                    metrics.increment_tool_counter("recovered")
                     print(f"[recovery] Non-streaming: deterministic recovery got {len(recovered)} tool(s)")
             if not recovered:
-                # Fallback: strip XML from content text
-                clean = strip_tool_call_xml(content_text)
-                if clean != content_text:
+                # Fallback: strip XML from search text
+                clean = strip_tool_call_xml(search_text)
+                if clean != search_text:
                     content = [{"type": "text", "text": clean}] if clean else []
                     print(f"[recovery] Non-streaming fallback: stripped XML from content")
 

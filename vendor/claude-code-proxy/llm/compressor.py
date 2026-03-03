@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from litellm import token_counter
+from utils.metrics import metrics
 
 
 # Circuit breaker state (module-level, persists across requests)
@@ -30,6 +31,9 @@ _consecutive_failures: int = 0
 _circuit_open_until: float = 0.0
 _CIRCUIT_BREAKER_THRESHOLD = 5   # failures before opening circuit
 _CIRCUIT_BREAKER_COOLDOWN = 60.0  # seconds to skip compressor after circuit opens
+
+# Lock for all module-level mutable state (_compression_cache, _consecutive_failures, _circuit_open_until)
+_state_lock = asyncio.Lock()
 
 
 # ── Compression result cache ──────────────────────────────────────────
@@ -107,16 +111,65 @@ def estimate_tools_tokens(tools: list[dict] | None) -> int:
     return total_chars // 3
 
 
+def _find_safe_split_point(conversation: list[dict], keep_recent: int) -> int:
+    """Find split point that preserves tool_use/tool_result pairs.
+
+    When compressing, we split conversation into old (compressed) and recent
+    (kept intact). If a role:"tool" message in recent references a tool_call_id
+    from an assistant message in old, the API rejects with error 2013.
+
+    This function scans backward from the naive split to include any assistant
+    messages whose tool_calls are referenced by tool messages in recent.
+    """
+    if len(conversation) <= keep_recent:
+        return 0
+
+    split = len(conversation) - keep_recent
+
+    # Collect tool_call_ids referenced in the recent portion
+    referenced_ids = set()
+    for msg in conversation[split:]:
+        if msg.get("role") == "tool":
+            tid = msg.get("tool_call_id")
+            if tid:
+                referenced_ids.add(tid)
+
+    if not referenced_ids:
+        return split
+
+    # Scan backward from split to find their parent assistant messages
+    for i in range(split - 1, -1, -1):
+        msg = conversation[i]
+        if msg.get("role") == "assistant" and "tool_calls" in msg:
+            for tc in msg.get("tool_calls", []):
+                tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                if tc_id in referenced_ids:
+                    split = i
+                    referenced_ids.discard(tc_id)
+        if not referenced_ids:
+            break
+
+    return split
+
+
 def _serialize_messages_for_summary(messages: list[dict], max_chars: int = 50000) -> str:
-    """Serialize messages to text for the compressor, truncating large outputs."""
+    """Serialize messages to text for the compressor, truncating large outputs.
+
+    Tool results get higher char limits (6000) to preserve file contents and
+    error messages that are critical for continued tool use.
+    """
     lines = []
     chars = 0
     for msg in messages:
         role = msg.get("role", "unknown")
         content = msg.get("content", "") or ""
-        # Truncate individual messages that are too long (e.g. large tool outputs)
-        if len(content) > 3000:
-            content = content[:1500] + "\n...[truncated]...\n" + content[-500:]
+        # Tool results get higher limit — they contain file contents/errors
+        # that are critical for the model to continue working correctly
+        limit = 6000 if role == "tool" else 3000
+        if len(content) > limit:
+            keep_end = min(1000, limit // 4)
+            keep_start = limit - keep_end - 30  # 30 chars for truncation marker
+            content = content[:keep_start] + "\n...[truncated]...\n" + content[-keep_end:]
         line = f"[{role}]: {content}"
         if chars + len(line) > max_chars:
             lines.append("[...earlier messages omitted...]")
@@ -185,8 +238,9 @@ async def compress_messages_if_needed(
         print(f"[compress] Skipped: only {len(conversation)} msgs (need > {keep_recent + 2})")
         return messages, False
 
-    old_messages = conversation[:-keep_recent]
-    recent_messages = conversation[-keep_recent:]
+    split_point = _find_safe_split_point(conversation, keep_recent)
+    old_messages = conversation[:split_point]
+    recent_messages = conversation[split_point:]
 
     # Nothing meaningful to compress
     if len(old_messages) < 3:
@@ -194,62 +248,77 @@ async def compress_messages_if_needed(
         return messages, False
 
     print(f"[compress] Triggered: {estimated_tokens} tokens > {threshold} threshold. "
-          f"Compressing {len(old_messages)} old messages, keeping {len(recent_messages)} recent.")
+          f"Compressing {len(old_messages)} old messages, keeping {len(recent_messages)} recent. "
+          f"compressor={compressor_model}")
 
     # ── Check compression cache before calling LLM ──
     global _compression_cache
     prefix_hash = _compute_prefix_hash(old_messages)
     now = time.monotonic()
 
-    if (_compression_cache is not None
-            and _compression_cache.prefix_hash == prefix_hash
-            and (now - _compression_cache.timestamp) < _CACHE_TTL
-            and (len(old_messages) - _compression_cache.old_msg_count) <= _CACHE_MSG_TOLERANCE):
-        # Cache hit — reuse previous summary, skip the LLM call
-        age = int(now - _compression_cache.timestamp)
-        delta = len(old_messages) - _compression_cache.old_msg_count
-        print(f"[compress] Cache HIT: reusing summary "
-              f"(cached {_compression_cache.old_msg_count} msgs, now {len(old_messages)} msgs, "
-              f"delta={delta}, age={age}s)")
-        compressed = _reassemble_with_summary(system_msg, _compression_cache.summary, recent_messages)
+    async with _state_lock:
+        if (_compression_cache is not None
+                and _compression_cache.prefix_hash == prefix_hash
+                and (now - _compression_cache.timestamp) < _CACHE_TTL
+                and (len(old_messages) - _compression_cache.old_msg_count) <= _CACHE_MSG_TOLERANCE):
+            # Cache hit — reuse previous summary, skip the LLM call
+            metrics.compression_cache_hits += 1
+            age = int(now - _compression_cache.timestamp)
+            delta = len(old_messages) - _compression_cache.old_msg_count
+            print(f"[compress] Cache HIT: reusing summary "
+                  f"(cached {_compression_cache.old_msg_count} msgs, now {len(old_messages)} msgs, "
+                  f"delta={delta}, age={age}s)")
+            cached_summary = _compression_cache.summary
+        else:
+            cached_summary = None
+            metrics.compression_cache_misses += 1
+            reason = "no cache" if _compression_cache is None else (
+                "prefix mismatch" if _compression_cache.prefix_hash != prefix_hash else
+                "expired" if (now - _compression_cache.timestamp) >= _CACHE_TTL else
+                f"delta {len(old_messages) - _compression_cache.old_msg_count} > {_CACHE_MSG_TOLERANCE}"
+            )
+            print(f"[compress] Cache MISS ({reason}): compressing fresh (prefix_hash={prefix_hash})")
+
+    if cached_summary is not None:
+        compressed = _reassemble_with_summary(system_msg, cached_summary, recent_messages)
         new_tokens = _count_message_tokens(compressed, model=target_model)
         print(f"[compress] Success (cached): {estimated_tokens} → {new_tokens} tokens "
               f"(saved {estimated_tokens - new_tokens})")
         return compressed, True
 
-    # ── Cache miss — run LLM compression ──
-    reason = "no cache" if _compression_cache is None else (
-        "prefix mismatch" if _compression_cache.prefix_hash != prefix_hash else
-        "expired" if (now - _compression_cache.timestamp) >= _CACHE_TTL else
-        f"delta {len(old_messages) - _compression_cache.old_msg_count} > {_CACHE_MSG_TOLERANCE}"
-    )
-    print(f"[compress] Cache MISS ({reason}): compressing fresh (prefix_hash={prefix_hash})")
-
     # Try LLM compression (retry + circuit breaker + fallback)
-    summary = await _llm_compress(
+    result = await _llm_compress(
         old_messages, compressor_model, compressor_api_key, compressor_base_url,
         fallback_model=fallback_model,
         fallback_api_key=fallback_api_key,
         fallback_base_url=fallback_base_url,
     )
 
-    if summary:
+    if result:
+        summary, model_used = result
         # Store in cache for next request
-        _compression_cache = _CompressionCache(
-            summary=summary,
-            old_msg_count=len(old_messages),
-            timestamp=now,
-            prefix_hash=prefix_hash,
-        )
+        async with _state_lock:
+            _compression_cache = _CompressionCache(
+                summary=summary,
+                old_msg_count=len(old_messages),
+                timestamp=now,
+                prefix_hash=prefix_hash,
+            )
         compressed = _reassemble_with_summary(system_msg, summary, recent_messages)
         new_tokens = _count_message_tokens(compressed, model=target_model)
-        print(f"[compress] Success: {estimated_tokens} → {new_tokens} tokens "
+        print(f"[compress] Success ({model_used}): {estimated_tokens} → {new_tokens} tokens "
               f"(saved {estimated_tokens - new_tokens})")
         return compressed, True
 
-    # Fallback: simple trimming (discard old, keep recent)
-    print(f"[compress] LLM compression failed, falling back to trimming")
-    trimmed = _reassemble_trimmed(system_msg, recent_messages)
+    # Fallback: aggressive trimming — keep only 5 most recent messages
+    # (not keep_recent=15) to ensure we stay well under context window.
+    # CC resends full conversation next turn, so trimming more aggressively
+    # prevents the regrowth cycle where tokens grow 12K→218K.
+    aggressive_keep = min(5, len(recent_messages))
+    aggressive_recent = recent_messages[-aggressive_keep:] if aggressive_keep > 0 else recent_messages
+    print(f"[compress] LLM compression failed, falling back to aggressive trimming "
+          f"(keeping {len(aggressive_recent)} of {len(conversation)} messages)")
+    trimmed = _reassemble_trimmed(system_msg, aggressive_recent)
     new_tokens = _count_message_tokens(trimmed, model=target_model)
     print(f"[compress] Trimmed: {estimated_tokens} → {new_tokens} tokens")
     return trimmed, True
@@ -270,6 +339,7 @@ async def _llm_compress_single(
     import litellm
 
     for attempt in range(retries):
+        print(f"[compress] {label} calling {model} (attempt {attempt + 1}/{retries})")
         try:
             kwargs: dict[str, Any] = {
                 "model": model,
@@ -311,19 +381,20 @@ async def _llm_compress(
     fallback_model: Optional[str] = None,
     fallback_api_key: Optional[str] = None,
     fallback_base_url: Optional[str] = None,
-) -> Optional[str]:
+) -> Optional[tuple[str, str]]:
     """
     Call compressor LLM with resilience: retry + circuit breaker + fallback endpoint.
-    Returns summary or None on failure.
+    Returns (summary, model_used) or None on failure.
     """
     global _consecutive_failures, _circuit_open_until
 
     # Circuit breaker: skip if too many recent failures
     now = time.monotonic()
-    if _circuit_open_until > now:
-        remaining = int(_circuit_open_until - now)
-        print(f"[compress] Circuit breaker OPEN — skipping compressor ({remaining}s remaining)")
-        return None
+    async with _state_lock:
+        if _circuit_open_until > now:
+            remaining = int(_circuit_open_until - now)
+            print(f"[compress] Circuit breaker OPEN — skipping LLM compressor ({remaining}s remaining)")
+            return None  # Caller will use aggressive trimming fallback
 
     conversation_text = _serialize_messages_for_summary(old_messages)
     prompt = _COMPRESS_PROMPT.format(conversation=conversation_text)
@@ -331,8 +402,9 @@ async def _llm_compress(
     # Try primary compressor (3 retries)
     summary = await _llm_compress_single(prompt, model, api_key, api_base, label="primary")
     if summary:
-        _consecutive_failures = 0
-        return summary
+        async with _state_lock:
+            _consecutive_failures = 0
+        return summary, model
 
     # Try fallback compressor if configured (3 retries)
     if fallback_model and fallback_api_key:
@@ -341,25 +413,80 @@ async def _llm_compress(
             prompt, fallback_model, fallback_api_key, fallback_base_url, label="fallback"
         )
         if summary:
-            _consecutive_failures = 0
-            return summary
+            async with _state_lock:
+                _consecutive_failures = 0
+            return summary, fallback_model
 
     # Both failed — update circuit breaker
-    _consecutive_failures += 1
-    if _consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
-        _circuit_open_until = now + _CIRCUIT_BREAKER_COOLDOWN
-        print(f"[compress] Circuit breaker OPENED after {_consecutive_failures} consecutive failures "
-              f"(cooldown {_CIRCUIT_BREAKER_COOLDOWN}s)")
-    else:
-        print(f"[compress] Compressor failed ({_consecutive_failures}/{_CIRCUIT_BREAKER_THRESHOLD} "
-              f"before circuit breaker)")
+    async with _state_lock:
+        _consecutive_failures += 1
+        if _consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
+            _circuit_open_until = now + _CIRCUIT_BREAKER_COOLDOWN
+            print(f"[compress] Circuit breaker OPENED after {_consecutive_failures} consecutive failures "
+                  f"(cooldown {_CIRCUIT_BREAKER_COOLDOWN}s)")
+        else:
+            print(f"[compress] Compressor failed ({_consecutive_failures}/{_CIRCUIT_BREAKER_THRESHOLD} "
+                  f"before circuit breaker)")
 
     return None
 
 
+def _validate_tool_references(messages: list[dict]) -> bool:
+    """Verify all tool_call_ids in role:tool have matching assistant tool_calls.
+
+    Returns True if all references are valid, False if orphans exist.
+    Only relevant for OpenAI-format messages (native tool models).
+    For no-tools models, role:"tool" messages don't exist so this is a no-op.
+    """
+    available_ids = set()
+    for msg in messages:
+        if msg.get("role") == "assistant" and "tool_calls" in msg:
+            for tc in msg.get("tool_calls", []):
+                tid = tc.get("id", "") if isinstance(tc, dict) else ""
+                if tid:
+                    available_ids.add(tid)
+    for msg in messages:
+        if msg.get("role") == "tool":
+            tid = msg.get("tool_call_id", "")
+            if tid and tid != "unknown" and tid not in available_ids:
+                return False
+    return True
+
+
+def _fix_orphan_tool_messages(messages: list[dict]) -> list[dict]:
+    """Convert orphaned role:tool messages to role:user with text content.
+
+    Safety net: if _find_safe_split_point missed an orphan (e.g. due to
+    cache reuse), this converts dangling tool results to user messages
+    so the API doesn't reject with error 2013.
+    """
+    available_ids = set()
+    for msg in messages:
+        if msg.get("role") == "assistant" and "tool_calls" in msg:
+            for tc in msg.get("tool_calls", []):
+                tid = tc.get("id", "") if isinstance(tc, dict) else ""
+                if tid:
+                    available_ids.add(tid)
+    result = []
+    for msg in messages:
+        if msg.get("role") == "tool":
+            tid = msg.get("tool_call_id", "")
+            if tid and tid != "unknown" and tid not in available_ids:
+                result.append({
+                    "role": "user",
+                    "content": f"[Tool result for {tid}]: {msg.get('content', '')}",
+                })
+                continue
+        result.append(msg)
+    return result
+
+
 _XML_REINFORCEMENT = (
-    '[REMINDER] Tool format: <tool_call name="ToolName"><input>{"key": "value"}</input></tool_call>. '
-    "Use ONLY <tool_call> and <input> tags. Do NOT invent other XML tag names.\n\n"
+    "[REMINDER] Tool format:\n"
+    '<tool_call name="Read">\n<input>\n{"file_path": "/path"}\n</input>\n</tool_call>\n'
+    "Parameters MUST be JSON inside <input> tags. "
+    "NEVER use XML parameter tags like <file_path> or <content> or <parameter name=\"X\">. "
+    "Use ONLY <tool_call> and <input> tags.\n\n"
 )
 
 
@@ -391,6 +518,10 @@ def _reassemble_with_summary(
         "content": "Understood. I have the context from our previous conversation. Continuing.",
     })
     result.extend(recent_messages)
+    # Safety net: validate no orphan tool references after reassembly
+    if not _validate_tool_references(result):
+        print("[compress] WARNING: orphan tool references detected after reassembly, fixing...")
+        result = _fix_orphan_tool_messages(result)
     return result
 
 
@@ -413,4 +544,8 @@ def _reassemble_trimmed(
         "content": "Understood. Some earlier context was removed. I'll work with what's available.",
     })
     result.extend(recent_messages)
+    # Safety net: validate no orphan tool references after reassembly
+    if not _validate_tool_references(result):
+        print("[compress] WARNING: orphan tool references detected after trimming, fixing...")
+        result = _fix_orphan_tool_messages(result)
     return result

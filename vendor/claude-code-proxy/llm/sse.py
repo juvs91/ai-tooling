@@ -113,3 +113,41 @@ def ping() -> str:
 def done() -> str:
     """Final ``[DONE]`` sentinel (OpenAI convention forwarded by some clients)."""
     return "data: [DONE]\n\n"
+
+
+def response_to_sse_events(response, model: str, input_tokens: int = 0):
+    """Convert a MessagesResponse to SSE event strings.
+
+    Yields SSE event strings in the correct Anthropic streaming order.
+    """
+    import uuid
+    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+
+    yield message_start(msg_id, model, input_tokens)
+
+    for idx, block in enumerate(response.content):
+        if block.type == "text":
+            yield content_block_start_text(idx)
+            if block.text:
+                yield text_delta(idx, block.text)
+            yield content_block_stop(idx)
+        elif block.type == "tool_use":
+            yield content_block_start_tool(idx, block.id, block.name)
+            yield input_json_delta(idx, "")
+            try:
+                args_json = json.dumps(block.input, ensure_ascii=False)
+            except (TypeError, ValueError):
+                args_json = json.dumps({"raw": str(block.input)})
+            yield input_json_delta(idx, args_json)
+            yield content_block_stop(idx)
+        elif block.type in ("thinking", "redacted_thinking"):
+            # Thinking blocks are internal model reasoning — skip in SSE output
+            # (Claude Code doesn't expect these and they can crash its SSE parser)
+            pass
+
+    stop_reason = response.stop_reason or "end_turn"
+    output_tokens = response.usage.output_tokens if response.usage else 0
+    yield message_delta(stop_reason, output_tokens)
+
+    yield message_stop()
+    yield done()

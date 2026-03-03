@@ -1,0 +1,5 @@
+services:
+  proxy_cloud:
+    env_file:
+      - ./.env
+      - profile-envs/cloud.mixed-router.env

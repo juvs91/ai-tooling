@@ -11,8 +11,8 @@ from utils.utils import (
     scale_tokens,
     cached_token_count,
     store_token_count,
-    _hash_content,
-    _token_count_cache,
+    _hash_single_msg,
+    _per_msg_cache,
 )
 
 
@@ -99,9 +99,8 @@ class TestFilterToolsAllowlist:
         assert "Bash" in dropped
 
     def test_case_insensitive_matching(self, dict_tools):
-        kept, dropped = filter_tools_allowlist(dict_tools, {"READ", "WRITE"})
-        # Allowlist is lowercase, tool names are mixed case
-        # The function lowercases tool names for comparison
+        # parse_allowlist() always lowercases — pass lowercase to match real usage
+        kept, dropped = filter_tools_allowlist(dict_tools, {"read", "write"})
         assert len(kept) == 2
 
 
@@ -214,10 +213,10 @@ class TestScaleTokens:
 
 
 class TestTokenCountCache:
-    """Tests for token count cache functions."""
+    """Tests for per-message incremental token count cache."""
 
     def setup_method(self):
-        _token_count_cache.clear()
+        _per_msg_cache.clear()
 
     def test_cache_miss_returns_none(self):
         msgs = [{"role": "user", "content": "hello"}]
@@ -238,19 +237,39 @@ class TestTokenCountCache:
         assert cached_token_count([{"role": "user", "content": "bye"}], "m") is None
 
     def test_hash_is_deterministic(self):
-        msgs = [{"role": "user", "content": "test"}]
-        h1 = _hash_content(msgs, "model_a", "sys")
-        h2 = _hash_content(msgs, "model_a", "sys")
+        msg = {"role": "user", "content": "test"}
+        h1 = _hash_single_msg(msg, "model_a")
+        h2 = _hash_single_msg(msg, "model_a")
         assert h1 == h2
 
     def test_eviction_at_max(self):
-        from utils.utils import _TOKEN_CACHE_MAX
-        for i in range(_TOKEN_CACHE_MAX + 10):
-            store_token_count([{"n": i}], "m", i)
-        assert len(_token_count_cache) <= _TOKEN_CACHE_MAX
+        from utils.utils import _PER_MSG_MAX
+        for i in range(_PER_MSG_MAX + 10):
+            store_token_count([{"role": "user", "content": f"msg_{i}"}], "m", i + 1)
+        assert len(_per_msg_cache) <= _PER_MSG_MAX
 
-    def test_system_param_affects_hash(self):
-        msgs = [{"role": "user", "content": "hello"}]
-        store_token_count(msgs, "m", 10, system="sys_a")
-        assert cached_token_count(msgs, "m", system="sys_b") is None
-        assert cached_token_count(msgs, "m", system="sys_a") == 10
+    def test_incremental_hit_on_growing_conversation(self):
+        """Per-message cache: adding a new message only misses the new one."""
+        msgs_v1 = [{"role": "user", "content": "hello"}]
+        store_token_count(msgs_v1, "m", 10)
+        assert cached_token_count(msgs_v1, "m") == 10
+
+        # Add a second message — cache miss (new msg uncached)
+        msgs_v2 = msgs_v1 + [{"role": "assistant", "content": "world"}]
+        assert cached_token_count(msgs_v2, "m") is None
+
+        # Store again with total count — now both are cached
+        store_token_count(msgs_v2, "m", 20)
+        assert cached_token_count(msgs_v2, "m") is not None
+
+    def test_multi_message_proportional_split(self):
+        """Token count is split proportionally by content length."""
+        msgs = [
+            {"role": "user", "content": "short"},
+            {"role": "assistant", "content": "a much longer response here"},
+        ]
+        store_token_count(msgs, "m", 100)
+        total = cached_token_count(msgs, "m")
+        # Sum should approximate the stored count (proportional split)
+        assert total is not None
+        assert 90 <= total <= 110  # allow rounding variance
