@@ -534,3 +534,201 @@ class TestModelCosts:
         from config import _parse_model_costs
         mc = _parse_model_costs()
         assert mc.rates == {}
+
+
+class TestH17SpeculativeGeneration:
+    """H17: Speculative generation detection - analysis without evidence."""
+
+    def test_code_citations_without_verification(self):
+        """Code cited but no Read/Grep/Glob tools → speculative."""
+        text = """
+        The bug is in server.ts:45 where the race condition happens.
+        Line 123 shows the issue clearly.
+        """
+        score, issues = score_response(
+            intent="READ",
+            response_text=text,
+            tool_calls=[],
+            is_analysis=True,
+        )
+        assert "code_citations_without_verification" in issues
+        assert score <= 0.65  # 1.0 - 0.35
+
+    def test_code_citations_with_read_tools_no_penalty(self):
+        """Code cited WITH Read tools → OK."""
+        text = "In server.py:45 I found a race condition."
+        score, issues = score_response(
+            intent="READ",
+            response_text=text,
+            tool_calls=[{"name": "Read", "input": {"file_path": "server.py"}}],
+            is_analysis=True,
+        )
+        assert "code_citations_without_verification" not in issues
+
+    def test_decorative_tool_calls_no_evidence(self):
+        """Long analysis with tools but no evidence phrases."""
+        # Need >1500 chars to trigger this check
+        text = """
+        The system has a race condition in streaming.ts:78-105.
+        The compressor module has a memory leak at line 45.
+        Server routing has a security issue.
+
+        Here is the fix for streaming:
+        ```diff
+        - let buffer = '';
+        + let buffer = '';
+        + let jsonBuffer = '';
+        ```
+
+        """ + ("Additional analysis text. " * 100)  # Make it >1500 chars
+        score, issues = score_response(
+            intent="READ",
+            response_text=text,
+            tool_calls=[{"name": "Read", "input": {"file_path": "streaming.ts"}}],
+            is_analysis=True,
+        )
+        assert "decorative_tool_calls_no_evidence" in issues
+        assert score <= 0.70  # 1.0 - 0.30
+
+    def test_evidence_phrases_no_penalty(self):
+        """Analysis with evidence phrases → OK."""
+        text = """
+        I read server.py and found a race condition at line 45.
+        Grep found 3 occurrences of this pattern.
+        According to compressor.py:78, the issue is clear.
+        """
+        score, issues = score_response(
+            intent="READ",
+            response_text=text,
+            tool_calls=[{"name": "Read", "input": {"file_path": "server.py"}}],
+            is_analysis=True,
+        )
+        assert "decorative_tool_calls_no_evidence" not in issues
+
+    def test_unverified_bug_claims(self):
+        """Bugs claimed without discovery verbs."""
+        # Need >500 chars to trigger this check
+        text = """
+        There is a critical bug in the system.
+        The memory leak causes server crashes.
+        Race conditions lead to data corruption.
+        """ + ("More analysis text here. " * 30)  # Make it >500 chars
+        score, issues = score_response(
+            intent="READ",
+            response_text=text,
+            tool_calls=[],
+            is_analysis=True,
+        )
+        assert "unverified_bug_claims" in issues
+        assert score <= 0.75  # 1.0 - 0.25
+
+    def test_bug_claims_with_discovery_verbs_no_penalty(self):
+        """Bugs WITH discovery verbs → OK."""
+        text = """
+        I discovered a critical bug in the system.
+        Found a memory leak that causes crashes.
+        """
+        score, issues = score_response(
+            intent="READ",
+            response_text=text,
+            tool_calls=[],
+            is_analysis=True,
+        )
+        assert "unverified_bug_claims" not in issues
+
+    def test_short_analysis_skips_evidence_check(self):
+        """Short analysis (<1500 chars) doesn't get decorative penalty."""
+        text = "The bug is at line 45."
+        score, issues = score_response(
+            intent="READ",
+            response_text=text,
+            tool_calls=[{"name": "Read", "input": {"file_path": "server.py"}}],
+            is_analysis=True,
+        )
+        assert "decorative_tool_calls_no_evidence" not in issues
+
+    def test_h17_does_not_fire_for_non_analysis(self):
+        """H17 should only apply to analysis responses."""
+        text = "There's a bug in the code."
+        score, issues = score_response(
+            intent="CHAT",
+            response_text=text,
+            tool_calls=[],
+            is_analysis=False,  # Not analysis
+        )
+        # H17 issues should not appear for non-analysis
+        assert not any("speculative" in i.lower() or "unverified" in i.lower() for i in issues)
+
+    def test_h17_multiple_penalties_sum_correctly(self):
+        """Multiple H17 violations should stack penalties."""
+        text = """
+        The bug is in server.ts:45. There is a memory leak at compressor.py:78.
+        Line 123 shows the issue clearly.
+        """ * 10  # Make it long enough
+        score, issues = score_response(
+            intent="READ",
+            response_text=text,
+            tool_calls=[],  # No tools at all
+            is_analysis=True,
+        )
+        # Should get code_citations_without_verification (-0.35)
+        # but NOT the others since they have different conditions
+        assert "code_citations_without_verification" in issues
+        assert score <= 0.65
+
+
+class TestH7SynthesizingBypass:
+    """H7 (unverified_claims) must be skipped for SYNTHESIZING intent."""
+
+    def test_h7_skipped_for_synthesizing_intent(self):
+        """SYNTHESIZING intent bypasses H7 — deepseek-reasoner has no tools by design."""
+        # >5 factual claims, no tools — would normally trigger H7
+        text = (
+            "The compressor has 5 concurrent requests. "
+            "The cache contains 200 entries. "
+            "The server takes 3 parameters. "
+            "The proxy runs 8 workers. "
+            "The streaming module handles 100 connections. "
+            "The transformer processes 50 requests per second."
+        )
+        score, issues = score_response(
+            intent="SYNTHESIZING",
+            response_text=text,
+            tool_calls=[],
+            is_analysis=True,
+        )
+        assert "unverified_claims" not in issues
+
+    def test_h7_still_fires_for_read_intent_without_tools(self):
+        """H7 must still fire for READ intent without tools (not synthesizing)."""
+        # Use claims matching _FACTUAL_CLAIM_RE: verb + number + recognized noun
+        text = (
+            "The proxy handles 5 module in the pipeline. "
+            "The server has 3 transformer for routing. "
+            "The compressor takes 2 parameter for config. "
+            "The cache runs 10 file for storage. "
+            "The router has 4 endpoint for API access. "
+            "The stream handles 7 function in context."
+        )
+        score, issues = score_response(
+            intent="READ",
+            response_text=text,
+            tool_calls=[],
+            is_analysis=True,
+        )
+        assert "unverified_claims" in issues
+
+    def test_h7_skipped_for_synthesizing_even_with_many_claims(self):
+        """Synthesizing with many factual claims should not trigger H7."""
+        # Simulate deepseek-reasoner synthesizing a full analysis report
+        text = "The server runs on port 8082. " + " ".join([
+            f"Module {i} handles 10 requests."
+            for i in range(10)
+        ])
+        score, issues = score_response(
+            intent="SYNTHESIZING",
+            response_text=text,
+            tool_calls=[],
+            is_analysis=True,
+        )
+        assert "unverified_claims" not in issues

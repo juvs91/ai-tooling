@@ -2,8 +2,95 @@
 > Aprendizajes iterativos del proyecto. Actualizar despues de cada sesion.
 
 ## Ultima actualizacion
-- Fecha: 2026-03-02
+- Fecha: 2026-03-04
 - Por: claude-opus-4-6 + jeguzman
+
+---
+
+## Session 2026-03-04 (cont): tool_prompting.py Production Audit + XmlToolBuffer Hardening
+
+### Fixes aplicados (878/878 tests pasan)
+
+1. **BLOCKER — line 1154** ([tool_prompting.py](../vendor/claude-code-proxy/llm/tool_prompting.py)): `recover_incomplete_tool_call()` llamaba `extract_tool_calls_from_text(content)` SIN `valid_tool_names` → hallucinated tools bypassaban filtrado. Fix: construir `_recovery_valid_names = _build_valid_tool_names(tools)` y pasarlos.
+
+2. **HARDENING — line 1441**: `self.buffer.find(_TOOL_CALL_OPEN, 1)` matcheaba `<tool_call_backup>` → falso restart. Fix: validar `after_char not in ('>', ' ', '\t', '\n', '\r')` antes de hacer restart.
+
+3. **HARDENING — line 1392**: `isalpha()` rechazaba tool names con prefijo `_` (MCP tools). Fix: `isalpha() or == '_'`.
+
+4. **WHITESPACE BUG — line 1377** (`_try_extract_text`): `isalpha()` en `buffer[name_start]` rechazaba `<tool_call>\nBash`. Fix: whitespace-skipping loop antes del check.
+
+5. **WHITESPACE BUG — line 1268** (`_has_plausible_tool_call`): mismo problema en `rest[0].isalpha()`. Fix: `rest.lstrip(' \t\n\r')` antes del check.
+
+6. **DOCUMENTATION — line 433** (`_TOOL_DILUTED_RE`): mismatched tags `<args>...</arguments>` son intencionales — agregar comentario explicativo.
+
+### fire-test-cc Validación (audit-hardening-20260304-195032)
+- **Quality: 0.85/1.0** ✅ PASS (4 py_refs, 0 ts_refs, arch análisis completo, code blocks)
+- **[no-tools] WARNING → FALSE POSITIVE**: GLM citó `<tool_call>` dentro de un code block Python en su análisis de source code. Los 6 regexes correctamente rechazaron este fragmento (no es un tool call real).
+- **GLM respondió sin usar tools**: respondió desde contexto, no invocó herramientas (esperado en sesión con historial largo)
+- **quality-report.txt faltante**: Python heredoc [6/6] falló por razón desconocida pero calidad verificada manualmente = 0.85 PASS
+
+### XmlToolBuffer — regexes confirmados como CORRECTOS (no dead code)
+- `_TOOL_CALL_GREEDY_RE` (line 394): usado en `_parse_tool_xml()` lines 1570-1584 para XML embebido
+- `_TOOL_CALL_ARGKV_LOOSE_RE (?:...|$)`: `$` solo al final de string (sin MULTILINE) — no false positives
+- Catastrophic backtracking: bounded `{0,8000}/{0,2000}` + responses < 10KB → safe
+
+---
+
+## Session 2026-03-05: Passthrough XML + fire-test-cc Validation
+
+### Implementado
+1. **passthrough_xml_tool_extraction()** ([streaming.py](../vendor/claude-code-proxy/llm/streaming.py)) — extrae argkv `<tool_call>` XML del stream SSE de passthrough antes de enviarlo a CC
+2. **extract_xml_tools_from_passthrough_response()** ([converters.py](../vendor/claude-code-proxy/llm/converters.py)) — extrae XML de respuestas non-streaming passthrough
+3. **stream_quality.py**: skip refinement cuando `analysis_phase == "READ"` — evita timeout de 91s en refinamiento intermedio
+4. **fire-test-cc.sh**: fix `NameError: DURATION` (Python f-string vs shell variable)
+
+### fire-test-cc Validación (22 gen-requests, 13 count_tokens)
+- **Calidad real: 1.00/1.0** ✅ (5 py_refs, 0 ts_refs, arquitectura, 6 code blocks con fixes)
+- **Routing correcto**: GLM-4.7 para READ/PLAN (32/35), MiniMax-M2.5 para BUILD/EXECUTE (3/35)
+- **Cost**: $0.073 / 35 requests (22 gen + 13 count_tokens)
+
+### Patrones Observados en GLM-4.7 via Passthrough
+1. **Double-prefix malformation**: `<tool_call>G<tool_call>Glob` (27 chars, buffer flushed as incomplete)
+   - Ocurre en primeras non-streaming requests con contexto corto
+   - Actualmente: handled gracefully (incomplete_tool_call, CC ignora)
+   - PENDIENTE: recovery en XmlToolBuffer (ver plan abajo)
+2. **ConnectTimeout en passthrough streaming**: Z.AI falla 1 de cada 3 streaming requests
+   - Fallback a LiteLLM funciona correctamente (12 tool_use blocks generados)
+3. **Refinement catastrophic failure**: 0.40 → 0.00 score en refinamiento pasado a non-streaming passthrough
+   - Fix: skip refinement cuando `analysis_phase == "READ"`
+4. **SYNTHESIZING nunca se activa**: threshold=20 reads pero CC alterna read/write cada ~6 requests
+   - Consecuencia: deepseek-reasoner (NO_TOOLS) nunca se usa para síntesis
+   - No es crítico porque GLM produce síntesis de calidad igual
+
+### Proxies Count-tokens
+- 13/35 requests son `POST /v1/messages/count_tokens?beta=true` (0 output, 0 cost)
+- CC CLI los envía regularmente — inflan el contador de requests pero no generan costo
+
+---
+
+## Session 2026-03-04: Bug Fixes + Quality Validation
+
+### Bugs Críticos Fixeados
+
+1. **Compression race condition** ([compressor.py:300-306](../vendor/claude-code-proxy/llm/compressor.py))
+   - **Problema**: `timestamp` se calculaba antes del lock y se reusaba después de la llamada LLM (2-5s)
+   - **Fix**: Recalcular `timestamp` dentro del lock justo antes de crear `_CompressionCache`
+
+2. **Streaming resource leak** ([streaming.py:837-846](../vendor/claude-code-proxy/llm/streaming.py))
+   - **Problema**: El generador `response_generator` nunca se cerraba en excepciones
+   - **Fix**: Agregar bloque `finally` con `response_generator.aclose()`
+
+3. **Retry logic incorrecto** ([proxy.py:155](../vendor/claude-code-proxy/proxy/proxy.py))
+   - **Problema**: `attempt < max_retries` permitía un reintento extra que nunca se ejecutaba
+   - **Fix**: Cambiar a `attempt < max_retries - 1`
+
+### Validación
+- **791 tests pasando** (unit tests)
+- **Fire test: 85% quality score** (target: 80%)
+- Intent: READ ✅, Phase: PLAN ✅
+- Cost: $0.006 (target: <$0.50) ✅
+
+---
 
 ---
 

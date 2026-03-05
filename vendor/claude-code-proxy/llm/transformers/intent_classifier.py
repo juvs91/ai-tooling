@@ -103,6 +103,58 @@ def _detect_analysis_from_history(messages: list) -> bool:
     return False
 
 
+def _count_unique_reads(messages: list) -> tuple[int, int]:
+    """Count total read tool calls and unique files read across all assistant messages.
+
+    Returns (total_reads, unique_files_count).
+    Used to detect diminishing returns: if unique/total ratio is low,
+    the agent is re-reading already-seen files → synthesis signal.
+    """
+    total_reads = 0
+    seen_files: set[str] = set()
+    for msg in reversed(messages or []):
+        role = (
+            getattr(msg, "role", None)
+            if not isinstance(msg, dict)
+            else msg.get("role")
+        )
+        if role != "assistant":
+            continue
+        content = (
+            getattr(msg, "content", None)
+            if not isinstance(msg, dict)
+            else msg.get("content")
+        )
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            block_type = (
+                getattr(block, "type", None)
+                if not isinstance(block, dict)
+                else block.get("type")
+            )
+            if block_type != "tool_use":
+                continue
+            name = (
+                getattr(block, "name", None)
+                if not isinstance(block, dict)
+                else block.get("name")
+            )
+            if name not in ("Read", "Grep", "Glob"):
+                continue
+            total_reads += 1
+            inp = (
+                getattr(block, "input", None)
+                if not isinstance(block, dict)
+                else block.get("input")
+            )
+            if isinstance(inp, dict):
+                file_path = inp.get("file_path") or inp.get("path") or inp.get("pattern") or ""
+                if file_path:
+                    seen_files.add(str(file_path))
+    return total_reads, len(seen_files)
+
+
 def _count_consecutive_reads(messages: list) -> int:
     """Count consecutive read-only assistant responses from the end of history.
 
@@ -169,7 +221,7 @@ class IntentClassifierTransformer(Transformer):
         classifier_cfg: ClassifierConfig,
         policy_cfg: PolicyConfig,
         models_differ: bool,
-        synth_reads_fallback: int = 15,
+        synth_reads_fallback: int = 20,
     ) -> None:
         self._cls = classifier_cfg
         self._policy = policy_cfg
@@ -241,7 +293,16 @@ class IntentClassifierTransformer(Transformer):
             pivot_note = " [User pivoting from building to analysis]" if (
                 history_phase == "HAS_WRITES" and _is_explicit_analysis
             ) else ""
-            tool_context += f". ANALYSIS SESSION ACTIVE: {consecutive_reads} consecutive reads{pivot_note}."
+            total_reads, unique_files = _count_unique_reads(messages)
+            repeat_note = ""
+            if total_reads > 0 and unique_files > 0:
+                repeat_rate = 1.0 - (unique_files / total_reads)
+                if repeat_rate > 0.6:
+                    repeat_note = " Last reads cover already-seen files."
+            tool_context += (
+                f". ANALYSIS SESSION: {consecutive_reads} read turns, "
+                f"{unique_files} unique files read.{repeat_note}{pivot_note}"
+            )
 
         # Step 3: Text classification with enriched context (LLM or regex)
         if self._cls.model and self._models_differ:

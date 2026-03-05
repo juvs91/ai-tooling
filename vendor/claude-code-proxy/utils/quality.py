@@ -146,7 +146,9 @@ def score_response(
 
         # H7: Unverified claims — factual statements without tool usage.
         # SKIPPED for context-inclusive analysis: claims are backed by context data.
-        if not context_inclusive:
+        # SKIPPED for SYNTHESIZING intent: model has no tools by design (deepseek-reasoner),
+        # all claims come from the prior READ phase already gathered in context.
+        if not context_inclusive and intent != "SYNTHESIZING":
             factual_claims = _FACTUAL_CLAIM_RE.findall(response_text)
             if len(factual_claims) > 5 and not tool_calls:
                 issues.append("unverified_claims")
@@ -252,4 +254,89 @@ def score_response(
                 score -= 0.2
                 break
 
+    # ── Speculative generation heuristic (H17) ───────────────────────
+
+    # H17: Detect speculative generation - analysis without evidence
+    if is_analysis and response_text.strip():
+        h17_result = _detect_speculative_generation(response_text, tool_calls)
+        if h17_result:
+            issue, penalty = h17_result
+            issues.append(issue)
+            score += penalty
+
     return max(0.0, round(score, 2)), issues
+
+
+def _detect_speculative_generation(response_text: str, tool_calls: list) -> tuple[str, float] | None:
+    """
+    Detect speculative generation - analysis written without evidence of verification.
+
+    This is GENERIC - works for any language/project because it measures
+    EVIDENCE PATTERNS, not specific file extensions.
+
+    Returns (issue_name, penalty) or None.
+    """
+    # 1. Code citations without verification tools
+    code_citation_patterns = [
+        r'\.(py|ts|js|go|rs|java|cpp|c|js|ts):\d+',   # file:line
+        r'(def |class |function |interface )\w+\(',      # code signatures
+        r'line \d+ (shows|has|contains)',                # line references
+    ]
+
+    has_code_citations = any(
+        re.search(pattern, response_text)
+        for pattern in code_citation_patterns
+    )
+
+    has_read_tools = any(
+        tc.get("name") in {"Read", "Grep", "Glob"}
+        for tc in tool_calls
+    )
+
+    # Code cited without tools → speculative
+    if has_code_citations and not has_read_tools:
+        return "code_citations_without_verification", -0.35
+
+    # 2. Long analysis with tools but no evidence phrases
+    if len(response_text) > 1500 and has_read_tools:
+        evidence_phrases = [
+            r"(?:i )?(?:read|found|saw|discovered|noticed|observed)\s+(?:in|that|the)",
+            r"(?:according|based)\s+(?:to|on)",
+            r"(?:file|path|(?:server|client|utils|compressor|streaming)\.py)\s+(?:shows?|has?|contains?)",
+            r"(?:grep|glob|search)\s+(?:found|returned|showed)",
+            r"from\s+[\w.]+\s+(?:we\s+)?(?:can\s+)?see",
+        ]
+
+        has_evidence = any(
+            re.search(pattern, response_text, re.IGNORECASE)
+            for pattern in evidence_phrases
+        )
+
+        if not has_evidence:
+            # Has tool calls but doesn't cite them → decorative
+            return "decorative_tool_calls_no_evidence", -0.30
+
+    # 3. Bug/issue claims without discovery verbs
+    bug_claim_patterns = [
+        r'(?:bug|issue|problem|error|leak|race condition|vulnerability|critical)',
+    ]
+
+    discovery_verbs = [
+        r'(?:discovered|found|noticed|observed|identified|detected)',
+    ]
+
+    has_bug_claims = any(
+        re.search(pattern, response_text, re.IGNORECASE)
+        for pattern in bug_claim_patterns
+    )
+
+    has_discovery_verbs = any(
+        re.search(pattern, response_text, re.IGNORECASE)
+        for pattern in discovery_verbs
+    )
+
+    if has_bug_claims and not has_discovery_verbs and len(response_text) > 500:
+        # Claims bugs but no evidence of how they were found
+        return "unverified_bug_claims", -0.25
+
+    return None

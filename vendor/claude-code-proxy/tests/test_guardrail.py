@@ -107,8 +107,8 @@ class TestGuardrailTransformer:
         req = _request(tools=None)
         ctx = TransformContext(is_analysis=True, analysis_phase="READ")
         await t.transform(req, ctx)
-        assert "[analysis-guard]" in req.system
-        assert "Read EVERY file" in req.system
+        assert "[code-analysis-guard]" in req.system
+        assert "NEVER claim a file/function exists without reading" in req.system
 
     @pytest.mark.asyncio
     async def test_synthesizing_gets_synthesis_prompt(self):
@@ -118,8 +118,8 @@ class TestGuardrailTransformer:
         ctx = TransformContext(is_analysis=True, analysis_phase="SYNTHESIZING")
         await t.transform(req, ctx)
         assert "[synthesis-guard]" in req.system
-        assert "[analysis-guard]" not in req.system
-        assert "do NOT make tool calls" in req.system
+        assert "[code-analysis-guard]" not in req.system
+        assert "NO TOOL CALLS" in req.system
 
     @pytest.mark.asyncio
     async def test_synthesizing_strips_tools(self):
@@ -135,14 +135,14 @@ class TestGuardrailTransformer:
 
     @pytest.mark.asyncio
     async def test_analysis_reasoning_prompt_with_tools(self):
-        """Both tool-guard and analysis-guard injected when tools present."""
+        """Both tool-guard and code-analysis-guard injected when tools present."""
         tools = [{"name": "Read"}, {"name": "Grep"}]
         t = GuardrailTransformer("GUARD")
         req = _request(tools=tools)
         ctx = TransformContext(is_analysis=True, analysis_phase="READ")
         await t.transform(req, ctx)
         assert "[tool-guard]" in req.system
-        assert "[analysis-guard]" in req.system
+        assert "[code-analysis-guard]" in req.system
 
     @pytest.mark.asyncio
     async def test_no_reasoning_prompt_when_not_analysis(self):
@@ -151,13 +151,13 @@ class TestGuardrailTransformer:
         req = _request(tools=None)
         ctx = TransformContext(is_analysis=False)
         await t.transform(req, ctx)
-        assert "[analysis-guard]" not in (req.system or "")
+        assert "[code-analysis-guard]" not in (req.system or "")
 
     def test_reasoning_prompt_content(self):
         """Reasoning prompt contains key quality instructions."""
-        assert "never infer from filename" in _ANALYSIS_REASONING_PROMPT
-        assert "never fabricate" in _ANALYSIS_REASONING_PROMPT
-        assert "concrete numbers" in _ANALYSIS_REASONING_PROMPT
+        assert "NEVER claim" in _ANALYSIS_REASONING_PROMPT
+        assert "reading" in _ANALYSIS_REASONING_PROMPT
+        assert "file:line" in _ANALYSIS_REASONING_PROMPT
 
     def test_name(self):
         assert GuardrailTransformer("x").name == "guardrail"

@@ -81,7 +81,7 @@ trap 'rm -f "$TMP_OVERRIDE"' EXIT
 # - adds global .env
 # - optionally forces profile env_file (PROFILE_ENV)
 # - mounts server.py
-# - enables reload
+# - command is NOT set (respects docker-compose.yml and override files)
 {
   echo "services:"
   echo "  proxy_cloud:"
@@ -103,10 +103,8 @@ trap 'rm -f "$TMP_OVERRIDE"' EXIT
   # Optional: also mount entire vendor folder if you prefer (uncomment)
   # echo "      - ./vendor/claude-code-proxy:/claude-code-proxy"
 
-  # Hot reload
-  if [[ "$ENABLE_RELOAD" == "1" ]]; then
-    echo "    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py' --reload-exclude '.venv'"
-  fi
+  # Note: command is NOT set here — let the override files define it
+  # (docker-compose.yml or provider-specific override)
 
   # Optional: override port mapping (handy if you run multiple)
   echo "    ports:"
@@ -121,7 +119,6 @@ else
   echo "Profile env: (from $OVERRIDE)"
 fi
 echo "Mount: $HOST_SERVER -> $CONTAINER_SERVER"
-echo "Reload: $ENABLE_RELOAD"
 echo "Port: $BIND_PORT -> 8082"
 
 docker compose -f docker-compose.yml -f "$OVERRIDE" -f "$TMP_OVERRIDE" up -d --force-recreate proxy_cloud

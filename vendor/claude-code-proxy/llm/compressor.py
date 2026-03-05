@@ -297,11 +297,14 @@ async def compress_messages_if_needed(
     if result:
         summary, model_used = result
         # Store in cache for next request
+        # Recalculate timestamp inside lock to avoid race condition where
+        # 'now' (from line 257) becomes stale after the long LLM call (2-5s)
         async with _state_lock:
+            cache_timestamp = time.monotonic()
             _compression_cache = _CompressionCache(
                 summary=summary,
                 old_msg_count=len(old_messages),
-                timestamp=now,
+                timestamp=cache_timestamp,
                 prefix_hash=prefix_hash,
             )
         compressed = _reassemble_with_summary(system_msg, summary, recent_messages)

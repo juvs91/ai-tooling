@@ -9,6 +9,7 @@ from llm.transformers.model_router import ModelRouterTransformer
 from llm.transformers.compression import CompressionTransformer
 from llm.transformers.provider_quirks import ProviderQuirksTransformer
 from llm.transformers.credential import CredentialTransformer
+from llm.transformers.intent_enforcement import IntentEnforcementTransformer
 
 __all__ = [
     "Pipeline",
@@ -22,4 +23,5 @@ __all__ = [
     "CompressionTransformer",
     "ProviderQuirksTransformer",
     "CredentialTransformer",
+    "IntentEnforcementTransformer",
 ]
