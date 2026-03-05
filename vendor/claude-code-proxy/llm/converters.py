@@ -408,17 +408,41 @@ def _convert_message_blocks(msg: Any) -> List[Dict[str, Any]]:
     """
     Convert a single Anthropic message to one or more OpenAI-format messages.
     A single Anthropic user message with tool_results may expand to multiple messages.
-    """
-    if isinstance(msg.content, str):
-        content_text = msg.content if msg.content.strip() else "..."
-        return [{"role": msg.role, "content": content_text}]
 
-    if msg.role == "assistant":
-        return _convert_assistant_blocks(msg.content)
-    elif msg.role == "user":
-        return _convert_user_blocks(msg.content)
+    Handles both object format (Anthropic SDK) and dict format (JSON parsed).
+    """
+    # Handle dict format (from JSON parsing / tool_prompting)
+    if isinstance(msg, dict):
+        role = msg.get("role", "user")
+        content = msg.get("content", "...")
+
+        if isinstance(content, str):
+            content_text = content if content.strip() else "..."
+            return [{"role": role, "content": content_text}]
+
+        # Handle content blocks in dict format
+        if isinstance(content, list):
+            return [{"role": role, "content": _content_blocks_to_text(content)}]
+
+        return [{"role": role, "content": str(content)}]
+
+    # Handle object format (Anthropic SDK / pydantic models)
+    if not hasattr(msg, "role"):
+        return [{"role": "user", "content": "..."}]
+
+    role = msg.role
+    content = getattr(msg, "content", "...")
+
+    if isinstance(content, str):
+        content_text = content if content.strip() else "..."
+        return [{"role": role, "content": content_text}]
+
+    if role == "assistant":
+        return _convert_assistant_blocks(content)
+    elif role == "user":
+        return _convert_user_blocks(content)
     else:
-        return [{"role": msg.role, "content": _content_blocks_to_text(msg.content)}]
+        return [{"role": role, "content": _content_blocks_to_text(content)}]
 
 
 def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_context_window: int = 0, max_output_tokens: int = 8192, reasoning_max_tokens: int = 0) -> Dict[str, Any]:
@@ -590,6 +614,7 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
                     )
                     print(f"[converters] WARNING: Hallucinated tool name '{name}' "
                           f"(valid: {sorted(list(valid_names)[:5])}...)")
+                    continue
 
             if isinstance(arguments, str):
                 try:
@@ -702,7 +727,6 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
     if not content:
         content.append({"type": "text", "text": ""})
 
-    
     return MessagesResponse(
         id=response_id,
         model=getattr(original_request, "original_model", None) or original_request.model,
@@ -715,3 +739,61 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
             output_tokens=scale_tokens(completion_tokens, model_context_window),
         ),
     )
+
+
+# ── Passthrough non-streaming XML tool extraction ────────────────────
+
+def extract_xml_tools_from_passthrough_response(response: dict, request: Any) -> dict:
+    """Extract <tool_call> XML from passthrough non-streaming Anthropic-format response.
+
+    The passthrough client (PassthroughClient.create_message) returns an Anthropic-
+    format dict directly. When GLM-4.7 embeds tool calls as XML text in the content
+    blocks, this function extracts them into proper tool_use blocks — mirroring what
+    convert_litellm_to_anthropic() already does for the LiteLLM non-streaming path.
+
+    Returns the original dict unchanged if no XML tool calls are found.
+    """
+    content = response.get("content")
+    if not content:
+        return response
+
+    request_tools = getattr(request, "tools", None)
+    if not request_tools:
+        return response
+
+    valid_names = _build_valid_tool_names(request_tools)
+    new_content: list = []
+    extracted_any = False
+
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            new_content.append(block)
+            continue
+        text = block.get("text", "")
+        if "<tool_call" not in text:
+            new_content.append(block)
+            continue
+
+        tool_blocks, clean_text = extract_tool_calls_from_text(
+            text, valid_tool_names=valid_names, tools=request_tools
+        )
+        if tool_blocks:
+            extracted_any = True
+            clean_text = clean_text.strip()
+            if clean_text:
+                new_content.append({"type": "text", "text": clean_text})
+            new_content.extend(tool_blocks)
+        else:
+            new_content.append(block)
+
+    if not extracted_any:
+        return response
+
+    result = dict(response)
+    result["content"] = new_content
+    result["stop_reason"] = "tool_use"
+    print(
+        f"[passthrough-xml] non-stream: extracted {sum(1 for b in new_content if isinstance(b, dict) and b.get('type') == 'tool_use')} tool(s) from text content",
+        flush=True,
+    )
+    return result
