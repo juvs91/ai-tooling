@@ -130,10 +130,11 @@ class TestQualityEvaluation:
         text = (
             "## Detailed Analysis (verified via Read tool)\n\n"
             "### proxy.py — 217 lines, 6 functions\n"
+            "I identified the following functions after reading proxy.py:\n"
             "1. `build_request_pipeline(cfg, models_differ)` — line 35\n"
             "2. `build_litellm_pipeline(cfg)` — line 46\n"
             "3. `_call_provider(request_obj, litellm_request)` — line 57\n"
-            "4. `_is_retryable_error(error)` — line 90\n"
+            "4. `_is_retryable_check(exc)` — line 90\n"
             "5. `_call_provider_with_retry(...)` — line 107\n"
             "6. `run_messages(*, request_obj, cfg, ctx)` — line 142\n\n"
             "The pipeline executes 8 transformers in 2 phases.\n"

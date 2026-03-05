@@ -35,10 +35,10 @@ from litellm.exceptions import (
 )
 from utils.utils import cached_token_count, store_token_count, scale_tokens
 from proxy.proxy import build_request_pipeline, run_messages
-from llm.converters import convert_litellm_to_anthropic
+from llm.converters import convert_litellm_to_anthropic, extract_xml_tools_from_passthrough_response
 from llm.pipeline import TransformContext
 from llm.schemas import MessagesRequest, TokenCountRequest, TokenCountResponse
-from llm.streaming import handle_streaming
+from llm.streaming import handle_streaming, passthrough_xml_tool_extraction
 from router.model_mapper import map_claude_alias_to_target
 from utils.metrics import metrics, RequestLog
 from llm.stream_quality import (
@@ -239,8 +239,13 @@ async def create_message(request: MessagesRequest, raw_request: Request):
         if provider_used == "passthrough":
             est_input_tokens = max(1, len(body) // 6)
             if is_stream:
-                # SSE relay — wrap in _tracked_stream for metrics
-                stream_gen = tracked_stream(out, request, ctx, cfg)
+                # SSE relay — extract GLM argkv tools, then quality loop, then tracked_stream
+                stream_gen = out
+                if getattr(request, "tools", None):
+                    stream_gen = passthrough_xml_tool_extraction(stream_gen, request)
+                if ctx.is_analysis and cfg.analysis.max_refinements > 0:
+                    stream_gen = analysis_quality_stream(stream_gen, request, ctx, cfg)
+                stream_gen = tracked_stream(stream_gen, request, ctx, cfg)
                 metrics.record(RequestLog(
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     intent=ctx.intent,
@@ -258,6 +263,9 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 return StreamingResponse(stream_gen, media_type="text/event-stream")
             else:
                 # Non-streaming: out is already an Anthropic response dict
+                # Extract GLM argkv tool calls from text content (mirrors LiteLLM non-stream path)
+                if getattr(request, "tools", None):
+                    out = extract_xml_tools_from_passthrough_response(out, request)
                 metrics.record(RequestLog(
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     intent=ctx.intent,

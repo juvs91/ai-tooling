@@ -133,6 +133,18 @@ async def analysis_quality_stream(
             yield chunk
         return
 
+    # 3.5. Skip refinement during READ phase (model is still gathering data).
+    # Refining intermediate read responses wastes time and often produces worse
+    # results (passthrough non-streaming times out at large contexts). Only refine
+    # during SYNTHESIZING phase when the model is writing the final analysis.
+    if ctx.analysis_phase == "READ":
+        logger.info(
+            "[stream-refinement] SKIP: analysis_phase=READ — intermediate response, no refinement",
+        )
+        for chunk in chunks:
+            yield chunk
+        return
+
     # 4. Quality insufficient — refine via non-streaming re-requests
     # Lazy import to avoid circular dependency (llm → proxy)
     from proxy.proxy import run_messages
@@ -150,12 +162,59 @@ async def analysis_quality_stream(
         # Send pings to keep connection alive during re-request
         yield sse_ping()
 
-        feedback = (
-            f"[quality-feedback] Your previous analysis scored {score:.0%}. "
-            f"Issues: {', '.join(issues)}. "
-            "Re-analyze with more depth. Read files you mentioned but didn't verify. "
-            "Provide function signatures, line counts, and concrete evidence."
-        )
+        # Build issue-specific feedback for better refinement
+        issue_specific_feedback = []
+        for issue in issues:
+            if "factual_verification" in issue:
+                # Skip - will be handled separately below
+                continue
+            if "specificity" in issue:
+                issue_specific_feedback.append("- Add (file:line) citations to EVERY claim")
+            elif "unverified" in issue or "shallow" in issue:
+                issue_specific_feedback.append("- Read the files you mentioned before claiming")
+            elif "generic" in issue:
+                issue_specific_feedback.append("- Replace 'handles/manages' with actual code behavior")
+            elif "exploration" in issue:
+                issue_specific_feedback.append("- Use Glob/Grep to find related patterns")
+            elif "concrete" in issue:
+                issue_specific_feedback.append("- Provide line counts, function names, numbers")
+
+        # Add factual verification feedback if speculative generation detected
+        verification_feedback = []
+        if "code_citations_without_verification" in issues:
+            # Extract target path from request if available
+            target_path = getattr(request, "target_path", "vendor/")
+            verification_feedback = await _build_verification_feedback(text, target_path)
+
+        feedback_parts = [
+            f"[quality-refinement] Score: {score:.0%} | Threshold: {quality_threshold:.0%}",
+            f"Issues: {', '.join(issues)}",
+        ]
+        if verification_feedback:
+            feedback_parts.append("\n🔍 FILE VERIFICATION:\n" + "\n".join(verification_feedback))
+        if issue_specific_feedback:
+            feedback_parts.append("\nMANDATORY FIXES:\n" + "\n".join(issue_specific_feedback))
+        feedback_parts.append("\nRe-read the codebase. Cite SPECIFIC locations. Prove your claims.")
+
+        # Model-specific addendum to reinforce known failure patterns
+        model_name = (getattr(request, "model", "") or "").lower()
+        if "glm" in model_name:
+            feedback_parts.append(
+                "\nNOTE: This is a Python project. "
+                "All files use .py extension. Do not reference .ts/.js files."
+            )
+        elif "deepseek-reasoner" in model_name or "r1" in model_name:
+            feedback_parts.append(
+                "\nNOTE: You cannot call tools. "
+                "Synthesize exclusively from evidence already gathered in this conversation."
+            )
+        elif "minimax" in model_name:
+            feedback_parts.append(
+                "\nNOTE: Execute the changes directly with Edit/Write tools. "
+                "Do not describe what you will do — just do it."
+            )
+
+        feedback = "\n".join(feedback_parts)
 
         if not hasattr(request, "messages") or request.messages is None:
             break
@@ -177,10 +236,10 @@ async def analysis_quality_stream(
 
             new_score, new_issues = score_anthropic_response(anthropic_response, ctx.intent, is_analysis=True)
 
-            # Safety: if refinement makes things WORSE, keep the original
-            if new_score < original_score:
+            # Safety: if refinement is significantly WORSE (>10% drop), keep the original
+            if new_score < original_score - 0.10:
                 logger.warning(
-                    "[stream-refinement] attempt=%d WORSE: %.2f < original %.2f — keeping original",
+                    "[stream-refinement] attempt=%d SIGNIFICANTLY WORSE: %.2f < original %.2f - 0.10 — keeping original",
                     attempt, new_score, original_score,
                 )
                 for chunk in chunks:
@@ -356,3 +415,111 @@ async def tracked_stream(
             "[stream-quality] score=%.2f issues=%s model=%s intent=%s input_tokens=%d",
             q_score, q_issues, request.model, ctx.intent, input_tokens,
         )
+
+
+# ── Factual Verification Feedback ─────────────────────────────────
+
+async def _build_verification_feedback(
+    response_text: str,
+    target_path: str,
+) -> list[str]:
+    """
+    Build verification feedback by checking mentioned files against reality.
+
+    Extracts file:line references from the response, checks if they exist,
+    and provides specific feedback with alternatives if wrong.
+
+    Args:
+        response_text: The model's analysis text
+        target_path: Base path to search (e.g., "vendor/claude-code-proxy/")
+
+    Returns:
+        List of feedback strings to add to the refinement prompt.
+    """
+    import os
+    import re
+
+    feedback = []
+
+    # 1. Extract file:line references (handle multiple formats, generic)
+    # Matches: server.py:123, server.ts:45, README.md:78, /path/to/file.anything:123
+    file_ref_pattern = r'[\w/.-]+\.\w+:\d+'
+    mentioned_refs = re.findall(file_ref_pattern, response_text)
+
+    if not mentioned_refs:
+        return feedback
+
+    # 2. For each mentioned file, verify existence
+    checked_paths = set()
+    for file_ref in mentioned_refs[:5]:  # Limit to 5 checks to avoid spam
+        # Extract just the file path without line number
+        file_path = file_ref.rsplit(':', 1)[0]
+
+        # Skip if already checked this path
+        if file_path in checked_paths:
+            continue
+        checked_paths.add(file_path)
+
+        # Check if path is absolute or relative
+        if os.path.isabs(file_path):
+            full_path = file_path
+        else:
+            # Try relative to target_path
+            full_path = os.path.join(target_path, file_path)
+
+        exists = os.path.exists(full_path)
+
+        if not exists:
+            # 3. File doesn't exist - search for alternatives (completely generic)
+            # Extract base filename without extension
+            base_name = os.path.basename(file_path)
+            name_without_ext = os.path.splitext(base_name)[0]
+
+            # Search for similar files in target_path (exact + fuzzy match, ANY extension)
+            alternatives = []
+            try:
+                from difflib import SequenceMatcher
+
+                candidates = []
+                for root, dirs, files in os.walk(target_path):
+                    for f in files:
+                        f_name_without_ext = os.path.splitext(f)[0]
+                        rel_path = os.path.relpath(os.path.join(root, f), target_path)
+
+                        # Exact name match (any extension) - highest priority
+                        if f_name_without_ext == name_without_ext:
+                            alternatives.insert(0, rel_path)  # Insert at beginning
+                        else:
+                            # Fuzzy match for typos (e.g., serber vs server, any extension)
+                            similarity = SequenceMatcher(None, name_without_ext.lower(),
+                                                       f_name_without_ext.lower()).ratio()
+                            if similarity >= 0.7:  # 70% similarity threshold
+                                candidates.append((similarity, rel_path))
+
+                    if len(alternatives) >= 3:
+                        break
+
+                # If no exact matches, add fuzzy matches (sorted by similarity)
+                if not alternatives and candidates:
+                    candidates.sort(key=lambda x: x[0], reverse=True)
+                    alternatives = [path for _, path in candidates[:3]]
+
+            except Exception as e:
+                logger.warning(f"[verification] Error searching for alternatives: {e}")
+
+            # 4. Build specific feedback
+            if alternatives:
+                # Found alternatives - suggest them
+                top_alternatives = alternatives[:3]
+                feedback.append(
+                    f"❌ '{file_path}' no existe. "
+                    f"✅ Encontré: {', '.join(top_alternatives)}"
+                )
+            else:
+                # No alternatives found - guide to discover structure
+                feedback.append(
+                    f"❌ '{file_path}' no existe. "
+                    f"ℹ️ Usa Glob primero para descubrir la estructura real del proyecto."
+                )
+
+    return feedback

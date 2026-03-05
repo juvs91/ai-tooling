@@ -114,6 +114,13 @@ _CLASSIFY_PROMPT = (
     "CATEGORIES:\n"
     "- READ: User requests to read/explain code WITHOUT making changes. Goal is to understand and report. "
     "This is the Gather phase. Example: 'analiza el código', 'lee todos los archivos'.\n"
+    "- SYNTHESIZING: The agent has gathered sufficient evidence and is ready to write the final analysis "
+    "report. Choose this based on EVIDENCE QUALITY, not turn count: "
+    "(a) the context shows recent reads are repeating already-seen files (diminishing returns), OR "
+    "(b) the user explicitly requests 'write/synthesize/report the analysis now', OR "
+    "(c) the context shows the scope of the task is covered (key files have been read). "
+    "Do NOT choose SYNTHESIZING just because many reads happened — if new files are still being "
+    "discovered, continue with READ.\n"
     "- PLAN: User requests to design/plan BEFORE implementing. Deep reasoning. "
     "Goal is to create a strategy. Example: 'crea un plan', 'diseña la solución'.\n"
     "- BUILD: User requests to write/fix/change code. Goal is to implement or fix something. "
@@ -127,25 +134,31 @@ _CLASSIFY_PROMPT = (
     "3. 'lee/analiza + para crear un plan/estrategia' → PLAN\n"
     "4. test/pytest/verify/valida + código existente → VERIFY\n"
     "5. HAS_WRITES + tool_result/continue → BUILD\n"
-    "6. Question without code context → CHAT\n\n"
+    "6. Question without code context → CHAT\n"
+    "7. Context shows last reads cover already-seen files AND task scope is covered → SYNTHESIZING\n"
+    "8. 'escribe el análisis/informe/reporte' OR 'now synthesize' → SYNTHESIZING\n\n"
     "EXAMPLES:\n"
-    # READ examples (balanced)
+    # READ examples
     "- 'lee todos los archivos y explícalos' → READ\n"
     "- 'read and explain the codebase' → READ\n"
     "- 'analiza el proxy' → READ\n"
     "- 'revisa el código' → READ\n"
-    # PLAN examples (increased)
+    # SYNTHESIZING examples
+    "- 'ya tienes suficiente, escribe el análisis' → SYNTHESIZING\n"
+    "- 'now write the final report' → SYNTHESIZING\n"
+    "- tool_result after context shows 'Last reads cover already-seen files' → SYNTHESIZING\n"
+    # PLAN examples
     "- 'How should we design the new API?' → PLAN\n"
     "- 'Crea un plan de implementación' → PLAN\n"
     "- 'diseña la solución para este problema' → PLAN\n"
     "- 'créame un roadmap' → PLAN\n"
-    # BUILD examples (increased)
+    # BUILD examples
     "- 'Fix the authentication bug' → BUILD\n"
     "- 'Arregla el error de login' → BUILD\n"
     "- 'Read server.py and fix the bug' → BUILD\n"
     "- 'lee los archivos para corregir el bug' → BUILD\n"
     "- 'implementa la nueva funcionalidad' → BUILD\n"
-    # VERIFY examples (new)
+    # VERIFY examples
     "- 'corre los tests' → VERIFY\n"
     "- 'valida los cambios' → VERIFY\n"
     "- 'run the test suite' → VERIFY\n"

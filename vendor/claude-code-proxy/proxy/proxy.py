@@ -32,6 +32,7 @@ from llm.transformers import (
     CompressionTransformer,
     ProviderQuirksTransformer,
     CredentialTransformer,
+    IntentEnforcementTransformer,
 )
 
 from config import ProxyConfig
@@ -46,6 +47,7 @@ def build_request_pipeline(cfg: ProxyConfig, models_differ: bool) -> Pipeline:
             cfg.classifier, cfg.policy, models_differ,
             synth_reads_fallback=cfg.analysis.synthesize_reads_fallback,
         ),
+        IntentEnforcementTransformer(enabled=True),  # Validate intent compliance
         GuardrailTransformer(cfg.policy.guard_system),
         TokenCapTransformer(cfg.policy, cfg.credentials.openai_base_url),
         ToolAllowlistTransformer(cfg.policy),
@@ -147,6 +149,9 @@ async def _call_provider_with_retry(
             return result
         except Exception as e:
             last_exception = e
+            # Fix: was < max_retries, changed to < max_retries - 1 for correct retry count
+            # With max_retries=5, range(5) gives attempts 0,1,2,3,4
+            # We want to retry on attempts 0,1,2,3 but NOT on 4 (last attempt)
             if attempt < max_retries - 1 and _is_retryable_error(e):
                 delay = base_delay * (2 ** attempt)
                 print(f"[retry] Attempt {attempt + 1}/{max_retries} failed, retry in {delay}s: {type(e).__name__}: {str(e)[:200]}")
@@ -155,6 +160,8 @@ async def _call_provider_with_retry(
             else:
                 if not _is_retryable_error(e):
                     print(f"[retry] Non-retryable error on attempt {attempt + 1}: {type(e).__name__}: {str(e)[:200]}")
+                else:
+                    print(f"[retry] Max retries ({max_retries}) exceeded, giving up")
                 raise
 
     raise last_exception

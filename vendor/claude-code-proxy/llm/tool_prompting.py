@@ -409,8 +409,17 @@ _TOOL_CALL_BARE_RE = re.compile(
 
 
 # GLM format: <tool_call>ToolName<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>
+# \s* before name: handles newline/space between <tool_call> and name (GLM streaming artifact)
+# [\w.-]+: allows dotted/dashed names (e.g. computer.bash, mcp-tool)
 _TOOL_CALL_ARGKV_RE = re.compile(
-    r'<tool_call>([\w]+)((?:\s*<arg_key>[\s\S]*?</arg_key>\s*<arg_value>[\s\S]*?</arg_value>)+)\s*</tool_call>',
+    r'<tool_call>\s*([\w.-]+)((?:\s*<arg_key>[\s\S]*?</arg_key>\s*<arg_value>[\s\S]*?</arg_value>)+)\s*</tool_call>',
+    re.DOTALL,
+)
+# Tolerant variant: accepts missing/truncated </tool_call> closing tag.
+# Used as last-resort recovery in flush() and extract_tool_calls_from_text().
+# Only extracts pairs where BOTH </arg_key> and </arg_value> are present and complete.
+_TOOL_CALL_ARGKV_LOOSE_RE = re.compile(
+    r'<tool_call>\s*([\w.-]+)((?:\s*<arg_key>[\s\S]*?</arg_key>\s*<arg_value>[\s\S]*?</arg_value>)+)\s*(?:</tool_call>|$)',
     re.DOTALL,
 )
 _ARG_KV_PAIR_RE = re.compile(
@@ -421,6 +430,9 @@ _ARG_KV_PAIR_RE = re.compile(
 # 5th fallback: diluted XML format after prompt dilution — models invent their own tags
 # Handles: <tool_name>Read</tool_name><args>{"file_path": "..."}</args>
 # or:      <tool_name>Read</tool_name><arguments>{"file_path": "..."}</arguments>
+# NOTE: Opening and closing tag alternations are NOT backreferenced, so
+# <args>content</arguments> intentionally matches — content extraction is the
+# priority for models using this fallback format (any valid tag pair is accepted).
 _TOOL_DILUTED_RE = re.compile(
     r'<tool_name>([\w]+)</tool_name>\s*<(?:args|arguments|params|input)>([\s\S]*?)</(?:args|arguments|params|input)>',
     re.DOTALL,
@@ -754,7 +766,24 @@ def extract_tool_calls_from_text(text: str, valid_tool_names: set[str] | None = 
             if tool_blocks:
                 used_re = _TOOL_CALL_ARGKV_RE
 
-        # 5th fallback: diluted XML format (models invent <tool_name>/<args> after prompt dilution)
+        # 5th fallback: loose argkv — argkv format with missing/truncated </tool_call>.
+        # Handles non-streaming responses that were cut off before the closing tag.
+        # Only matches pairs where </arg_value> is present and complete.
+        if not tool_blocks and "<tool_call>" in text:
+            for match in _TOOL_CALL_ARGKV_LOOSE_RE.finditer(text):
+                parsed = _parse_argkv_tool(match)
+                name = _normalize_tool_name(parsed["name"])
+                print(f"[no-tools] ARGKV-LOOSE match for tool '{name}' keys={list(parsed['input'].keys())} (no closing tag)")
+                tool_blocks.append({
+                    "type": "tool_use",
+                    "id": make_tool_id(),
+                    "name": name,
+                    "input": parsed["input"],
+                })
+            if tool_blocks:
+                used_re = _TOOL_CALL_ARGKV_LOOSE_RE
+
+        # 6th fallback: diluted XML format (models invent <tool_name>/<args> after prompt dilution)
         if not tool_blocks and "<tool_name>" in text:
             for match in _TOOL_DILUTED_RE.finditer(text):
                 name = _normalize_tool_name(match.group(1).strip())
@@ -1125,7 +1154,11 @@ async def recover_incomplete_tool_call(
             timeout=timeout_s,
         )
         content = response.choices[0].message.content or ""
-        tool_blocks, _ = extract_tool_calls_from_text(content)
+        # Pass valid_tool_names so hallucinated tool names are filtered (same as all other call sites)
+        _recovery_valid_names = _build_valid_tool_names(tools)
+        tool_blocks, _ = extract_tool_calls_from_text(
+            content, valid_tool_names=_recovery_valid_names, tools=tools
+        )
         if tool_blocks:
             print(f"[no-tools] Recovered {len(tool_blocks)} tool call(s) via LLM retry")
             return tool_blocks
@@ -1154,6 +1187,10 @@ def strip_tool_call_xml(text: str) -> str:
     cleaned = _TOOL_CALL_FALLBACK_RE.sub("", cleaned)
     cleaned = _TOOL_CALL_BARE_RE.sub("", cleaned)
     cleaned = _TOOL_CALL_ARGKV_RE.sub("", cleaned)
+    # Remove argkv tool calls with missing/truncated </tool_call> closing tag.
+    # _TOOL_CALL_ARGKV_LOOSE_RE uses (?:</tool_call>|$) so it only strips when the
+    # arg pairs are complete — prevents false positives on partial content.
+    cleaned = _TOOL_CALL_ARGKV_LOOSE_RE.sub("", cleaned)
     # Remove incomplete <tool_call...> fragments (no closing tag)
     # Bounded match (8000/2000 chars) prevents destroying all content after a false positive
     cleaned = re.sub(r'<tool_call\s+[^>]*>(?:(?!</tool_call>)[\s\S]){0,8000}$', '', cleaned)
@@ -1234,31 +1271,59 @@ class XmlToolBuffer:
         if first in (' ', '\t', '\n', '\r'):
             return True
         # GLM format: <tool_call>ToolName...
+        # Also handles <tool_call>\nToolName\n<arg_key>... (whitespace before name)
         if first == '>':
             rest = after[1:]
-            if rest and rest[0].isalpha():
+            # Skip optional whitespace before tool name
+            stripped = rest.lstrip(' \t\n\r')
+            if stripped and stripped[0].isalpha():
                 return True
-            return False  # <tool_call>` or <tool_call>\n — not a tool
+            return False  # <tool_call>` or completely non-alpha after > — not a tool
         return False  # <tool_call(, <tool_call? — not a tool
 
     def flush(self) -> list[dict]:
         """Flush remaining buffer at stream end.
 
         Returns: "text", "tool_call", or "incomplete_tool_call" segments.
+
+        Recovery order:
+          1. Try _TOOL_CALL_ARGKV_LOOSE_RE — extracts argkv tool even without </tool_call>.
+             Only activates when ALL present arg pairs have complete </arg_key>/</arg_value> tags.
+          2. Warn + return incomplete_tool_call (existing behaviour).
         """
         if not self.buffer:
             return []
         if "<tool_call" in self.buffer and self._has_plausible_tool_call():
-            print(f"[no-tools] WARNING: flushing incomplete tool call "
-                  f"({len(self.buffer)} chars). First 300: {self.buffer[:300]}")
-            segments = []
+            segments: list[dict] = []
             idx = self.buffer.find("<tool_call")
             if idx > 0:
                 prefix = self.buffer[:idx].strip()
                 if prefix:
                     segments.append({"type": "text", "text": prefix})
-            incomplete = self.buffer[idx:] if idx >= 0 else self.buffer
-            segments.append({"type": "incomplete_tool_call", "text": incomplete})
+            tool_part = self.buffer[idx:] if idx >= 0 else self.buffer
+
+            # --- Recovery: loose argkv (handles truncated stream without </tool_call>) ---
+            loose_match = _TOOL_CALL_ARGKV_LOOSE_RE.search(tool_part)
+            if loose_match:
+                parsed = _parse_argkv_tool(loose_match)
+                name = parsed["name"]
+                valid = (not self.valid_tool_names) or validate_tool_name(name, self.valid_tool_names)
+                if valid:
+                    print(
+                        f"[xml-buffer] flush: recovered truncated argkv tool '{name}' "
+                        f"keys={list(parsed['input'].keys())} (no </tool_call>)",
+                        flush=True,
+                    )
+                    self.buffer = ""
+                    self.in_tool = False
+                    segments.append({"type": "tool_call", "name": name, "input": parsed["input"]})
+                    return segments
+                print(f"[xml-buffer] flush: loose argkv hallucinated tool '{name}' — emitting as text")
+            # ------------------------------------------------------------------
+
+            print(f"[no-tools] WARNING: flushing incomplete tool call "
+                  f"({len(tool_part)} chars). First 300: {tool_part[:300]}")
+            segments.append({"type": "incomplete_tool_call", "text": tool_part})
             self.buffer = ""
             self.in_tool = False
             return segments
@@ -1319,8 +1384,23 @@ class XmlToolBuffer:
                         self.buffer = self.buffer[idx:]
                         return {"type": "text", "text": text}
                     return None
-                if not self.buffer[name_start].isalpha():
-                    # Not a valid tool name start — skip this occurrence
+                # Skip optional leading whitespace before tool name.
+                # GLM sometimes emits <tool_call>\nToolName\n<arg_key>...
+                actual_name_start = name_start
+                while actual_name_start < len(self.buffer) and self.buffer[actual_name_start] in ' \t\n\r':
+                    actual_name_start += 1
+                if actual_name_start >= len(self.buffer):
+                    # All whitespace so far — need more data to determine if valid
+                    if idx > 0:
+                        text = self.buffer[:idx]
+                        self.buffer = self.buffer[idx:]
+                        return {"type": "text", "text": text}
+                    return None
+                if not (self.buffer[actual_name_start].isalpha() or
+                        self.buffer[actual_name_start] == '_'):
+                    # Not a valid tool name start — skip this occurrence.
+                    # Digits rejected intentionally: <tool_call>123 is almost certainly docs.
+                    # Underscore allowed: MCP tools like _internal_tool are valid.
                     search_start = name_start
                     continue
             elif next_char not in (' ', '\t', '\n', '\r'):
@@ -1364,6 +1444,38 @@ class XmlToolBuffer:
                     self.buffer = ""
                     self.in_tool = False
                     return {"type": "text", "text": text}
+                # Double-prefix restart recovery (GLM malformation).
+                # Pattern: <tool_call>X<tool_call>RealName<arg_key>...
+                # GLM sometimes streams a partial/incorrect name then restarts.
+                # Condition: another <tool_call opens BEFORE any arg/input tags → discard prefix.
+                nested_tc_idx = self.buffer.find(_TOOL_CALL_OPEN, 1)
+                if nested_tc_idx > 0:
+                    # Validate it's a real <tool_call> tag, not a longer variant like
+                    # <tool_call_backup> or <tool_call_v2>. The char immediately after
+                    # "<tool_call" must be '>' (GLM format) or whitespace (name= format).
+                    after_tag_pos = nested_tc_idx + len(_TOOL_CALL_OPEN)
+                    if after_tag_pos < len(self.buffer):
+                        after_char = self.buffer[after_tag_pos]
+                        if after_char not in ('>', ' ', '\t', '\n', '\r'):
+                            # Longer tag name — not a real restart signal
+                            return None
+                    prefix = self.buffer[:nested_tc_idx]
+                    has_args = (
+                        "<arg_key>" in prefix
+                        or "<arg_value>" in prefix
+                        or "<input>" in prefix
+                        or "<arguments>" in prefix
+                        or "<params>" in prefix
+                    )
+                    if not has_args:
+                        print(
+                            f"[xml-buffer] double-prefix restart: discarding {len(prefix)} chars "
+                            f"({prefix!r}), restarting from nested <tool_call>",
+                            flush=True,
+                        )
+                        self.buffer = self.buffer[nested_tc_idx:]
+                        search_start = 0
+                        continue  # re-search from the nested <tool_call
                 return None  # Need more data
 
             candidate_end = end_idx + len(end_tag)
