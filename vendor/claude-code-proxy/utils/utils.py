@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from threading import Lock
 from typing import Any, Optional, Set, Tuple
 
 
@@ -200,6 +201,7 @@ def normalize_tool_choice(tool_choice: Optional[dict], kept_tools: Optional[list
 # token counts — only new messages need counting (~95% hit rate).
 
 _per_msg_cache: dict[str, int] = {}
+_per_msg_cache_lock = Lock()
 _PER_MSG_MAX = 1024
 
 
@@ -215,12 +217,13 @@ def _hash_single_msg(msg: dict, model: str) -> str:
 def cached_token_count(messages: list, model: str, system: str | None = None) -> int | None:
     """Incremental: sum per-message cached counts. Returns None if ANY message is uncached."""
     total = 0
-    for msg in messages:
-        key = _hash_single_msg(msg, model)
-        cached = _per_msg_cache.get(key)
-        if cached is None:
-            return None
-        total += cached
+    with _per_msg_cache_lock:
+        for msg in messages:
+            key = _hash_single_msg(msg, model)
+            cached = _per_msg_cache.get(key)
+            if cached is None:
+                return None
+            total += cached
     return total
 
 
@@ -229,12 +232,13 @@ def store_token_count(messages: list, model: str, count: int, system: str | None
     if not messages:
         return
     total_chars = sum(len(str(m.get("content", ""))) for m in messages) or 1
-    for msg in messages:
-        key = _hash_single_msg(msg, model)
-        if key not in _per_msg_cache:
-            chars = len(str(msg.get("content", "")))
-            _per_msg_cache[key] = max(1, int(count * chars / total_chars))
-    # Evict oldest if over limit
-    while len(_per_msg_cache) > _PER_MSG_MAX:
-        oldest = next(iter(_per_msg_cache))
-        del _per_msg_cache[oldest]
+    with _per_msg_cache_lock:
+        for msg in messages:
+            key = _hash_single_msg(msg, model)
+            if key not in _per_msg_cache:
+                chars = len(str(msg.get("content", "")))
+                _per_msg_cache[key] = max(1, int(count * chars / total_chars))
+        # Evict oldest if over limit
+        while len(_per_msg_cache) > _PER_MSG_MAX:
+            oldest = next(iter(_per_msg_cache))
+            del _per_msg_cache[oldest]

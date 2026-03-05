@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 import os
+from threading import Lock
 from typing import Any, Tuple
 
 import logging
@@ -65,13 +66,16 @@ def build_litellm_pipeline(cfg: ProxyConfig) -> Pipeline:
 
 
 _litellm_pipeline_cache: Pipeline | None = None
+_litellm_pipeline_lock = Lock()
 
 
 def _get_litellm_pipeline(cfg: ProxyConfig) -> Pipeline:
-    """Return a cached Phase 2 pipeline (built once on first call)."""
+    """Return a cached Phase 2 pipeline (built once on first call, thread-safe)."""
     global _litellm_pipeline_cache
     if _litellm_pipeline_cache is None:
-        _litellm_pipeline_cache = build_litellm_pipeline(cfg)
+        with _litellm_pipeline_lock:
+            if _litellm_pipeline_cache is None:  # double-check inside lock
+                _litellm_pipeline_cache = build_litellm_pipeline(cfg)
     return _litellm_pipeline_cache
 
 
@@ -229,7 +233,10 @@ def _build_passthrough_body(
         ]
     if getattr(request, "temperature", None) is not None:
         body["temperature"] = request.temperature
-    # Inject thinking params for ANALYZING phase (model-agnostic)
+    # Inject thinking params for ANALYZING/READ phase only.
+    # analysis_thinking comes from ANALYSIS_THINKING_PARAMS env var — it's specific to
+    # the model configured there (e.g. GLM-4.7 via Anthropic passthrough). We don't
+    # propagate CC's thinking param to other models since they may not support it.
     if ctx and ctx.analysis_phase in ("ANALYZING", "READ") and analysis_thinking:
         # Skip thinking for very large contexts — reasoning overhead causes timeouts
         thinking_cap = int(os.environ.get("THINKING_MAX_INPUT_CHARS", "0"))

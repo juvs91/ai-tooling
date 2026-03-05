@@ -286,6 +286,7 @@ class TestPassthroughThinkingGuard:
         request.system = None
         request.tools = None
         request.temperature = None
+        request.thinking = None  # CC did not request thinking
 
         thinking_params = {"thinking": {"type": "enabled"}}
         body = _build_passthrough_body(request, "glm-4.7", ctx=ctx, analysis_thinking=thinking_params)
