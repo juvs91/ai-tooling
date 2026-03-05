@@ -246,6 +246,7 @@ class _StreamCtx:
     tool_index: int | None = None          # current provider-side tool index
     last_tool_index: int = 0               # our sequential index across all tools
     tool_args_buffer: dict[int, str] = field(default_factory=dict)
+    hallucinated_tool_indices: set[int] = field(default_factory=set)
 
     # XML tool tracking
     has_xml_tool_calls: bool = False
@@ -695,6 +696,9 @@ async def handle_streaming(
                                 if ctx.model_id:
                                     metrics.record_model_event(ctx.model_id, "tool_hallucination")
                                 print(f"[streaming] WARNING: Hallucinated tool name '{name}' from {ctx.model_id}")
+                                ctx.last_tool_index -= 1  # undo the increment above
+                                ctx.hallucinated_tool_indices.add(current_index)
+                                continue
 
                             metrics.increment_tool_counter("native")
                             if ctx.model_id:
@@ -711,10 +715,13 @@ async def handle_streaming(
                             arguments = getattr(function, "arguments", "") if function else ""
 
                         if arguments:
-                            if ctx.last_tool_index not in ctx.tool_args_buffer:
-                                ctx.tool_args_buffer[ctx.last_tool_index] = ""
-                            ctx.tool_args_buffer[ctx.last_tool_index] += arguments
-                            yield sse.input_json_delta(ctx.last_tool_index, arguments)
+                            if current_index in ctx.hallucinated_tool_indices:
+                                pass  # skip arguments for hallucinated tools — no block was started
+                            else:
+                                if ctx.last_tool_index not in ctx.tool_args_buffer:
+                                    ctx.tool_args_buffer[ctx.last_tool_index] = ""
+                                ctx.tool_args_buffer[ctx.last_tool_index] += arguments
+                                yield sse.input_json_delta(ctx.last_tool_index, arguments)
 
                 # ── Finish ───────────────────────────────────────────
                 if finish_reason and not ctx.has_sent_stop_reason:
@@ -834,3 +841,167 @@ async def handle_streaming(
         yield sse.message_delta("end_turn", 0)
         yield sse.message_stop()
         yield sse.done()
+    finally:
+        # Resource leak fix: ensure the response generator is closed properly
+        # If it's an async generator (litellm streaming response), close it to avoid
+        # leaving HTTP connections open
+        if hasattr(response_generator, "aclose"):
+            try:
+                await response_generator.aclose()
+            except Exception:
+                pass  # Already closed or failed, ignore
+
+
+# ── Passthrough XML tool extraction ──────────────────────────────────
+
+async def passthrough_xml_tool_extraction(stream_gen: Any, request: Any):
+    """Extract GLM argkv <tool_call> XML embedded in passthrough SSE text_delta events.
+
+    The passthrough relay forwards raw Anthropic SSE lines from Z.AI one line at a
+    time (via aiter_lines). When GLM-4.7 emits tool calls as embedded XML in text
+    content, this wrapper intercepts those text_delta events and converts them to
+    proper tool_use block SSE events — exactly as handle_streaming() does for
+    LiteLLM streams.
+
+    Key constraint: passthrough yields lines individually (no blank-line separator),
+    so ``event: ...`` and ``data: ...`` lines arrive as separate chunks. We buffer
+    the ``event:`` line and decide whether to forward or suppress it based on what
+    the following ``data:`` line contains.
+
+    Fast path: when no ``<tool_call`` is ever detected, every chunk passes through
+    unchanged (zero-overhead for models that use native tool_use blocks).
+    """
+    raw_tools = getattr(request, "tools", None) or []
+    if not raw_tools:
+        async for chunk in stream_gen:
+            yield chunk
+        return
+
+    valid_names = _build_valid_tool_names(raw_tools)
+    buf = XmlToolBuffer(valid_tool_names=valid_names, tools=raw_tools)
+
+    text_block_index: int = 0   # index of the open text content block from upstream
+    next_tool_index: int = 1    # next available index for tool_use blocks
+    text_block_closed: bool = False  # True once we emit content_block_stop for text block
+    activated: bool = False     # True once any <tool_call XML is seen (stays True)
+    pending_event_line: str | None = None  # buffered "event: ...\n" line
+
+    async for chunk in stream_gen:
+        # Buffer event: lines — yield decision deferred to the data: line
+        if chunk.startswith("event: "):
+            pending_event_line = chunk
+            continue
+
+        if not chunk.startswith("data: "):
+            # Non-event, non-data line — flush pending event line and pass through
+            if pending_event_line:
+                yield pending_event_line
+                pending_event_line = None
+            yield chunk
+            continue
+
+        data_str = chunk[6:].strip()
+        if data_str in ("[DONE]", ""):
+            if pending_event_line:
+                yield pending_event_line
+                pending_event_line = None
+            yield chunk
+            continue
+
+        try:
+            data = json.loads(data_str)
+        except (ValueError, json.JSONDecodeError):
+            if pending_event_line:
+                yield pending_event_line
+                pending_event_line = None
+            yield chunk
+            continue
+
+        evt_type = data.get("type", "")
+
+        if evt_type == "content_block_start":
+            block = data.get("content_block", {})
+            if block.get("type") == "text":
+                text_block_index = data.get("index", 0)
+                next_tool_index = text_block_index + 1
+            if pending_event_line:
+                yield pending_event_line
+                pending_event_line = None
+            yield chunk
+
+        elif evt_type == "content_block_delta":
+            delta = data.get("delta", {})
+            if delta.get("type") == "text_delta":
+                text = delta.get("text", "")
+                # Fast path: no XML activity — pass through unchanged
+                if not activated and "<tool_call" not in text:
+                    if pending_event_line:
+                        yield pending_event_line
+                        pending_event_line = None
+                    yield chunk
+                    continue
+
+                if "<tool_call" in text:
+                    activated = True
+
+                # Slow path: suppress original event:+data: pair, emit transformed events
+                pending_event_line = None  # discard buffered event: line
+
+                for seg in buf.feed(text):
+                    if seg["type"] == "text" and seg["text"] and not text_block_closed:
+                        yield sse.text_delta(text_block_index, seg["text"])
+                    elif seg["type"] == "tool_call":
+                        if not text_block_closed:
+                            yield sse.content_block_stop(text_block_index)
+                            text_block_closed = True
+                        for ev in _emit_tool_use_block(seg["name"], seg["input"], next_tool_index):
+                            yield ev
+                        next_tool_index += 1
+            else:
+                if pending_event_line:
+                    yield pending_event_line
+                    pending_event_line = None
+                yield chunk
+
+        elif evt_type == "content_block_stop":
+            stopped_index = data.get("index")
+            if activated and stopped_index == text_block_index:
+                # Flush XmlToolBuffer — process any remaining buffered XML
+                for seg in buf.flush():
+                    if seg["type"] == "text" and seg["text"] and not text_block_closed:
+                        yield sse.text_delta(text_block_index, seg["text"])
+                    elif seg["type"] == "tool_call":
+                        if not text_block_closed:
+                            yield sse.content_block_stop(text_block_index)
+                            text_block_closed = True
+                        for ev in _emit_tool_use_block(seg["name"], seg["input"], next_tool_index):
+                            yield ev
+                        next_tool_index += 1
+                    elif seg["type"] == "incomplete_tool_call":
+                        print(
+                            f"[passthrough-xml] incomplete tool call at stream end "
+                            f"({len(seg.get('text', ''))} chars): {seg.get('text', '')[:100]}",
+                            flush=True,
+                        )
+
+                if text_block_closed:
+                    # We already emitted our own content_block_stop — suppress upstream's
+                    pending_event_line = None
+                else:
+                    # Normal text-only response end — pass through
+                    if pending_event_line:
+                        yield pending_event_line
+                        pending_event_line = None
+                    yield chunk
+            else:
+                if pending_event_line:
+                    yield pending_event_line
+                    pending_event_line = None
+                yield chunk
+
+        else:
+            # All other events (message_start, message_delta, message_stop, etc.)
+            if pending_event_line:
+                yield pending_event_line
+                pending_event_line = None
+            yield chunk
