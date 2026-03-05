@@ -38,9 +38,10 @@ class ProviderQuirksTransformer(Transformer):
         model = str(getattr(request, "model", "") or "")
         if _needs_reasoning_field(model):
             injected = 0
-            for msg in ctx.litellm_request.get("messages", []):
+            messages = ctx.litellm_request.get("messages", [])
+            for i, msg in enumerate(messages):
                 if msg.get("role") == "assistant" and "reasoning_content" not in msg:
-                    msg["reasoning_content"] = ""
+                    messages[i] = {**msg, "reasoning_content": ""}  # copy, don't mutate original
                     injected += 1
             if injected:
                 logger.info("[quirks] Injected reasoning_content on %d assistant messages for %s", injected, model)

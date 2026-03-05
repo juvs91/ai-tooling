@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from threading import Lock
 from utils.utils import bget, make_tool_id, map_stop_reason, scale_tokens, to_dict, TOOL_ID_PREFIX
 from typing import Any, Dict, List, Optional, Union
 from json_repair import repair_json
@@ -164,19 +165,20 @@ def clean_gemini_schema(schema: Any) -> Any:
 
 # ── Gemini Schema Memoization ────────────────────────────────────────
 _gemini_schema_cache: dict[str, Any] = {}
+_tool_conversion_cache: dict[str, dict] = {}
+_schema_cache_lock = Lock()  # shared lock for both caches
 
 
 def clean_gemini_schema_cached(schema: Any) -> Any:
     """Memoized wrapper around clean_gemini_schema."""
     key = hashlib.sha256(json.dumps(schema, sort_keys=True).encode()).hexdigest()[:16]
-    if key not in _gemini_schema_cache:
-        _gemini_schema_cache[key] = clean_gemini_schema(schema)
-    return _gemini_schema_cache[key]
+    with _schema_cache_lock:
+        if key not in _gemini_schema_cache:
+            _gemini_schema_cache[key] = clean_gemini_schema(schema)
+        return _gemini_schema_cache[key]
 
 
 # ── Tool Definition Conversion Cache ─────────────────────────────────
-_tool_conversion_cache: dict[str, dict] = {}
-
 
 def _convert_tool_cached(tool_dict: dict, is_gemini: bool) -> dict:
     """Convert Anthropic tool dict to OpenAI format with memoization."""
@@ -185,22 +187,23 @@ def _convert_tool_cached(tool_dict: dict, is_gemini: bool) -> dict:
     schema_str = json.dumps(input_schema, sort_keys=True)
     key = f"{name}:{'g' if is_gemini else 'o'}:{hashlib.sha256(schema_str.encode()).hexdigest()[:16]}"
 
-    if key in _tool_conversion_cache:
-        return _tool_conversion_cache[key]
+    with _schema_cache_lock:
+        if key in _tool_conversion_cache:
+            return _tool_conversion_cache[key]
 
-    if is_gemini:
-        input_schema = clean_gemini_schema_cached(input_schema)
+        if is_gemini:
+            input_schema = clean_gemini_schema(input_schema)  # uncached: already inside lock
 
-    converted = {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": tool_dict.get("description", "") or "",
-            "parameters": input_schema,
-        },
-    }
-    _tool_conversion_cache[key] = converted
-    return converted
+        converted = {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": tool_dict.get("description", "") or "",
+                "parameters": input_schema,
+            },
+        }
+        _tool_conversion_cache[key] = converted
+        return converted
 
 
 def _system_to_text(system: Any) -> str:
