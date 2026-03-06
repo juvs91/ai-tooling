@@ -1,0 +1,30 @@
+# ============================================================
+# CloudSQL - Configuración de Ambientes
+# ============================================================
+# Copiar a .cloudsql-env y llenar credenciales
+# Cambiar WPC_ENV para switchear ambiente: dev | qa | prod
+# Después: Reload Window en VS Code
+# ============================================================
+
+WPC_ENV=qa
+
+# --- DEV (wc-prj-dev) ---
+# Tunnel: gcloud compute ssh cloudsql-proxy --project wc-prj-dev --zone us-central1-a --NL 5432:localhost:5432
+DEV_USER=wpc-usr-prices
+DEV_PASSWORD=YOUR_DEV_PASSWORD
+DEV_DATABASE=prices
+DEV_PORT=5432
+
+# --- QA (wc-prj-qa) ---
+# Tunnel: gcloud compute ssh cloudsql-proxy --project wc-prj-qa --zone us-central1-a --NL 5432:localhost:5432
+QA_USER=wpc-usr-prices
+QA_PASSWORD=YOUR_QA_PASSWORD
+QA_DATABASE=prices
+QA_PORT=5432
+
+# --- PROD (wc-prj-prod) ---
+# Tunnel: gcloud compute ssh cloudsql-proxy --project wc-prj-prod --zone us-central1-a --NL 5432:localhost:5432
+PROD_USER=YOUR_PROD_PASSWORD
+PROD_PASSWORD=YOUR_PROD_PASSWORD
+PROD_DATABASE=prices
+PROD_PORT=5432

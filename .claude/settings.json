@@ -1,13 +1,29 @@
 {
   "permissions": {
     "allow": [
-      "Bash(lsof:*)",
-      "Bash(curl:*)",
-      "Bash(gcloud auth:*)",
-      "Bash(gcloud config:*)",
-      "Bash(./scripts/*)",
+      "Bash(command -v:*)",
+      "Bash(node:*)",
+      "Bash(npm --version:*)",
+      "Bash(uvx:*)",
+      "Bash(pip3:*)",
+      "Bash(npm install:*)",
+      "Bash(postgres-mcp:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(npm info:*)",
+      "mcp__atlassian__jira_search",
+      "mcp__atlassian__jira_get_user_profile",
+      "mcp__squit__*",
+      "mcp__alloydb__query_tool",
       "Bash(source:*)",
-      "Read(*)"
+      "Bash(nvm use:*)",
+      "mcp__cloudsql__query_tool",
+      "Bash(python3:*)",
+      "Bash(xargs kill:*)",
+      "Bash(for i in 1 2 3 4 5)",
+      "Bash(do curl -s http://localhost:8000/health)",
+      "Bash(break)",
+      "Bash(done)",
+      "Bash(xargs:*)"
     ],
     "deny": []
   },
@@ -81,12 +97,6 @@
       "type": "mcp",
       "mcpServer": "atlassian",
       "docs": "https://deacero.atlassian.net/wiki/ARQ"
-    },
-    "bitbucket": {
-      "type": "mcp",
-      "mcpServer": "bitbucket",
-      "workspace": "deacero",
-      "mainRepo": "wpc-backend"
     }
   },
   "mcpServers": {

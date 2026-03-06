@@ -2,8 +2,63 @@
 > Aprendizajes iterativos del proyecto. Actualizar despues de cada sesion.
 
 ## Ultima actualizacion
-- Fecha: 2026-03-04
-- Por: claude-opus-4-6 + jeguzman
+- Fecha: 2026-03-05
+- Por: claude-sonnet-4-6 + jeguzman
+
+---
+
+## Session 2026-03-05: MCP Servers Configuration and Validation
+
+### MCP Setup Completion
+Configurado y validado 7 servidores MCP en `.mcp.json`:
+
+| MCP | Estado | Propósito |
+|-----|--------|---------|
+| alloydb | ✅ | PostgreSQL queries (localhost:5435/ods) |
+| atlassian | ✅ | Jira/Confluence/Bitbucket |
+| squit | ✅ | Legacy SP search (Deacero) |
+| cloudsql | ✅ | CloudSQL PostgreSQL wrapper |
+| context7 | ✅ | Upstash documentation search |
+| serper | ✅ | Web search and scraping |
+| playwright | ✅ | Browser automation (Chromium) |
+
+### Archivos Creados
+- `MCP_VALIDATION_REPORT.md` - Validación completa de todos los MCPs
+- `scripts/serper-mcp.sh` - Launcher bash para Serper
+- `scripts/serper-mcp.py` - Launcher Python multi-plataforma
+- `scripts/serper-mcp.md` - Guía de Serper
+- `MCPs_CONFIGURADOS.md` - README de MCPs actualizado
+- `MCP_SETUP.md` - Guía general de MCPs
+- `CLOUDSQL_MCP_SETUP.md` - Guía de CloudSQL
+
+### Fixes Aplicados
+1. **CloudSQL script** - `scripts/cloudsql-mcp.sh` actualizado para usar path correcto de postgres-mcp (`~/.nvm/versions/node/v20.20.0/lib/node_modules/postgres-mcp/dist/index.js`) en lugar del binary global corrupto
+2. **Playwright** - Configurado con `PLAYWRIGHT_BROWSERS=chromium` para Apple Silicon (WebKit/Safari no soportado)
+3. **Environment variables** - DB_MAIN_* variables ya presentes en `.env` para AlloyDB
+
+### Patrones Aprendidos
+- **postgres-mcp global binary corrupto** - Usar path directo al package instalado en lugar de `npx postgres-mcp` cuando el binary global falla
+- **Environment variable precedence** - MCPs usan variables de entorno desde `.mcp.json` env section, no del `.env` del proyecto (excepto cuando scripts los exportan explícitamente)
+- **URL-encoding en passwords** - Passwords con caracteres especiales necesitan URL-encoding en connection strings (usar `encodeURIComponent` de node o sed manual fallback)
+
+### Comandos de MCP
+```bash
+# Test AlloyDB
+timeout 10s node ~/.nvm/versions/node/v20.20.0/lib/node_modules/postgres-mcp/dist/index.js
+
+# Test CloudSQL
+bash scripts/cloudsql-mcp.sh
+
+# Test Serper
+SERPER_API_KEY="[REDACTED]" npx -y serper-search-scrape-mcp-server
+
+# Test Playwright
+PLAYWRIGHT_BROWSERS="chromium" npx -y @executeautomation/playwright-mcp-server
+
+# Switch CloudSQL environment
+nano .cloudsql-env  # Cambiar WPC_ENV=dev|qa|prod
+# Reload Window en VS Code
+```
 
 ---
 

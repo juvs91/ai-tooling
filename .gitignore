@@ -32,6 +32,10 @@ profile-envs/*
 # Logs
 *.log
 
+# MCP configs (contain sensitive credentials)
+.mcp.json.template
+.cloudsql-env
+
 # IDE specific files
 .idea/
 .vscode/

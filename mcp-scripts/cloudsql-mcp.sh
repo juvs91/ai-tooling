@@ -122,6 +122,8 @@ echo "[cloudsql-mcp] Ambiente: $WPC_ENV | DB: $DB_NAME | Puerto: $DB_PORT" >&2
 export DB_MAIN_URL="$DB_URL"
 if [ -f "$PROJECT_DIR/node_modules/.bin/postgres-mcp" ]; then
   exec "$PROJECT_DIR/node_modules/.bin/postgres-mcp"
+elif [ -f "/Users/jeguzman/.nvm/versions/node/v20.20.0/lib/node_modules/postgres-mcp/dist/index.js" ]; then
+  exec node /Users/jeguzman/.nvm/versions/node/v20.20.0/lib/node_modules/postgres-mcp/dist/index.js
 elif command -v npx >/dev/null 2>&1; then
   exec npx postgres-mcp
 else
