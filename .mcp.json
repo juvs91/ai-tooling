@@ -1,0 +1,61 @@
+{
+  "mcpServers": {
+    "alloydb": {
+      "command": "node",
+      "args": [
+        "/Users/jeguzman/.nvm/versions/node/v20.20.0/lib/node_modules/postgres-mcp/dist/index.js"
+      ],
+      "env": {
+        "DB_MAIN_URL": "postgresql://ods:%7BoC%3F%7BLGAeRqLba.9@localhost:5435/ods"
+      }
+    },
+    "atlassian": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-atlassian"],
+      "env": {
+        "CONFLUENCE_URL": "https://deacero.atlassian.net/wiki",
+        "CONFLUENCE_USERNAME": "jeguzman@deacero.com",
+        "CONFLUENCE_API_TOKEN": "REDACTED_TOKENmf3dWEnGvaI1-YcPapn-82EfnZyXjniGebnPZ5NZQ1IaeOm95UnQi_KspigOV08CtmgLv_H_pPE7ACBC-mprqCj4hXS1KrYfjXSsxdPnvCVv2GNKlzqp_biQAHdSGj0RXjsV28Mdlf78cURpGRRPBWN_M9cWQ46jJN5NFOJzYEk=E70A4068",
+        "JIRA_URL": "https://deacero.atlassian.net",
+        "JIRA_USERNAME": "jeguzman@deacero.com",
+        "JIRA_API_TOKEN": "REDACTED_TOKENmf3dWEnGvaI1-YcPapn-82EfnZyXjniGebnPZ5NZQ1IaeOm95UnQi_KspigOV08CtmgLv_H_pPE7ACBC-mprqCj4hXS1KrYfjXSsxdPnvCVv2GNKlzqp_biQAHdSGj0RXjsV28Mdlf78cURpGRRPBWN_M9cWQ46jJN5NFOJzYEk=E70A4068"
+      }
+    },
+    "squit": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://squit-mcp.deacero.us/mcp",
+        "--header",
+        "X-API-Key:REDACTED_SQUIT_KEY"
+      ]
+    },
+    "cloudsql": {
+      "command": "bash",
+      "args": ["./scripts/cloudsql-mcp.sh"]
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@latest"]
+    },
+    "serper": {
+      "command": "npx",
+      "args": ["-y", "serper-search-scrape-mcp-server"],
+      "env": {
+        "SERPER_API_KEY": "[REDACTED]"
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@executeautomation/playwright-mcp-server"],
+      "env": {
+        "PLAYWRIGHT_BROWSERS_PATH": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome for Testing.app",
+        "PLAYWRIGHT_BROWSERS": "chromium"
+      }
+    },
+    "_comment": "Apple Silicon fix: PLAYWRIGHT_BROWSERS=chromium (no soporta WebKit/Safari en mac13-arm64)"
+    }
+  }
+}

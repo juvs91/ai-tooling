@@ -10,3 +10,10 @@ python-dotenv>=1.0.0
 google-auth>=2.41.1
 google-cloud-aiplatform>=1.120.0
 json-repair>=0.30.0
+
+# MCP servers (local) - for browser automation and web testing
+playwright>=1.49.0
+playwright-browsers>=1.49.0
+
+# Serper - local web search server
+serper-search-scrape-mcp-server>=0.1.0
