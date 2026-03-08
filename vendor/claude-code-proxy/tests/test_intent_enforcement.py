@@ -7,9 +7,11 @@ from llm.pipeline import TransformContext
 from llm.transformers.intent_enforcement import IntentEnforcementTransformer
 
 
-def _request(system=None):
-    """Create a mock request object."""
-    return SimpleNamespace(system=system)
+def _request(system=None, tools=None):
+    """Create a mock request object. Defaults tools to [Bash] so enforcement fires."""
+    if tools is None:
+        tools = [SimpleNamespace(name="Bash")]
+    return SimpleNamespace(system=system, tools=tools)
 
 
 def _ctx(intent="CHAT", analysis_phase="NONE"):
@@ -203,3 +205,49 @@ class TestIntentEnforcementTransformer:
         # Second transform (simulate re-processing)
         await t.transform(req, ctx)
         assert req.system.count("[INTENT-ENFORCEMENT]") <= note_count + 1
+
+
+class TestWrapUpTurnNoEnforcement:
+    """BUILD/VERIFY with tools_in=0 must NOT inject enforcement prompt.
+
+    Wrap-up turns (CC asking model to conclude after tool execution) have no
+    tool definitions. Injecting "Make file changes NOW" causes unnecessary edits.
+    """
+
+    @pytest.mark.asyncio
+    async def test_build_no_tools_skips_enforcement(self):
+        """BUILD intent + tools_in=0 → no enforcement injected."""
+        t = IntentEnforcementTransformer(enabled=True)
+        req = SimpleNamespace(system=None, tools=None)
+        ctx = TransformContext(intent="BUILD", phase="EXECUTE")
+        await t.transform(req, ctx)
+        assert req.system is None
+
+    @pytest.mark.asyncio
+    async def test_verify_no_tools_skips_enforcement(self):
+        """VERIFY intent + tools_in=0 → no enforcement injected."""
+        t = IntentEnforcementTransformer(enabled=True)
+        req = SimpleNamespace(system=None, tools=None)
+        ctx = TransformContext(intent="VERIFY", phase="EXECUTE")
+        await t.transform(req, ctx)
+        assert req.system is None
+
+    @pytest.mark.asyncio
+    async def test_build_with_tools_still_enforces(self):
+        """BUILD intent + tools_in>0 → enforcement IS injected (normal build turn)."""
+        t = IntentEnforcementTransformer(enabled=True)
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Bash")])
+        ctx = TransformContext(intent="BUILD", phase="EXECUTE")
+        await t.transform(req, ctx)
+        assert req.system is not None
+        assert "[INTENT-ENFORCEMENT]" in req.system
+
+    @pytest.mark.asyncio
+    async def test_read_no_tools_still_enforces(self):
+        """READ intent + tools_in=0 → enforcement IS injected (READ guides tool use behavior)."""
+        t = IntentEnforcementTransformer(enabled=True)
+        req = SimpleNamespace(system=None, tools=None)
+        ctx = TransformContext(intent="READ", phase="PLAN")
+        await t.transform(req, ctx)
+        assert req.system is not None
+        assert "[INTENT-ENFORCEMENT]" in req.system

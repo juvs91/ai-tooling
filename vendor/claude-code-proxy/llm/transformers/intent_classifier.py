@@ -431,6 +431,23 @@ class IntentClassifierTransformer(Transformer):
             ctx.intent = "SYNTHESIZING"
             ctx.analysis_phase = "SYNTHESIZING"
 
+        # Override E: Wrap-up turn — tool_result only + tools_in=0
+        # CC sends tool_result turns with no tool definitions when asking the model to conclude.
+        # Building models (e.g. MiniMax-M2.5) can't generate tool_use without tool definitions →
+        # return 1-token end_turn. Route to big_model via CHAT intent + PLAN phase.
+        # Effect: model_router uses big_model (passthrough), intent_enforcement skips
+        # enforcement (CHAT → no prompt injected).
+        tools_in = len(getattr(request, "tools", []) or [])
+        if _is_tool_result_only and tools_in == 0 and not ctx.is_analysis and history_phase != "HAS_WRITES":
+            logger.info(
+                "[classify] OVERRIDE E: %s → CHAT/PLAN (tool_result only, tools_in=0 wrap-up turn)",
+                ctx.intent,
+            )
+            ctx.intent = "CHAT"
+            ctx.phase = "PLAN"
+            ctx.is_analysis = False
+            ctx.analysis_phase = "NONE"
+
         if ctx.is_analysis:
             logger.info("[classify] ANALYSIS phase=%s reads=%d (enforcement=%s)",
                         ctx.analysis_phase, ctx.analysis_read_count, self._policy.analysis_enforcement)
