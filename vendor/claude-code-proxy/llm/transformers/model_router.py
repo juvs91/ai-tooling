@@ -101,12 +101,26 @@ class ModelRouterTransformer(Transformer):
                 else:
                     request.model = f"{prefix}/{self._routing.small_model}"
             elif ctx.phase == "EXECUTE" and self._routing.building_model != self._routing.big_model:
-                route = self._routing.building_route
-                if route:
-                    request.model = f"{route.provider}/{self._routing.building_model}"
-                    ctx.route_override = route
+                tools_in = len(getattr(request, "tools", []) or [])
+                if tools_in == 0:
+                    # No tool definitions: building model (MiniMax-M2.5) can't generate
+                    # tool_use responses without tool definitions → returns 0-token end_turn.
+                    # Wrap-up turns (CC asking model to conclude after bash execution) and
+                    # other tools_in=0 EXECUTE requests must go to big_model for a text response.
+                    # No route_override → uses primary provider credentials (big_model is primary).
+                    pref = _provider_prefix(self._routing.preferred_provider)
+                    request.model = f"{pref}{self._routing.big_model}"
+                    logger.info(
+                        "[route] EXECUTE tools_in=0: building_model bypassed → big_model=%s",
+                        request.model,
+                    )
                 else:
-                    request.model = f"{prefix}/{self._routing.building_model}"
+                    route = self._routing.building_route
+                    if route:
+                        request.model = f"{route.provider}/{self._routing.building_model}"
+                        ctx.route_override = route
+                    else:
+                        request.model = f"{prefix}/{self._routing.building_model}"
             else:
                 # PLAN phase: always force big_model using the configured provider prefix from env.
                 # map_claude_alias_to_target maps haiku → small_model (wrong for PLAN).

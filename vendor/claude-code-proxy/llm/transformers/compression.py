@@ -25,6 +25,35 @@ class CompressionTransformer(Transformer):
         self._routing = routing_cfg
 
     async def transform(self, request: Any, ctx: TransformContext) -> None:
+        # Detect CC conversation compaction request (model-agnostic detection by content).
+        # Official CC compaction prompt always contains "partial transcript".
+        # If detected: (1) skip proxy compression — model needs full context to summarize,
+        # (2) force big_model — needs large context window + Anthropic format for <summary></summary>.
+        _litellm_msgs = ctx.litellm_request.get("messages", [])
+        _is_compact = False
+        for _m in _litellm_msgs:
+            if _m.get("role") == "user":
+                _content = _m.get("content", "")
+                if isinstance(_content, list):
+                    _content = " ".join(
+                        c.get("text", "") if isinstance(c, dict) else str(c) for c in _content
+                    )
+                if "partial transcript" in str(_content).lower():
+                    _is_compact = True
+                    break
+
+        if _is_compact:
+            from router.model_mapper import _provider_prefix
+            _pref = _provider_prefix(self._routing.preferred_provider)
+            _target = f"{_pref}{self._routing.big_model}"
+            logger.info(
+                "[compress] COMPACT: CC compaction request — skip compression, force model=%s",
+                _target,
+            )
+            ctx.litellm_request["model"] = _target
+            ctx.was_compressed = False
+            return
+
         model = str(getattr(request, "model", "") or "")
         model_ctx = ctx.effective_context_window or self._routing.model_context_window
 

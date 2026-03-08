@@ -1407,3 +1407,4 @@ class TestCCPhaseAwareClassification:
         assert ctx.intent == "BUILD"
         assert ctx.phase == "EXECUTE"
         assert ctx.is_analysis is False
+

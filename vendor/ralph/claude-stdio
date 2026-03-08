@@ -1,0 +1,22 @@
+#!/bin/bash
+# Detach from controlling terminal to prevent SIGTTOU/SIGTTIN.
+#
+# Root cause: gtimeout → setpgid(child, child) → new PGID → claude background
+# relative to terminal → tcsetpgrp() → SIGTTOU when Bash tool spawns subprocess.
+# Also: CC queries /dev/tty for cursor position → SIGTTIN when background.
+#
+# Why trap '' fails: Node.js/libuv calls sigaction(SIGTTOU, {SIG_DFL}, NULL)
+# during startup (uv__signal_global_init), overriding the inherited SIG_IGN.
+#
+# Fix: os.setsid() creates a new session with no controlling terminal.
+# tcsetpgrp() → ENOTTY (not a signal), /dev/tty open → ENXIO (not a signal).
+# Both SIGTTOU and SIGTTIN sources eliminated.
+#
+# Note: bypassPermissions: true is global → no --permission-prompt-tool stdio needed.
+# That flag would block with stdin=/dev/null (ralph live mode).
+CLAUDE_BIN="$(command -v claude 2>/dev/null || echo "$HOME/.local/bin/claude")"
+exec python3 -c "
+import os, sys
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])
+" "$CLAUDE_BIN" "$@"

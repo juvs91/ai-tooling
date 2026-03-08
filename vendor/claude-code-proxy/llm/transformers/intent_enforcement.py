@@ -41,6 +41,13 @@ class IntentEnforcementTransformer(Transformer):
         if not intent or intent == "CHAT":
             return
 
+        # Skip BUILD/VERIFY enforcement when no tool definitions are present.
+        # Wrap-up turns (CC asking model to conclude after bash execution) have tools_in=0.
+        # Injecting "Make file changes NOW" into a summary turn causes unnecessary tool calls.
+        tools_in = len(getattr(request, "tools", []) or [])
+        if intent in ("BUILD", "VERIFY") and tools_in == 0:
+            return
+
         # Inject intent-specific prompt into request.system
         prompt = self._get_enforcement_prompt(intent, ctx)
         if prompt:

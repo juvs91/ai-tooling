@@ -19,9 +19,9 @@ def _comp_cfg(model="openai/deepseek-chat", api_key="k", base_url="http://x",
     )
 
 
-def _routing(ctx_window=200000, max_out=8192):
+def _routing(ctx_window=200000, max_out=8192, preferred_provider="openai", big_model="m"):
     return ModelRouting(
-        preferred_provider="openai", small_model="m", big_model="m",
+        preferred_provider=preferred_provider, small_model="m", big_model=big_model,
         building_model="m", model_context_window=ctx_window,
         max_output_tokens=max_out, reasoning_max_tokens=16000,
     )
@@ -29,6 +29,86 @@ def _routing(ctx_window=200000, max_out=8192):
 
 def _request(model="openai/glm-4.7", max_tokens=4096):
     return SimpleNamespace(model=model, max_tokens=max_tokens)
+
+
+class TestCCCompactDetection:
+    """CC compact requests (containing 'partial transcript') bypass proxy compression
+    and are routed directly to big_model for proper <summary></summary> generation."""
+
+    @pytest.mark.asyncio
+    async def test_compact_request_skips_compression(self):
+        """A message with 'partial transcript' must skip compress_messages_if_needed."""
+        t = CompressionTransformer(_comp_cfg(), _routing(preferred_provider="anthropic", big_model="glm-4.7"))
+        ctx = TransformContext(litellm_request={
+            "messages": [
+                {"role": "user", "content": "You have written a partial transcript for the initial task above. Please write a summary..."},
+            ],
+            "model": "anthropic/glm-4.7",
+        })
+        with patch("llm.transformers.compression.compress_messages_if_needed") as mock:
+            await t.transform(_request(), ctx)
+            mock.assert_not_called()
+        assert ctx.was_compressed is False
+
+    @pytest.mark.asyncio
+    async def test_compact_forces_big_model(self):
+        """CC compact must override ctx.litellm_request['model'] to big_model."""
+        t = CompressionTransformer(_comp_cfg(), _routing(preferred_provider="anthropic", big_model="glm-4.7"))
+        ctx = TransformContext(litellm_request={
+            "messages": [{"role": "user", "content": "partial transcript to summarize"}],
+            "model": "openai/deepseek-chat",
+        })
+        await t.transform(_request(), ctx)
+        assert ctx.litellm_request["model"] == "anthropic/glm-4.7"
+
+    @pytest.mark.asyncio
+    async def test_compact_case_insensitive(self):
+        """Detection is case-insensitive."""
+        t = CompressionTransformer(_comp_cfg(), _routing(preferred_provider="anthropic", big_model="glm-4.7"))
+        ctx = TransformContext(litellm_request={
+            "messages": [{"role": "user", "content": "PARTIAL TRANSCRIPT above..."}],
+            "model": "openai/deepseek-chat",
+        })
+        await t.transform(_request(), ctx)
+        assert ctx.litellm_request["model"] == "anthropic/glm-4.7"
+
+    @pytest.mark.asyncio
+    async def test_compact_with_list_content(self):
+        """Detection works when message content is a list of blocks."""
+        t = CompressionTransformer(_comp_cfg(), _routing(preferred_provider="anthropic", big_model="glm-4.7"))
+        ctx = TransformContext(litellm_request={
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "partial transcript here"}]}],
+            "model": "openai/deepseek-chat",
+        })
+        await t.transform(_request(), ctx)
+        assert ctx.litellm_request["model"] == "anthropic/glm-4.7"
+
+    @pytest.mark.asyncio
+    async def test_non_compact_still_compresses(self):
+        """Regular messages (no 'partial transcript') go through normal compression."""
+        messages = [{"role": "user", "content": "help me fix a bug"}]
+        t = CompressionTransformer(_comp_cfg(), _routing(preferred_provider="anthropic", big_model="glm-4.7"))
+        ctx = TransformContext(litellm_request={"messages": messages, "tools": None})
+        with patch("llm.transformers.compression.compress_messages_if_needed",
+                    new_callable=AsyncMock, return_value=(messages, False)) as mock:
+            await t.transform(_request(), ctx)
+            mock.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_compact_only_checks_user_messages(self):
+        """'partial transcript' in an assistant message should NOT trigger compact detection."""
+        messages = [
+            {"role": "assistant", "content": "I wrote a partial transcript earlier"},
+            {"role": "user", "content": "continue"},
+        ]
+        t = CompressionTransformer(_comp_cfg(), _routing(preferred_provider="anthropic", big_model="glm-4.7"))
+        ctx = TransformContext(litellm_request={"messages": messages, "tools": None, "model": "openai/x"})
+        with patch("llm.transformers.compression.compress_messages_if_needed",
+                    new_callable=AsyncMock, return_value=(messages, False)) as mock:
+            await t.transform(_request(), ctx)
+            mock.assert_called_once()
+            # model should NOT have been overridden to big_model
+            assert ctx.litellm_request["model"] == "openai/x"
 
 
 class TestCompressionSkipConditions:

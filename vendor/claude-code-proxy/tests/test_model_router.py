@@ -132,10 +132,23 @@ class TestCloudRouting:
             _routing(small="glm-flash", big="glm-4.7", building="glm-build"),
             _creds(base_url="https://api.z.ai/v4"),
         )
-        req = _request()
+        req = _request(tools=[SimpleNamespace(name="Bash")])
         ctx = TransformContext(intent="BUILD", phase="EXECUTE")
         await t.transform(req, ctx)
         assert "glm-build" in req.model
+
+    @pytest.mark.asyncio
+    async def test_execute_no_tools_routes_to_big_model(self):
+        """EXECUTE phase with tools_in=0 → big_model (building_model bypassed)."""
+        t = ModelRouterTransformer(
+            _routing(small="glm-flash", big="glm-4.7", building="MiniMax-M2.5"),
+            _creds(base_url="https://api.z.ai/v4"),
+        )
+        req = _request(tools=None)  # No tool definitions — wrap-up turn
+        ctx = TransformContext(intent="BUILD", phase="EXECUTE")
+        await t.transform(req, ctx)
+        assert "glm-4.7" in req.model
+        assert ctx.route_override is None  # big_model uses primary provider
 
     @pytest.mark.asyncio
     async def test_plan_stays_on_big(self):
@@ -311,7 +324,7 @@ class TestMixedCrossProviderRouting:
             ),
             _creds(base_url="https://api.z.ai/v4"),
         )
-        req = _request(model="claude-sonnet-4-20250514")
+        req = _request(model="claude-sonnet-4-20250514", tools=[SimpleNamespace(name="Bash")])
         ctx = TransformContext(intent="BUILD", phase="EXECUTE")
         await t.transform(req, ctx)
         assert req.model == "openai/deepseek-reasoner"
@@ -554,7 +567,7 @@ class TestEffectiveContextWindow:
                      ctx_window=200000, building_route=route),
             _creds(base_url="https://api.z.ai/v4"),
         )
-        req = _request()
+        req = _request(tools=[SimpleNamespace(name="Bash")])
         ctx = TransformContext(intent="BUILD", phase="EXECUTE")
         await t.transform(req, ctx)
         assert ctx.effective_context_window == 128000
@@ -640,7 +653,7 @@ class TestPlanPhaseHaikuBugFix:
     async def test_haiku_execute_still_routes_to_minimax(self):
         """EXECUTE phase with haiku must still use openai/MiniMax-M2.5 (unaffected by fix)."""
         t = self._mixed_router_transformer()
-        req = _request(model="claude-haiku-4-5-20251001")
+        req = _request(model="claude-haiku-4-5-20251001", tools=[SimpleNamespace(name="Bash")])
         ctx = TransformContext(intent="BUILD", phase="EXECUTE")
         await t.transform(req, ctx)
         assert req.model == "openai/MiniMax-M2.5"
