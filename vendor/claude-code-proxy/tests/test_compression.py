@@ -10,12 +10,19 @@ from config import CompressorConfig, ModelRouting
 
 
 def _comp_cfg(model="openai/deepseek-chat", api_key="k", base_url="http://x",
-              keep_recent=15, trigger_ratio=0.85,
+              keep_recent=10, trigger_ratio=0.70,
               fb_model=None, fb_key=None, fb_base=None):
     return CompressorConfig(
         model=model, api_key=api_key, base_url=base_url,
         keep_recent=keep_recent, trigger_ratio=trigger_ratio,
         fallback_model=fb_model, fallback_api_key=fb_key, fallback_base_url=fb_base,
+        # New parameters for context-window-aware compression
+        message_threshold=20,
+        max_messages_ratio=0.85,
+        max_tokens_ratio=0.85,
+        tool_inflation_threshold=40,
+        summary_trigger_ratio=0.60,
+        recent_window_ratio=0.40,
     )
 
 

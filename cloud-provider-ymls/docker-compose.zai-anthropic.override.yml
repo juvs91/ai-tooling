@@ -1,5 +1,9 @@
 services:
   proxy_cloud:
+    ports:
+      - "8083:8082"  # Puerto diferente: 8085 (test) vs 8083 (production)
+    volumes:
+      - ./vendor/claude-code-proxy:/claude-code-proxy:rw  # RW para hot-reload con cambios locales
     env_file:
       - ./.env
       - profile-envs/cloud.zai-anthropic.env

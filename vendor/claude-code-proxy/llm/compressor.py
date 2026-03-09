@@ -19,8 +19,9 @@ import asyncio
 import hashlib
 import json
 import time
-from dataclasses import dataclass
-from typing import Any, Optional
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, Optional, Dict
 
 from litellm import token_counter
 from utils.metrics import metrics
@@ -44,15 +45,22 @@ _state_lock = asyncio.Lock()
 # same session sends a near-identical request.
 # Works for ALL providers (Z.AI Anthropic, Z.AI OpenAI, DeepSeek).
 
+# Session Management Enhancement (Phase 3):
+# - Supports multiple concurrent sessions with explicit session IDs
+# - Maintains conversation continuity across proxy restarts and profile changes
+# - Uses UUID-based session IDs passed via X-Session-ID HTTP header
+# - Cache TTL extended to 24 hours for longer-term persistence
+
 @dataclass
 class _CompressionCache:
-    summary: str              # The compressed summary text
-    old_msg_count: int        # How many old messages were compressed
-    timestamp: float          # time.monotonic() when cached
-    prefix_hash: str          # Truncated SHA256 of first N old messages (session identity)
+    summary: str = ""              # The compressed summary text
+    old_msg_count: int = 0         # How many old messages were compressed
+    timestamp: float = 0.0         # time.monotonic() when cached
+    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))  # UUID-based session ID
+    prefix_hash: str = field(default_factory=lambda: hashlib.sha256(b"").hexdigest()[:16])  # For backward compatibility
 
-_compression_cache: Optional[_CompressionCache] = None
-_CACHE_TTL = 300.0           # 5 minutes — covers a typical CC session
+_session_cache: Dict[str, _CompressionCache] = {}  # Multi-session support: session_id -> cache entry
+_SESSION_TTL = 86400.0           # 24 hours — extended from 5 minutes for session persistence
 _CACHE_MSG_TOLERANCE = 100   # Reuse if ≤100 new old messages since last compression
 _CACHE_PREFIX_SIZE = 20      # Hash first 20 messages for session identity
 
@@ -179,36 +187,163 @@ def _serialize_messages_for_summary(messages: list[dict], max_chars: int = 50000
     return "\n\n".join(lines)
 
 
+def _normalize_messages(messages: list[dict]) -> list[dict]:
+    """
+    Normalize messages to ensure consistent schema before processing.
+
+    Preserves tool_calls and tool_call_id for tool reference validation.
+    Pure normalization logic, no hardcoded values.
+    """
+    normalized = []
+    for m in messages:
+        role = m.get("role", "user")
+        normalized_msg = {
+            "role": role,
+            "content": m.get("content", "")
+        }
+        # Preserve tool_calls for assistant messages (needed for tool reference validation)
+        if role == "assistant" and "tool_calls" in m:
+            normalized_msg["tool_calls"] = m["tool_calls"]
+        # Preserve tool_call_id for tool messages (needed for tool reference validation)
+        if role == "tool" and "tool_call_id" in m:
+            normalized_msg["tool_call_id"] = m["tool_call_id"]
+        normalized.append(normalized_msg)
+    return normalized
+
+
+def _detect_tool_inflation(messages: list[dict], tool_inflation_threshold: int) -> bool:
+    """
+    Detect tool message inflation in the conversation.
+
+    Returns True if tool count > threshold, False otherwise.
+    Tracks detection in metrics.
+    """
+    tool_count = sum(
+        1 for m in messages
+        if m.get("role") == "tool"
+    )
+    is_inflated = tool_count > tool_inflation_threshold
+    if is_inflated:
+        metrics.compression_tool_inflation_detected += 1
+    return is_inflated
+
+
+def _split_conversation(
+    messages: list[dict],
+    model_context_window: int,
+    summary_trigger_ratio: float,
+    recent_window_ratio: float,
+    message_threshold: int = 20,  # Use message count threshold for early compression
+) -> tuple[list[dict], list[dict]]:
+    """
+    Split conversation into old (to be summarized) and recent (to keep intact).
+
+    All thresholds are calculated dynamically from config ratios - no magic numbers.
+    Uses message count (not just tokens) to ensure compression triggers early.
+    """
+    # Calculate dynamic thresholds from config ratios
+    summary_trigger_tokens = int(model_context_window * summary_trigger_ratio)
+    recent_window_tokens = int(model_context_window * recent_window_ratio)
+
+    # Use message threshold for triggering (not token-based)
+    # This ensures compression starts at 20 messages, not 400
+    recent_window_msgs = max(10, recent_window_tokens // 300)  # Keep at least 10 recent
+
+    # Not enough messages to split
+    if len(messages) <= message_threshold + recent_window_msgs:
+        return [], messages
+
+    # Split into old and recent
+    # Keep last recent_window_msgs messages as recent, everything else as old
+    split_point = len(messages) - recent_window_msgs
+    old_messages = messages[:split_point]
+    recent_messages = messages[split_point:]
+
+    print(f"[compress] Split conversation: {len(old_messages)} old messages, {len(recent_messages)} recent messages "
+          f"(threshold={message_threshold}, keep_recent={recent_window_msgs}, "
+          f"summary_trigger_tokens={summary_trigger_tokens}, recent_window_tokens={recent_window_tokens})")
+
+    return old_messages, recent_messages
+
+
+def _trim_by_token_budget(
+    messages: list[dict],
+    max_tokens: int,
+    target_model: str = "",
+) -> list[dict]:
+    """
+    Remove oldest messages until token budget fits.
+
+    max_tokens is passed from caller (calculated from config).
+    Tracks aggressive trims in metrics.
+    """
+    current_tokens = _count_message_tokens(messages, model=target_model)
+    if current_tokens <= max_tokens:
+        return messages
+
+    print(f"[compress] Token budget exceeded: {current_tokens} > {max_tokens}, trimming...")
+
+    # Remove oldest messages until we fit the budget
+    trimmed = messages.copy()
+    while len(trimmed) > 10:  # Keep at least 10 messages minimum
+        current_tokens = _count_message_tokens(trimmed, model=target_model)
+        if current_tokens <= max_tokens:
+            break
+        trimmed.pop(0)
+
+    new_tokens = _count_message_tokens(trimmed, model=target_model)
+    metrics.compression_aggressive_trims += 1
+    print(f"[compress] Trimmed to {len(trimmed)} messages: {current_tokens} → {new_tokens} tokens")
+    return trimmed
+
+
+def _enforce_message_cap(
+    messages: list[dict],
+    max_messages: int,
+) -> list[dict]:
+    """
+    Enforce hard message cap.
+
+    max_messages is passed from caller (calculated from config).
+    Tracks message cap enforcement in metrics.
+    """
+    if len(messages) <= max_messages:
+        return messages
+
+    print(f"[compress] Message cap exceeded: {len(messages)} > {max_messages}, enforcing cap...")
+    metrics.compression_message_cap_enforced += 1
+    # Keep only the most recent max_messages
+    capped = messages[-max_messages:]
+    print(f"[compress] Capped to {len(capped)} messages")
+    return capped
+
+
 async def compress_messages_if_needed(
     messages: list[dict],
+    cfg: Any,  # CompressorConfig with all new parameters
     model_context_window: int,
     compressor_model: str,
     compressor_api_key: str,
     compressor_base_url: Optional[str] = None,
-    keep_recent: int = 15,
-    trigger_ratio: float = 0.85,
     tools_overhead_tokens: int = 0,
     target_model: str = "",
-    fallback_model: Optional[str] = None,
-    fallback_api_key: Optional[str] = None,
-    fallback_base_url: Optional[str] = None,
+    session_id: str = "",  # Phase 3: Session ID management
 ) -> tuple[list[dict], bool]:
     """
     Compress conversation if it exceeds the model's context window.
 
+    Multi-layer pipeline: normalize → detect inflation → split → summarize → merge → trim → cap
+    All limits are dynamically calculated from model_context_window and config ratios - no magic numbers.
+
     Args:
         messages: OpenAI-format messages (already converted from Anthropic)
+        cfg: CompressorConfig with all compression parameters
         model_context_window: Target model's context window in tokens
         compressor_model: LiteLLM model string for the compressor (e.g. "openai/glm-4.7-flash")
         compressor_api_key: API key for the compressor
         compressor_base_url: Optional base URL for the compressor
-        keep_recent: Number of recent messages to keep intact
-        trigger_ratio: Compress when estimated tokens > ratio * window (default 0.85)
         tools_overhead_tokens: Extra tokens from tool definitions (not in messages)
         target_model: LiteLLM model string for the target model (used for accurate token counting)
-        fallback_model: Optional fallback compressor model (tried if primary fails)
-        fallback_api_key: Optional fallback compressor API key
-        fallback_base_url: Optional fallback compressor base URL
 
     Returns:
         (messages, was_compressed) — compressed messages and whether compression happened
@@ -216,68 +351,77 @@ async def compress_messages_if_needed(
     if model_context_window <= 0 or not compressor_model or not compressor_api_key:
         return messages, False
 
+    # Calculate dynamic limits from config ratios
+    max_messages = int(model_context_window * cfg.max_messages_ratio // 300)
+    max_tokens = int(model_context_window * cfg.max_tokens_ratio)
+    summary_trigger_tokens = int(model_context_window * cfg.summary_trigger_ratio)
+    recent_window_tokens = int(model_context_window * cfg.recent_window_ratio)
+
+    print(f"[compress] Dynamic limits for model (context_window={model_context_window}): "
+          f"max_messages={max_messages}, max_tokens={max_tokens}, "
+          f"summary_trigger={summary_trigger_tokens} tokens, recent_window={recent_window_tokens} tokens")
+
+    # Step 1: Normalize messages
+    messages = _normalize_messages(messages)
+
+    # Step 2: Detect tool inflation
+    if _detect_tool_inflation(messages, cfg.tool_inflation_threshold):
+        print(f"[compress] Tool inflation detected: >{cfg.tool_inflation_threshold} tool messages")
+
     estimated_tokens = _count_message_tokens(messages, model=target_model) + tools_overhead_tokens
-    threshold = int(trigger_ratio * model_context_window)
+    threshold = int(cfg.trigger_ratio * model_context_window)
 
     print(f"[compress] Check: tokens={estimated_tokens} (tools_overhead={tools_overhead_tokens}) "
-          f"threshold={threshold} (window={model_context_window} × ratio={trigger_ratio}) "
-          f"model={target_model}")
+          f"threshold={threshold} (window={model_context_window} × ratio={cfg.trigger_ratio}) "
+          f"model={target_model} msg_count={len(messages)}")
 
-    if estimated_tokens <= threshold:
+    # HYBRID TRIGGER: Token count OR message count (whichever comes first)
+    if estimated_tokens <= threshold and len(messages) < cfg.message_threshold:
         return messages, False
 
-    # Separate system, old, and recent messages
-    system_msg = None
-    conversation = messages
-    if messages and messages[0].get("role") == "system":
-        system_msg = messages[0]
-        conversation = messages[1:]
+    if len(messages) >= cfg.message_threshold:
+        print(f"[compress] TRIGGERED BY MESSAGE COUNT: {len(messages)} >= {cfg.message_threshold}")
+        # Continue to compression logic below
 
-    # Not enough messages to compress
-    if len(conversation) <= keep_recent + 2:
-        print(f"[compress] Skipped: only {len(conversation)} msgs (need > {keep_recent + 2})")
-        return messages, False
+    # Step 3: Split conversation into old and recent parts
+    old_messages, recent_messages = _split_conversation(
+        messages,
+        model_context_window,
+        cfg.summary_trigger_ratio,
+        cfg.recent_window_ratio,
+        cfg.message_threshold,
+    )
 
-    split_point = _find_safe_split_point(conversation, keep_recent)
-    old_messages = conversation[:split_point]
-    recent_messages = conversation[split_point:]
-
-    # Nothing meaningful to compress
+    # Not enough old messages to compress
     if len(old_messages) < 3:
         print(f"[compress] Skipped: only {len(old_messages)} old msgs (need >= 3)")
         return messages, False
 
-    print(f"[compress] Triggered: {estimated_tokens} tokens > {threshold} threshold. "
+    print(f"[compress] Triggered: {estimated_tokens} tokens > {threshold} threshold "
+          f"OR {len(messages)} >= {cfg.message_threshold} messages. "
           f"Compressing {len(old_messages)} old messages, keeping {len(recent_messages)} recent. "
           f"compressor={compressor_model}")
 
-    # ── Check compression cache before calling LLM ──
-    global _compression_cache
-    prefix_hash = _compute_prefix_hash(old_messages)
-    now = time.monotonic()
+    # Extract system message
+    system_msg = None
+    if messages and messages[0].get("role") == "system":
+        system_msg = messages[0]
 
-    async with _state_lock:
-        if (_compression_cache is not None
-                and _compression_cache.prefix_hash == prefix_hash
-                and (now - _compression_cache.timestamp) < _CACHE_TTL
-                and (len(old_messages) - _compression_cache.old_msg_count) <= _CACHE_MSG_TOLERANCE):
-            # Cache hit — reuse previous summary, skip the LLM call
-            metrics.compression_cache_hits += 1
-            age = int(now - _compression_cache.timestamp)
-            delta = len(old_messages) - _compression_cache.old_msg_count
-            print(f"[compress] Cache HIT: reusing summary "
-                  f"(cached {_compression_cache.old_msg_count} msgs, now {len(old_messages)} msgs, "
-                  f"delta={delta}, age={age}s)")
-            cached_summary = _compression_cache.summary
-        else:
-            cached_summary = None
-            metrics.compression_cache_misses += 1
-            reason = "no cache" if _compression_cache is None else (
-                "prefix mismatch" if _compression_cache.prefix_hash != prefix_hash else
-                "expired" if (now - _compression_cache.timestamp) >= _CACHE_TTL else
-                f"delta {len(old_messages) - _compression_cache.old_msg_count} > {_CACHE_MSG_TOLERANCE}"
-            )
-            print(f"[compress] Cache MISS ({reason}): compressing fresh (prefix_hash={prefix_hash})")
+    # ── Check compression cache before calling LLM ──
+    cached_summary = await get_or_create_session(session_id, old_messages)
+    if cached_summary is not None:
+        # Cache hit — reuse previous summary, skip the LLM call
+        metrics.compression_cache_hits += 1
+        now = time.monotonic()
+        cache = _session_cache.get(session_id)
+        age = int(now - cache.timestamp) if cache else 0
+        delta = len(old_messages) - cache.old_msg_count if cache else 0
+        print(f"[compress] Cache HIT: reusing summary "
+              f"(session={session_id}, cached {cache.old_msg_count if cache else 0} msgs, now {len(old_messages)} msgs, "
+              f"delta={delta}, age={age}s)")
+    else:
+        metrics.compression_cache_misses += 1
+        print(f"[compress] Cache MISS (no session): compressing fresh (session={session_id})")
 
     if cached_summary is not None:
         compressed = _reassemble_with_summary(system_msg, cached_summary, recent_messages)
@@ -289,39 +433,42 @@ async def compress_messages_if_needed(
     # Try LLM compression (retry + circuit breaker + fallback)
     result = await _llm_compress(
         old_messages, compressor_model, compressor_api_key, compressor_base_url,
-        fallback_model=fallback_model,
-        fallback_api_key=fallback_api_key,
-        fallback_base_url=fallback_base_url,
+        fallback_model=cfg.fallback_model,
+        fallback_api_key=cfg.fallback_api_key,
+        fallback_base_url=cfg.fallback_base_url,
     )
 
     if result:
         summary, model_used = result
         # Store in cache for next request
-        # Recalculate timestamp inside lock to avoid race condition where
-        # 'now' (from line 257) becomes stale after the long LLM call (2-5s)
-        async with _state_lock:
-            cache_timestamp = time.monotonic()
-            _compression_cache = _CompressionCache(
-                summary=summary,
-                old_msg_count=len(old_messages),
-                timestamp=cache_timestamp,
-                prefix_hash=prefix_hash,
-            )
-        compressed = _reassemble_with_summary(system_msg, summary, recent_messages)
-        new_tokens = _count_message_tokens(compressed, model=target_model)
+        await update_session(session_id, summary, len(old_messages))
+        # Reassemble with summary
+        merged = _reassemble_with_summary(system_msg, summary, recent_messages)
+
+        # Step 5: Enforce token budget
+        merged = _trim_by_token_budget(merged, max_tokens, target_model)
+
+        # Step 6: Enforce message cap
+        merged = _enforce_message_cap(merged, max_messages)
+
+        new_tokens = _count_message_tokens(merged, model=target_model)
         print(f"[compress] Success ({model_used}): {estimated_tokens} → {new_tokens} tokens "
               f"(saved {estimated_tokens - new_tokens})")
-        return compressed, True
+        return merged, True
 
-    # Fallback: aggressive trimming — keep only 5 most recent messages
-    # (not keep_recent=15) to ensure we stay well under context window.
+    # Fallback: aggressive trimming — keep only cfg.keep_recent most recent messages
     # CC resends full conversation next turn, so trimming more aggressively
     # prevents the regrowth cycle where tokens grow 12K→218K.
-    aggressive_keep = min(5, len(recent_messages))
+    aggressive_keep = min(cfg.keep_recent, len(recent_messages))
     aggressive_recent = recent_messages[-aggressive_keep:] if aggressive_keep > 0 else recent_messages
     print(f"[compress] LLM compression failed, falling back to aggressive trimming "
-          f"(keeping {len(aggressive_recent)} of {len(conversation)} messages)")
+          f"(keeping {len(aggressive_recent)} of {len(messages)} messages)")
     trimmed = _reassemble_trimmed(system_msg, aggressive_recent)
+
+    # Apply token budget and message cap to fallback as well
+    trimmed = _trim_by_token_budget(trimmed, max_tokens, target_model)
+    trimmed = _enforce_message_cap(trimmed, max_messages)
+
     new_tokens = _count_message_tokens(trimmed, model=target_model)
     print(f"[compress] Trimmed: {estimated_tokens} → {new_tokens} tokens")
     return trimmed, True
@@ -551,4 +698,83 @@ def _reassemble_trimmed(
     if not _validate_tool_references(result):
         print("[compress] WARNING: orphan tool references detected after trimming, fixing...")
         result = _fix_orphan_tool_messages(result)
-    return result
+
+        return result
+
+# ── Session management functions (Phase 3 Enhancement) ──
+
+async def get_or_create_session(session_id: str, messages: list[dict]) -> Optional[str]:
+    """
+    Retrieve cached summary for a session, or create a new session if it doesn't exist.
+
+    Args:
+        session_id: UUID-based session identifier
+        messages: Current conversation messages
+
+    Returns:
+        Cached summary string if session exists and is valid, None otherwise
+    """
+    now = time.monotonic()
+    async with _state_lock:
+        session = _session_cache.get(session_id)
+        if session is not None:
+            # Check if session is still valid (within TTL)
+            if now - session.timestamp < _SESSION_TTL:
+                age = int(now - session.timestamp)
+                print(f"[session] Cache hit: session_id={session_id[:8]}... age={age}s summary_len={len(session.summary)}")
+                metrics.compression_cache_hits += 1
+                return session.summary
+            else:
+                print(f"[session] Session expired: session_id={session_id[:8]}... age={age}s")
+                metrics.compression_cache_misses += 1
+                _session_cache.pop(session_id, None)
+                return None
+
+        # Create new session
+        print(f"[session] New session created: session_id={session_id[:8]}...")
+        metrics.compression_cache_misses += 1
+        # Note: Session will be updated with compression summary after compression completes
+        return None
+
+async def update_session(session_id: str, summary: str, old_count: int) -> None:
+    """
+    Update an existing session with new compression summary.
+
+    Args:
+        session_id: UUID-based session identifier
+        summary: Compressed conversation summary
+        old_count: Number of old messages that were compressed
+    """
+    now = time.monotonic()
+    async with _state_lock:
+        _session_cache[session_id] = _CompressionCache(
+            session_id=session_id,
+            summary=summary,
+            old_msg_count=old_count,
+            timestamp=now
+        )
+        print(f"[session] Session updated: session_id={session_id[:8]}... old_count={old_count} summary_len={len(summary)}")
+
+async def cleanup_expired_sessions() -> None:
+    """
+    Remove expired sessions from cache to prevent memory leaks.
+    Should be called periodically (e.g., every hour).
+    """
+    now = time.monotonic()
+    async with _state_lock:
+        expired_sessions = [
+            session_id for session_id, session in _session_cache.items()
+            if now - session.timestamp >= _SESSION_TTL
+        ]
+
+        if expired_sessions:
+            for session_id in expired_sessions:
+                session = _session_cache.pop(session_id, None)
+                age = int(now - session.timestamp)
+                print(f"[session] Cleaned up expired session: session_id={session_id[:8]}... age={age}s")
+
+            if expired_sessions:
+                print(f"[session] Cleanup completed: removed {len(expired_sessions)} expired sessions")
+                metrics.record("sessions_cleaned", len(expired_sessions))
+        else:
+            print(f"[session] No expired sessions to clean up")

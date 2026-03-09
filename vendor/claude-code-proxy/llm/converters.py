@@ -792,9 +792,11 @@ def extract_xml_tools_from_passthrough_response(response: dict, request: Any) ->
     if not extracted_any:
         return response
 
+    # FIX: Only set stop_reason when tools are actually extracted
     result = dict(response)
     result["content"] = new_content
-    result["stop_reason"] = "tool_use"
+    if extracted_any:
+        result["stop_reason"] = "tool_use"
     print(
         f"[passthrough-xml] non-stream: extracted {sum(1 for b in new_content if isinstance(b, dict) and b.get('type') == 'tool_use')} tool(s) from text content",
         flush=True,

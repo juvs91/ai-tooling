@@ -216,8 +216,11 @@ async def create_message(request: MessagesRequest, raw_request: Request):
 
         body = await raw_request.body()
 
+        # Extract session ID for conversation persistence (Phase 3)
+        session_id = raw_request.headers.get("X-Session-ID") or None
+
         # Phase 1: Request pipeline (classification + guardrails + routing)
-        ctx = TransformContext(raw_body=body)
+        ctx = TransformContext(raw_body=body, session_id=session_id)
         try:
             await _request_pipeline.process(request, ctx)
         except ValueError as e:
@@ -266,13 +269,20 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 # Extract GLM argkv tool calls from text content (mirrors LiteLLM non-stream path)
                 if getattr(request, "tools", None):
                     out = extract_xml_tools_from_passthrough_response(out, request)
+
+                # Extract actual token usage from response (fix for GLM-4.7 metrics)
+                usage_info = out.get("usage", {})
+                actual_output_tokens = 0
+                if isinstance(usage_info, dict):
+                    actual_output_tokens = usage_info.get("output_tokens", 0) or usage_info.get("completion_tokens", 0)
+
                 metrics.record(RequestLog(
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     intent=ctx.intent,
                     model_requested=original_model,
                     model_used=request.model,
                     provider="passthrough",
-                    input_tokens=est_input_tokens, output_tokens=0,
+                    input_tokens=est_input_tokens, output_tokens=actual_output_tokens,
                     latency_ms=elapsed_ms,
                     is_fallback=False,
                     is_stream=False, is_analysis=ctx.is_analysis,
