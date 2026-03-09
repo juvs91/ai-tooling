@@ -27,7 +27,7 @@ services:
       - "8085:8082"  # Puerto diferente: 8085 (test) vs 8083 (production)
     volumes:
       - ./vendor/claude-code-proxy:/claude-code-proxy:rw  # RW para hot-reload con cambios locales
-    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py' --reload-exclude '.venv'
+    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py'
     networks:
       - default
 

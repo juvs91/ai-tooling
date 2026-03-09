@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 from llm.pipeline import Transformer, TransformContext
 from llm.compressor import compress_messages_if_needed, estimate_tools_tokens
+from llm.compressor import get_or_create_session, update_session
 from llm.tool_prompting import is_no_tools_model
 from config import CompressorConfig, ModelRouting
 
@@ -64,17 +65,14 @@ class CompressionTransformer(Transformer):
 
         ctx.litellm_request["messages"], ctx.was_compressed = await compress_messages_if_needed(
             messages=ctx.litellm_request["messages"],
+            session_id=ctx.session_id,
+            cfg=self._comp,
             model_context_window=model_ctx,
             compressor_model=self._comp.model,
             compressor_api_key=self._comp.api_key,
             compressor_base_url=self._comp.base_url,
-            keep_recent=self._comp.keep_recent,
-            trigger_ratio=self._comp.trigger_ratio,
             tools_overhead_tokens=tools_overhead,
             target_model=model,
-            fallback_model=self._comp.fallback_model,
-            fallback_api_key=self._comp.fallback_api_key,
-            fallback_base_url=self._comp.fallback_base_url,
         )
 
         # Recalculate max_completion_tokens after compression.

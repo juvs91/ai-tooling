@@ -50,6 +50,10 @@ class ProxyMetrics:
         # Compression cache tracking
         self.compression_cache_hits = 0
         self.compression_cache_misses = 0
+        # Compression effectiveness tracking
+        self.compression_aggressive_trims = 0
+        self.compression_message_cap_enforced = 0
+        self.compression_tool_inflation_detected = 0
         # Tool call quality counters
         self.tool_calls_native = 0
         self.tool_calls_xml_extracted = 0
@@ -136,6 +140,11 @@ class ProxyMetrics:
                 "compression_cache": {
                     "hits": self.compression_cache_hits,
                     "misses": self.compression_cache_misses,
+                },
+                "compression_effectiveness": {
+                    "aggressive_trims": self.compression_aggressive_trims,
+                    "message_cap_enforced": self.compression_message_cap_enforced,
+                    "tool_inflation_detected": self.compression_tool_inflation_detected,
                 },
                 "retries": {"total": self.total_retries, "successes": self.retry_successes},
                 "classifier": {

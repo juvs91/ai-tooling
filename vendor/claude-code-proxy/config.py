@@ -100,6 +100,13 @@ class CompressorConfig:
     fallback_model: Optional[str]
     fallback_api_key: Optional[str]
     fallback_base_url: Optional[str]
+    # New parameters for context-window-aware compression
+    message_threshold: int           # ENV: COMPRESSOR_MESSAGE_THRESHOLD (default: 20)
+    max_messages_ratio: float        # ENV: COMPRESSOR_MAX_MESSAGES_RATIO (default: 0.85)
+    max_tokens_ratio: float         # ENV: COMPRESSOR_MAX_TOKENS_RATIO (default: 0.85)
+    tool_inflation_threshold: int    # ENV: COMPRESSOR_TOOL_INFLATION_THRESHOLD (default: 40)
+    summary_trigger_ratio: float     # ENV: COMPRESSOR_SUMMARY_TRIGGER_RATIO (default: 0.60)
+    recent_window_ratio: float        # ENV: COMPRESSOR_RECENT_WINDOW_RATIO (default: 0.40)
 
 
 @dataclass
@@ -325,11 +332,18 @@ def load_config() -> ProxyConfig:
             model=comp_model,
             api_key=comp_key,
             base_url=comp_base,
-            keep_recent=int(_env("COMPRESSOR_KEEP_RECENT", "15")),
-            trigger_ratio=float(_env("COMPRESSOR_TRIGGER_RATIO", "0.85")),
+            keep_recent=int(_env("COMPRESSOR_KEEP_RECENT", "10")),  # was 15
+            trigger_ratio=float(_env("COMPRESSOR_TRIGGER_RATIO", "0.70")),  # was 0.85
             fallback_model=_env_or_none("COMPRESSOR_FALLBACK_MODEL"),
             fallback_api_key=_env_or_none("COMPRESSOR_FALLBACK_API_KEY"),
             fallback_base_url=_env_or_none("COMPRESSOR_FALLBACK_BASE_URL"),
+            # New parameters for context-window-aware compression
+            message_threshold=int(_env("COMPRESSOR_MESSAGE_THRESHOLD", "20")),
+            max_messages_ratio=float(_env("COMPRESSOR_MAX_MESSAGES_RATIO", "0.85")),
+            max_tokens_ratio=float(_env("COMPRESSOR_MAX_TOKENS_RATIO", "0.85")),
+            tool_inflation_threshold=int(_env("COMPRESSOR_TOOL_INFLATION_THRESHOLD", "40")),
+            summary_trigger_ratio=float(_env("COMPRESSOR_SUMMARY_TRIGGER_RATIO", "0.60")),
+            recent_window_ratio=float(_env("COMPRESSOR_RECENT_WINDOW_RATIO", "0.40")),
         ),
         policy=PolicyConfig(
             tool_allowlist_raw=_env_stripped("TOOL_ALLOWLIST"),

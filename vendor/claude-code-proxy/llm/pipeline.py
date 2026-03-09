@@ -42,6 +42,9 @@ class TransformContext:
     litellm_request: dict = field(default_factory=dict)
 
     # Set by ModelRouterTransformer when routing to a cross-provider model
+
+    # Set by Session Management (Phase 3 Enhancement)
+    session_id: str = field(default="")  # UUID-based session identifier
     route_override: Optional["RouteOverride"] = None
 
     # Set by ModelRouterTransformer: resolved context window for the routed model

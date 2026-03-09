@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 import os
+import uuid
 from threading import Lock
 from typing import Any, Tuple
 
@@ -65,7 +66,15 @@ def build_litellm_pipeline(cfg: ProxyConfig) -> Pipeline:
     ])
 
 
+def build_passthrough_pipeline(cfg: ProxyConfig) -> Pipeline:
+    """Phase 2b: Transformers for passthrough (Anthropic-compatible endpoints like Z.AI)."""
+    return Pipeline([
+        CompressionTransformer(cfg.compressor, cfg.routing),
+    ])
+
+
 _litellm_pipeline_cache: Pipeline | None = None
+_passthrough_pipeline_cache: Pipeline | None = None
 _litellm_pipeline_lock = Lock()
 
 
@@ -77,6 +86,16 @@ def _get_litellm_pipeline(cfg: ProxyConfig) -> Pipeline:
             if _litellm_pipeline_cache is None:  # double-check inside lock
                 _litellm_pipeline_cache = build_litellm_pipeline(cfg)
     return _litellm_pipeline_cache
+
+
+def _get_passthrough_pipeline(cfg: ProxyConfig) -> Pipeline:
+    """Return a cached passthrough pipeline (built once on first call, thread-safe)."""
+    global _passthrough_pipeline_cache
+    if _passthrough_pipeline_cache is None:
+        with _litellm_pipeline_lock:
+            if _passthrough_pipeline_cache is None:  # double-check inside lock
+                _passthrough_pipeline_cache = build_passthrough_pipeline(cfg)
+    return _passthrough_pipeline_cache
 
 
 # ── Execution layer (retry + fallback — unchanged) ──────────────────
@@ -282,6 +301,17 @@ async def run_messages(
             )
             # Dynamic timeout: reasoning models need more time with large contexts
             timeout = cfg.passthrough_thinking_timeout if has_thinking else cfg.passthrough_timeout
+
+            # Convert to LiteLLM format for compression transformer
+            ctx.litellm_request = convert_anthropic_to_litellm(
+                request_obj, model_context_window=model_ctx,
+                max_output_tokens=cfg.routing.max_output_tokens,
+                reasoning_max_tokens=cfg.routing.reasoning_max_tokens,
+            )
+
+            # Run passthrough pipeline (compression) before building body
+            await _get_passthrough_pipeline(cfg).process(request_obj, ctx)
+
             pt = PassthroughClient(cfg.credentials.anthropic_base_url, cfg.credentials.anthropic_api_key, timeout=timeout)
             body = _build_passthrough_body(
                 request_obj, pt_model,
