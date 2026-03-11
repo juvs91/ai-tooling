@@ -374,7 +374,7 @@ async def run_messages(
                 logger.info("[passthrough] streaming phase=%s model=%s analysis=%s timeout=%.0fs", ctx.phase, body.get("model"), ctx.analysis_phase, timeout)
                 # Don't strip reasoning during analysis — the reasoning IS the value
                 strip = cfg.policy.strip_reasoning and not ctx.is_analysis
-                raw_stream = pt.stream_message(body, strip_reasoning=strip)
+                raw_stream = pt.stream_message(body, strip_reasoning=strip, response_model=model)
                 # Eagerly fetch first chunk to detect connection/timeout errors
                 # BEFORE returning StreamingResponse (enables litellm fallback)
                 try:
