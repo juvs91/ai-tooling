@@ -151,6 +151,9 @@ load_ralphrc() {
     [[ -n "$_env_CB_COOLDOWN_MINUTES" ]] && CB_COOLDOWN_MINUTES="$_env_CB_COOLDOWN_MINUTES"
     [[ -n "$_env_CB_AUTO_RESET" ]] && CB_AUTO_RESET="$_env_CB_AUTO_RESET"
 
+    # Restore CLI --timeout if provided (CLI takes precedence over .ralphrc)
+    [[ -n "${_cli_CLAUDE_TIMEOUT_MINUTES:-}" ]] && CLAUDE_TIMEOUT_MINUTES="$_cli_CLAUDE_TIMEOUT_MINUTES"
+
     RALPHRC_LOADED=true
     return 0
 }
@@ -1732,6 +1735,7 @@ while [[ $# -gt 0 ]]; do
         -t|--timeout)
             if [[ "$2" =~ ^[1-9][0-9]*$ ]] && [[ "$2" -le 120 ]]; then
                 CLAUDE_TIMEOUT_MINUTES="$2"
+                _cli_CLAUDE_TIMEOUT_MINUTES="$2"  # preserve across load_ralphrc()
             else
                 echo "Error: Timeout must be a positive integer between 1 and 120 minutes"
                 exit 1

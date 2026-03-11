@@ -24,6 +24,22 @@ fi
 ln -sf "$REPO_ROOT/vendor/ralph/ralph_loop.sh" "$TARGET"
 echo "OK: ralph_loop.sh → $TARGET"
 
+# --- lib/ directory ---
+# Symlink each lib file individually so ~/.ralph/lib/ still works for other scripts
+LIB_SRC="$REPO_ROOT/vendor/ralph/lib"
+LIB_DST="$RALPH_DIR/lib"
+mkdir -p "$LIB_DST"
+for src in "$LIB_SRC"/*.sh; do
+    fname="$(basename "$src")"
+    dst="$LIB_DST/$fname"
+    if [[ -f "$dst" && ! -L "$dst" ]]; then
+        cp "$dst" "${dst}.bak"
+        echo "  Backed up: ${dst}.bak"
+    fi
+    ln -sf "$src" "$dst"
+    echo "OK: lib/$fname → $dst"
+done
+
 # --- claude-stdio (project-specific) ---
 # This file lives inside each project's .ralph/bin/ directory.
 # Pass the project root as the first argument, or it will be skipped.
