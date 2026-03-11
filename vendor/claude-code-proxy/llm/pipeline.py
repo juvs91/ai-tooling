@@ -41,20 +41,27 @@ class TransformContext:
     # Populated by execution layer after convert_anthropic_to_litellm()
     litellm_request: dict = field(default_factory=dict)
 
-    # Set by ModelRouterTransformer when routing to a cross-provider model
-
     # Set by Session Management (Phase 3 Enhancement)
-    session_id: str = field(default="")  # UUID-based session identifier
+    session_id: str = field(default="")
     route_override: Optional["RouteOverride"] = None
 
     # Set by ModelRouterTransformer: resolved context window for the routed model
     # Used by CompressionTransformer, token scaling, and max_tokens recalculation
     effective_context_window: int = 0
 
+    # Set during request phase - passed to response transformers
+    # Original tools from request, needed for tool validation during extraction
+    tools: list | None = None
+
     # Set by quality evaluation (refinement loop)
     quality_score: float = 1.0
     quality_issues: list[str] = field(default_factory=list)
     refinement_attempt: int = 0
+
+    # Set by UniversalToolExtractionTransformer (response pipeline)
+    # Stores XML-extracted tool calls so they can be added back to response content
+    extracted_tool_calls: list = field(default_factory=list)
+    xml_tool_buffer: Any = None
 
 
 class Transformer(ABC):

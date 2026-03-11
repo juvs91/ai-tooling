@@ -1,0 +1,10 @@
+{
+    "timestamp": "",
+    "loop_count": 0,
+    "calls_made_this_hour": 0,
+    "max_calls_per_hour": 50,
+    "last_action": "initialized",
+    "status": "pending",
+    "exit_reason": "",
+    "next_reset": ""
+}

@@ -120,6 +120,18 @@ else
 fi
 echo "Mount: $HOST_SERVER -> $CONTAINER_SERVER"
 echo "Port: $BIND_PORT -> 8082"
+# Get services from override file (supports multi-service override files)
+services=$(parse_override_services "$OVERRIDE")
 
-docker compose -f docker-compose.yml -f "$OVERRIDE" -f "$TMP_OVERRIDE" up -d --force-recreate proxy_cloud
+if [[ -z "$services" ]]; then
+  echo "ERROR: No services found in $OVERRIDE" >&2
+  exit 2
+fi
+
+# Recreate each service
+for service in $services; do
+  echo "[+] Recreating service: $service"
+  docker compose -f docker-compose.yml -f "$OVERRIDE" up -d --force-recreate "$service"
+done
+
 docker ps --format "table {{.Names}}\t{{.Ports}}"

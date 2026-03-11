@@ -16,6 +16,8 @@ from llm.converters import (
     _convert_message_blocks,
     _tool_result_content_to_str,
     convert_anthropic_to_litellm,
+)
+from utils.schema_utils import (
     _convert_tool_cached,
     _tool_conversion_cache,
     clean_gemini_schema_cached,

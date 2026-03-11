@@ -86,7 +86,7 @@ class TestSchemaCacheThreadSafety:
 
     def test_concurrent_tool_conversion_no_exception(self):
         """Concurrent _convert_tool_cached calls must not raise or return None."""
-        from llm.converters import _convert_tool_cached
+        from utils.schema_utils import _convert_tool_cached
 
         tool = {
             "name": "Bash",
@@ -114,7 +114,7 @@ class TestSchemaCacheThreadSafety:
 
     def test_concurrent_gemini_schema_no_exception(self):
         """Concurrent clean_gemini_schema_cached calls must not raise."""
-        from llm.converters import clean_gemini_schema_cached
+        from utils.schema_utils import clean_gemini_schema_cached
 
         schema = {"type": "object", "properties": {"x": {"type": "string"}}}
         errors = []
@@ -135,7 +135,7 @@ class TestSchemaCacheThreadSafety:
 
     def test_tool_conversion_result_consistent(self):
         """All concurrent calls for same tool must return identical result."""
-        from llm.converters import _convert_tool_cached
+        from utils.schema_utils import _convert_tool_cached
 
         tool = {
             "name": "Read",

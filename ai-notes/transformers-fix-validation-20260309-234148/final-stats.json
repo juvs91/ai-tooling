@@ -1,0 +1,81 @@
+{
+    "total_requests": 1,
+    "total_errors": 0,
+    "total_fallbacks": 0,
+    "fallback_rate_pct": 0.0,
+    "total_input_tokens": 193,
+    "total_output_tokens": 28,
+    "total_thinking_tokens": 0,
+    "cache": {
+        "hits": 0,
+        "misses": 2
+    },
+    "compression_cache": {
+        "hits": 0,
+        "misses": 0
+    },
+    "compression_effectiveness": {
+        "aggressive_trims": 0,
+        "message_cap_enforced": 0,
+        "tool_inflation_detected": 0
+    },
+    "retries": {
+        "total": 0,
+        "successes": 0
+    },
+    "classifier": {
+        "llm_success": 2,
+        "regex_fallback": 0,
+        "disagreements": 1,
+        "agreement_rate_pct": 50.0,
+        "outcome_correct": 0,
+        "outcome_wrong": 0,
+        "outcome_accuracy_pct": 0.0
+    },
+    "tool_quality": {
+        "native": 0,
+        "xml_extracted": 0,
+        "recovered": 0,
+        "truncated": 0,
+        "hallucinated": 0,
+        "total": 0,
+        "success_rate_pct": 0.0
+    },
+    "model_quality": {
+        "deepseek-chat": {
+            "request": 1
+        },
+        "classifier": {
+            "disagree_READ_vs_BUILD": 1
+        }
+    },
+    "analysis_enforcements": 0,
+    "analysis_refinements": 0,
+    "analysis_avg_quality": 0.0,
+    "cost": {
+        "total_usd": 6.6e-05,
+        "by_model": {
+            "deepseek-chat": 6.6e-05
+        },
+        "by_intent": {
+            "CHAT": 6.6e-05
+        },
+        "avg_per_request": 6.6e-05
+    },
+    "providers": {
+        "primary": {
+            "requests": 1,
+            "errors": 0,
+            "avg_latency_ms": 2053
+        }
+    },
+    "intents": {
+        "CHAT": 1
+    },
+    "quality_by_phase": {
+        "EXPLORE": {
+            "count": 1,
+            "avg_quality": 1.0
+        }
+    }
+}

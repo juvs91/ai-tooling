@@ -1,0 +1,57 @@
+{
+    "total_requests": 0,
+    "total_errors": 0,
+    "total_fallbacks": 0,
+    "fallback_rate_pct": 0.0,
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "total_thinking_tokens": 0,
+    "cache": {
+        "hits": 0,
+        "misses": 0
+    },
+    "compression_cache": {
+        "hits": 0,
+        "misses": 0
+    },
+    "compression_effectiveness": {
+        "aggressive_trims": 0,
+        "message_cap_enforced": 0,
+        "tool_inflation_detected": 0
+    },
+    "retries": {
+        "total": 0,
+        "successes": 0
+    },
+    "classifier": {
+        "llm_success": 0,
+        "regex_fallback": 0,
+        "disagreements": 0,
+        "agreement_rate_pct": 100.0,
+        "outcome_correct": 0,
+        "outcome_wrong": 0,
+        "outcome_accuracy_pct": 0.0
+    },
+    "tool_quality": {
+        "native": 0,
+        "xml_extracted": 0,
+        "recovered": 0,
+        "truncated": 0,
+        "hallucinated": 0,
+        "total": 0,
+        "success_rate_pct": 0.0
+    },
+    "model_quality": {},
+    "analysis_enforcements": 0,
+    "analysis_refinements": 0,
+    "analysis_avg_quality": 0.0,
+    "cost": {
+        "total_usd": 0.0,
+        "by_model": {},
+        "by_intent": {},
+        "avg_per_request": 0.0
+    },
+    "providers": {},
+    "intents": {},
+    "quality_by_phase": {}
+}

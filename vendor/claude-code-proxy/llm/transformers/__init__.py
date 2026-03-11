@@ -10,6 +10,11 @@ from llm.transformers.compression import CompressionTransformer
 from llm.transformers.provider_quirks import ProviderQuirksTransformer
 from llm.transformers.credential import CredentialTransformer
 from llm.transformers.intent_enforcement import IntentEnforcementTransformer
+from llm.transformers.reasoning_handling import ReasoningHandlingTransformer
+from llm.transformers.model_feedback import ModelFeedbackTransformer
+from llm.transformers.quality_refinement import QualityRefinementTransformer
+from llm.transformers.stream_event import StreamEventTransformer
+from llm.transformers.universal_tool_extraction import UniversalToolExtractionTransformer
 
 __all__ = [
     "Pipeline",
@@ -24,4 +29,9 @@ __all__ = [
     "ProviderQuirksTransformer",
     "CredentialTransformer",
     "IntentEnforcementTransformer",
+    "ReasoningHandlingTransformer",
+    "ModelFeedbackTransformer",
+    "QualityRefinementTransformer",
+    "StreamEventTransformer",
+    "UniversalToolExtractionTransformer",
 ]

@@ -145,7 +145,8 @@ class TestStreamingHallucinatedToolValidation:
     def test_hallucinated_tool_indices_field_exists(self):
         """_StreamCtx dataclass has hallucinated_tool_indices field."""
         from llm.streaming import _StreamCtx
-        from llm.tool_prompting import XmlToolBuffer, _build_valid_tool_names
+        from llm.transformers.universal_tool_extraction import XmlToolBuffer
+        from utils.tool_utils import build_valid_tool_names as _build_valid_tool_names
         import dataclasses
 
         fields = {f.name for f in dataclasses.fields(_StreamCtx)}
@@ -156,7 +157,8 @@ class TestStreamingHallucinatedToolValidation:
     def test_hallucinated_tool_indices_default_is_empty_set(self):
         """hallucinated_tool_indices defaults to an empty set (not shared across instances)."""
         from llm.streaming import _StreamCtx
-        from llm.tool_prompting import XmlToolBuffer, _build_valid_tool_names
+        from llm.transformers.universal_tool_extraction import XmlToolBuffer
+        from utils.tool_utils import build_valid_tool_names as _build_valid_tool_names
 
         valid = _build_valid_tool_names(TOOLS)
         buf = XmlToolBuffer(valid_tool_names=valid, tools=TOOLS)

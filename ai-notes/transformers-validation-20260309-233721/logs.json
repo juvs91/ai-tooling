@@ -1,0 +1,20 @@
+[
+    {
+        "timestamp": "2026-03-10T05:37:29.916874+00:00",
+        "intent": "READ",
+        "model_requested": "claude-sonnet-4-5-20250929",
+        "model_used": "anthropic/glm-4.7",
+        "provider": "passthrough",
+        "input_tokens": 155,
+        "output_tokens": 157,
+        "latency_ms": 3675,
+        "is_fallback": false,
+        "is_stream": true,
+        "phase": "PLAN",
+        "is_analysis": true,
+        "refinement_attempts": 0,
+        "quality_score": 0.3,
+        "cost_usd": 0.00034540000000000005,
+        "error": null
+    }
+]

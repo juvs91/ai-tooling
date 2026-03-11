@@ -1,0 +1,27 @@
+# Ralph Configuration — {{PROJECT_NAME}}
+# Proyecto: {{PROJECT_DESCRIPTION}}
+
+PROJECT_NAME="{{PROJECT_NAME}}"
+PROJECT_TYPE="{{PROJECT_TYPE}}"  # sql, python, typescript, rust, etc.
+
+# Loop settings
+MAX_CALLS_PER_HOUR=50
+CLAUDE_TIMEOUT_MINUTES=10
+CLAUDE_OUTPUT_FORMAT="json"
+
+# Ralph system prompt (injected via --append-system-prompt)
+RALPH_SYSTEM_PROMPT=".ralph/claude-ralph.md"
+
+# Tool permissions — customize per project
+# Read-only: "Read,Glob,Grep"
+# Read+Write: "Write,Read,Edit,Glob,Grep"
+# Full: "Write,Read,Edit,Glob,Grep,Bash"
+ALLOWED_TOOLS="Write,Read,Edit,Glob,Grep"
+
+# Session management
+SESSION_CONTINUITY=true
+SESSION_EXPIRY_HOURS=4
+
+# Circuit breaker thresholds
+CB_NO_PROGRESS_THRESHOLD=3
+CB_SAME_ERROR_THRESHOLD=3

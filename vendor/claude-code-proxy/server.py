@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
@@ -34,9 +33,18 @@ from litellm.exceptions import (
     ContentPolicyViolationError,
 )
 from utils.utils import cached_token_count, store_token_count, scale_tokens
-from proxy.proxy import build_request_pipeline, run_messages
+from proxy.proxy import build_request_pipeline, run_messages, _run_response_pipeline
 from llm.converters import convert_litellm_to_anthropic, extract_xml_tools_from_passthrough_response
 from llm.pipeline import TransformContext
+# ── AGNOSTIC RESPONSE TRANSFORMERS ────────────────────────────────────────
+from llm.transformers import (
+    ReasoningHandlingTransformer,
+    UniversalToolExtractionTransformer,
+    ModelFeedbackTransformer,
+    QualityRefinementTransformer,
+    StreamEventTransformer,
+)
+# ──────────────────────────────────────────────────────────────────────────────────────
 from llm.schemas import MessagesRequest, TokenCountRequest, TokenCountResponse
 from llm.streaming import handle_streaming, passthrough_xml_tool_extraction
 from router.model_mapper import map_claude_alias_to_target
@@ -44,11 +52,12 @@ from utils.metrics import metrics, RequestLog
 from llm.stream_quality import (
     extract_response_text,
     score_anthropic_response,
-    accumulate_stream,
     analysis_quality_stream,
+    analysis_quality_nonstream,
     tracked_stream,
 )
-from config import load_config, ProxyConfig
+from config import load_config
+
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -265,10 +274,9 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 metrics.record_model_event(request.model, "request")
                 return StreamingResponse(stream_gen, media_type="text/event-stream")
             else:
-                # Non-streaming: out is already an Anthropic response dict
-                # Extract GLM argkv tool calls from text content (mirrors LiteLLM non-stream path)
-                if getattr(request, "tools", None):
-                    out = extract_xml_tools_from_passthrough_response(out, request)
+                # Non-streaming passthrough: response pipeline already ran in proxy.py
+                # run_messages() passthrough path calls build_response_pipeline().process()
+                # before returning — no need to repeat it here.
 
                 # Extract actual token usage from response (fix for GLM-4.7 metrics)
                 usage_info = out.get("usage", {})
@@ -293,6 +301,8 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 return out
 
         if is_stream:
+            # Streaming: tool extraction handled by handle_streaming()
+            # Response transformers are designed for complete responses, not SSE event strings
             stream_gen = handle_streaming(
                 out, request,
                 model_context_window=ctx.effective_context_window or cfg.routing.model_context_window,
@@ -301,12 +311,8 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 classifier_base_url=cfg.classifier.base_url,
                 strip_reasoning=cfg.policy.strip_reasoning,
             )
-
-            # Analysis requests with refinements: wrap in quality loop
             if ctx.is_analysis and cfg.analysis.max_refinements > 0:
-                stream_gen = analysis_quality_stream(
-                    stream_gen, request, ctx, cfg,
-                )
+                stream_gen = analysis_quality_stream(stream_gen, request, ctx, cfg)
 
             # Wrap stream to capture post-stream metrics (tokens, quality, cost)
             stream_gen = tracked_stream(stream_gen, request, ctx, cfg)
@@ -337,55 +343,11 @@ async def create_message(request: MessagesRequest, raw_request: Request):
             strip_reasoning=cfg.policy.strip_reasoning,
         )
 
-        # ── Analysis quality refinement loop (non-streaming only) ──
-        max_refinements = cfg.analysis.max_refinements if ctx.is_analysis else 0
-        quality_threshold = cfg.analysis.quality_threshold
-        if max_refinements > 0:
-            score, issues = score_anthropic_response(anthropic_response, ctx.intent, is_analysis=True)
-            ctx.quality_score = score
-            ctx.quality_issues = issues
+        await _run_response_pipeline(anthropic_response, ctx, cfg)
 
-            for attempt in range(1, max_refinements + 1):
-                if score >= quality_threshold:
-                    break
-
-                logger.info(
-                    "[refinement] attempt=%d/%d score=%.2f threshold=%.2f issues=%s",
-                    attempt, max_refinements, score, quality_threshold, issues,
-                )
-                ctx.refinement_attempt = attempt
-
-                feedback = (
-                    f"[quality-feedback] Your previous analysis scored {score:.0%}. "
-                    f"Issues: {', '.join(issues)}. "
-                    "Re-analyze with more depth. Read files you mentioned but didn't verify. "
-                    "Provide function signatures, line counts, and concrete evidence."
-                )
-
-                resp_text = extract_response_text(anthropic_response)
-
-                if not hasattr(request, "messages") or request.messages is None:
-                    break
-
-                from llm.schemas import Message
-                request.messages.append(Message(role="assistant", content=resp_text[:4000]))
-                request.messages.append(Message(role="user", content=feedback))
-
-                _, out, provider_used = await run_messages(
-                    request_obj=request, cfg=cfg, ctx=ctx,
-                )
-                anthropic_response = convert_litellm_to_anthropic(
-                    out, request, model_context_window=ctx.effective_context_window or cfg.routing.model_context_window,
-                )
-                score, issues = score_anthropic_response(anthropic_response, ctx.intent, is_analysis=True)
-                ctx.quality_score = score
-                ctx.quality_issues = issues
-
-            if ctx.refinement_attempt > 0:
-                logger.info(
-                    "[refinement] done: attempts=%d final_score=%.2f issues=%s",
-                    ctx.refinement_attempt, ctx.quality_score, ctx.quality_issues,
-                )
+        anthropic_response, provider_used = await analysis_quality_nonstream(
+            anthropic_response, request, ctx, cfg,
+        )
 
         input_tokens = getattr(anthropic_response, "usage", None)
         in_tok = input_tokens.input_tokens if input_tokens else 0

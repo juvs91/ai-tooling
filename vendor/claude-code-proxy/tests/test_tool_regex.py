@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from llm.tool_prompting import (
+from utils.tool_extraction_patterns import (
     _TOOL_CALL_RE,
     _TOOL_CALL_FALLBACK_RE,
     _TOOL_CALL_BARE_RE,
@@ -27,6 +27,8 @@ from llm.tool_prompting import (
     _REAL_NAME_RE,
     _XML_PARAM_TAG_RE,
     _XML_ATTR_PARAM_RE,
+)
+from utils.tool_extraction_helpers import (
     _normalize_escaped_xml,
     _strip_inner_xml_tags,
     _parse_xml_as_tags,
@@ -36,13 +38,17 @@ from llm.tool_prompting import (
     _schema_aware_cleanup,
     _get_tool_schema,
     _get_tool_properties,
+)
+from llm.transformers.universal_tool_extraction import (
     extract_tool_calls_from_text,
     strip_tool_call_xml,
     recover_truncated_deterministic,
-    build_tool_prompt,
-    _build_few_shot_examples,
     XmlToolBuffer,
-    _build_valid_tool_names,
+)
+from llm.converters import build_tool_prompt
+from llm.transformers.universal_tool_extraction import _build_few_shot_examples
+from utils.tool_utils import (
+    build_valid_tool_names as _build_valid_tool_names,
     validate_tool_name,
 )
 
