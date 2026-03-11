@@ -1,20 +1,30 @@
 # llm/converters.py
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
-from threading import Lock
-from utils.utils import bget, make_tool_id, map_stop_reason, scale_tokens, to_dict, TOOL_ID_PREFIX
 from typing import Any, Dict, List, Optional, Union
 from json_repair import repair_json
 from llm.schemas import MessagesRequest, MessagesResponse, Usage
 from utils.metrics import metrics
-from llm.tool_prompting import (
-    is_no_tools_model, build_tool_prompt, rewrite_messages_without_tools,
-    extract_tool_calls_from_text, strip_tool_call_xml,
+from utils.utils import bget, make_tool_id, map_stop_reason, scale_tokens, to_dict, TOOL_ID_PREFIX
+from utils.schema_utils import (
+    clean_gemini_schema,
+    clean_gemini_schema_cached,
+    _convert_tool_cached,
+    _gemini_schema_cache,
+    _tool_conversion_cache,
+)
+from llm.transformers.universal_tool_extraction import (
+    extract_tool_calls_from_text,
+    strip_tool_call_xml,
     recover_truncated_deterministic,
-    _build_valid_tool_names, validate_tool_name,
+    extract_xml_tools_from_passthrough_response,
+)
+from utils.tool_utils import (
+    is_no_tools_model,
+    build_valid_tool_names as _build_valid_tool_names,
+    validate_tool_name,
 )
 
 
@@ -35,175 +45,6 @@ def _extract_tool_fields(block: Any) -> tuple[str, str, Any]:
         bget(block, "id") or "",
         bget(block, "input"),
     )
-
-
-def clean_gemini_schema(schema: Any) -> Any:
-    """
-    Sanitizer best-effort para Gemini / Vertex tools schemas.
-    Mantiene subset seguro; elimina keywords que suelen romper validación.
-    """
-    DROP_KEYS = {
-        "$schema", "$id", "id", "$ref",
-        "definitions", "$defs",
-        "additionalProperties", "unevaluatedProperties",
-        "propertyNames", "patternProperties",
-        "dependencies", "dependentSchemas", "dependentRequired",
-        "contentEncoding", "contentMediaType",
-        "examples", "example", "default",
-        "readOnly", "writeOnly", "deprecated",
-        "not", "if", "then", "else",
-        "contains", "minContains", "maxContains",
-        "const",
-        "discriminator",
-    }
-    ALLOWED_STRING_FORMATS = {"date-time"}
-
-    def _merge_dict(a: dict, b: dict) -> dict:
-        out = dict(a)
-        for k, v in b.items():
-            if k in out and isinstance(out[k], dict) and isinstance(v, dict):
-                out[k] = _merge_dict(out[k], v)
-            else:
-                out[k] = v
-        return out
-
-    def _normalize_type(d: dict) -> dict:
-        t = d.get("type")
-        if isinstance(t, list):
-            non_null = [x for x in t if x != "null"]
-            if len(non_null) == 1:
-                d["type"] = non_null[0]
-            elif len(non_null) > 1:
-                d["type"] = non_null[0]
-            else:
-                d.pop("type", None)
-        if "type" not in d and "properties" in d and isinstance(d["properties"], dict):
-            d["type"] = "object"
-        return d
-
-    def _rewrite_const(d: dict) -> dict:
-        if "const" in d:
-            d["enum"] = [d["const"]]
-            d.pop("const", None)
-        return d
-
-    def _rewrite_exclusive_bounds(d: dict) -> dict:
-        if "exclusiveMinimum" in d and "minimum" not in d:
-            d["minimum"] = d["exclusiveMinimum"]
-        d.pop("exclusiveMinimum", None)
-        if "exclusiveMaximum" in d and "maximum" not in d:
-            d["maximum"] = d["exclusiveMaximum"]
-        d.pop("exclusiveMaximum", None)
-        return d
-
-    def _drop_unsupported_keys(d: dict) -> dict:
-        for k in list(d.keys()):
-            if k in DROP_KEYS:
-                d.pop(k, None)
-        return d
-
-    def _clean(x: Any) -> Any:
-        if isinstance(x, list):
-            return [_clean(i) for i in x]
-        if not isinstance(x, dict):
-            return x
-
-        x = _rewrite_const(x)
-        x = _rewrite_exclusive_bounds(x)
-        x = _normalize_type(x)
-
-        if x.get("type") == "string" and "format" in x:
-            if x["format"] not in ALLOWED_STRING_FORMATS:
-                x.pop("format", None)
-
-        x = _drop_unsupported_keys(x)
-
-        if "allOf" in x and isinstance(x["allOf"], list) and x["allOf"]:
-            base = dict(x)
-            parts = base.pop("allOf", [])
-            merged = {}
-            for p in parts:
-                p = _clean(p)
-                if isinstance(p, dict):
-                    merged = _merge_dict(merged, p)
-            x = _merge_dict(base, merged)
-
-        for key in ("anyOf", "oneOf"):
-            if key in x and isinstance(x[key], list) and x[key]:
-                first = _clean(x[key][0])
-                base = dict(x)
-                base.pop(key, None)
-                if isinstance(first, dict):
-                    x = _merge_dict(base, first)
-                else:
-                    x = base
-
-        if "properties" in x and isinstance(x["properties"], dict):
-            for pk, pv in list(x["properties"].items()):
-                x["properties"][pk] = _clean(pv)
-
-        if "items" in x:
-            x["items"] = _clean(x["items"])
-
-        if "required" in x and not isinstance(x["required"], list):
-            x.pop("required", None)
-        if "enum" in x and not isinstance(x["enum"], list):
-            x.pop("enum", None)
-
-        x.pop("additionalProperties", None)
-
-        x = _normalize_type(x)
-        x = _drop_unsupported_keys(x)
-        return x
-
-    cleaned = _clean(schema)
-    if isinstance(cleaned, dict):
-        if cleaned.get("type") is None and "properties" in cleaned:
-            cleaned["type"] = "object"
-    return cleaned
-
-
-# ── Gemini Schema Memoization ────────────────────────────────────────
-_gemini_schema_cache: dict[str, Any] = {}
-_tool_conversion_cache: dict[str, dict] = {}
-_schema_cache_lock = Lock()  # shared lock for both caches
-
-
-def clean_gemini_schema_cached(schema: Any) -> Any:
-    """Memoized wrapper around clean_gemini_schema."""
-    key = hashlib.sha256(json.dumps(schema, sort_keys=True).encode()).hexdigest()[:16]
-    with _schema_cache_lock:
-        if key not in _gemini_schema_cache:
-            _gemini_schema_cache[key] = clean_gemini_schema(schema)
-        return _gemini_schema_cache[key]
-
-
-# ── Tool Definition Conversion Cache ─────────────────────────────────
-
-def _convert_tool_cached(tool_dict: dict, is_gemini: bool) -> dict:
-    """Convert Anthropic tool dict to OpenAI format with memoization."""
-    name = tool_dict["name"]
-    input_schema = tool_dict.get("input_schema", {}) or {}
-    schema_str = json.dumps(input_schema, sort_keys=True)
-    key = f"{name}:{'g' if is_gemini else 'o'}:{hashlib.sha256(schema_str.encode()).hexdigest()[:16]}"
-
-    with _schema_cache_lock:
-        if key in _tool_conversion_cache:
-            return _tool_conversion_cache[key]
-
-        if is_gemini:
-            input_schema = clean_gemini_schema(input_schema)  # uncached: already inside lock
-
-        converted = {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": tool_dict.get("description", "") or "",
-                "parameters": input_schema,
-            },
-        }
-        _tool_conversion_cache[key] = converted
-        return converted
 
 
 def _system_to_text(system: Any) -> str:
@@ -447,6 +288,20 @@ def _convert_message_blocks(msg: Any) -> List[Dict[str, Any]]:
     else:
         return [{"role": role, "content": _content_blocks_to_text(content)}]
 
+
+# ---------------------------------------------------------------------------
+# No-tools model helpers — canonical home is llm/transformers/universal_tool_extraction.py
+# Re-exported here for backward compatibility
+# ---------------------------------------------------------------------------
+from llm.transformers.universal_tool_extraction import (
+    build_tool_prompt,
+    rewrite_messages_without_tools,
+)
+
+
+# ---------------------------------------------------------------------------
+# Anthropic → LiteLLM conversion
+# ---------------------------------------------------------------------------
 
 def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_context_window: int = 0, max_output_tokens: int = 8192, reasoning_max_tokens: int = 0) -> Dict[str, Any]:
     """
@@ -742,63 +597,3 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
             output_tokens=scale_tokens(completion_tokens, model_context_window),
         ),
     )
-
-
-# ── Passthrough non-streaming XML tool extraction ────────────────────
-
-def extract_xml_tools_from_passthrough_response(response: dict, request: Any) -> dict:
-    """Extract <tool_call> XML from passthrough non-streaming Anthropic-format response.
-
-    The passthrough client (PassthroughClient.create_message) returns an Anthropic-
-    format dict directly. When GLM-4.7 embeds tool calls as XML text in the content
-    blocks, this function extracts them into proper tool_use blocks — mirroring what
-    convert_litellm_to_anthropic() already does for the LiteLLM non-streaming path.
-
-    Returns the original dict unchanged if no XML tool calls are found.
-    """
-    content = response.get("content")
-    if not content:
-        return response
-
-    request_tools = getattr(request, "tools", None)
-    if not request_tools:
-        return response
-
-    valid_names = _build_valid_tool_names(request_tools)
-    new_content: list = []
-    extracted_any = False
-
-    for block in content:
-        if not isinstance(block, dict) or block.get("type") != "text":
-            new_content.append(block)
-            continue
-        text = block.get("text", "")
-        if "<tool_call" not in text:
-            new_content.append(block)
-            continue
-
-        tool_blocks, clean_text = extract_tool_calls_from_text(
-            text, valid_tool_names=valid_names, tools=request_tools
-        )
-        if tool_blocks:
-            extracted_any = True
-            clean_text = clean_text.strip()
-            if clean_text:
-                new_content.append({"type": "text", "text": clean_text})
-            new_content.extend(tool_blocks)
-        else:
-            new_content.append(block)
-
-    if not extracted_any:
-        return response
-
-    # FIX: Only set stop_reason when tools are actually extracted
-    result = dict(response)
-    result["content"] = new_content
-    if extracted_any:
-        result["stop_reason"] = "tool_use"
-    print(
-        f"[passthrough-xml] non-stream: extracted {sum(1 for b in new_content if isinstance(b, dict) and b.get('type') == 'tool_use')} tool(s) from text content",
-        flush=True,
-    )
-    return result

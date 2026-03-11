@@ -1,0 +1,20 @@
+[
+    {
+        "timestamp": "2026-03-10T05:41:43.359011+00:00",
+        "intent": "CHAT",
+        "model_requested": "anthropic/glm-4.7",
+        "model_used": "openai/deepseek-chat",
+        "provider": "primary",
+        "input_tokens": 193,
+        "output_tokens": 28,
+        "latency_ms": 2053,
+        "is_fallback": false,
+        "is_stream": false,
+        "phase": "EXPLORE",
+        "is_analysis": false,
+        "refinement_attempts": 0,
+        "quality_score": 1.0,
+        "cost_usd": 6.580000000000001e-05,
+        "error": null
+    }
+]

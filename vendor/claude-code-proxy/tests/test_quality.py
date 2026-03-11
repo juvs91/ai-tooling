@@ -275,6 +275,7 @@ class TestAnalysisQualityStream:
             ),
             routing=SimpleNamespace(model_context_window=200000),
             classifier=SimpleNamespace(model="", api_key="", base_url=None),
+            policy=SimpleNamespace(strip_reasoning=False),
         )
 
     def _make_request(self):

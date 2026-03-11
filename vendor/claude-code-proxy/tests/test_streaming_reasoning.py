@@ -153,7 +153,7 @@ class TestDeepSeekReasoningToolDetection:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)
@@ -173,7 +173,7 @@ class TestDeepSeekReasoningToolDetection:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)
@@ -190,7 +190,7 @@ class TestDeepSeekReasoningToolDetection:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         texts = _find_text_deltas(events)
@@ -213,7 +213,7 @@ class TestDeepSeekReasoningToolDetection:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         # Tool should be emitted
@@ -242,7 +242,7 @@ class TestSafetyNetReasoningBuffer:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         # Should have tool_use events (from XmlToolBuffer or safety net)
@@ -311,7 +311,7 @@ class TestAllToolTypesInReasoning:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)
@@ -342,7 +342,7 @@ class TestAllToolTypesInContent:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)
@@ -412,7 +412,7 @@ class TestToolEdgeCases:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)
@@ -434,7 +434,7 @@ class TestToolEdgeCases:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)
@@ -453,7 +453,7 @@ class TestToolEdgeCases:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)
@@ -471,7 +471,7 @@ class TestToolEdgeCases:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)
@@ -490,7 +490,7 @@ class TestToolEdgeCases:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)
@@ -517,7 +517,7 @@ class TestToolEdgeCases:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)
@@ -544,7 +544,7 @@ class TestToolEdgeCases:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)
@@ -561,7 +561,7 @@ class TestToolEdgeCases:
         ]
         request = _make_request()
 
-        with patch("llm.streaming.is_no_tools_model", return_value=True):
+        with patch("llm.transformers.stream_event.is_no_tools_model", return_value=True):
             events = await _collect_events(request, chunks)
 
         tool_events = _find_tool_use_events(events)

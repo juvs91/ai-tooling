@@ -23,14 +23,16 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from llm.tool_prompting import (
+from utils.tool_extraction_patterns import (
     _TOOL_CALL_ARGKV_RE,
     _TOOL_CALL_ARGKV_LOOSE_RE,
+)
+from llm.transformers.universal_tool_extraction import (
     XmlToolBuffer,
     extract_tool_calls_from_text,
     strip_tool_call_xml,
-    _build_valid_tool_names,
 )
+from utils.tool_utils import build_valid_tool_names as _build_valid_tool_names
 
 # ── Shared fixtures ────────────────────────────────────────────────────
 
@@ -539,7 +541,7 @@ class TestProductionHardeningFixes:
         Opening and closing alternations are not backreferenced, so mismatched tags
         still extract content. This is intentional — content extraction > strict tags.
         """
-        from llm.tool_prompting import _TOOL_DILUTED_RE
+        from utils.tool_extraction_patterns import _TOOL_DILUTED_RE
         text = "<tool_name>Bash</tool_name><args>ls -la</arguments>"
         m = _TOOL_DILUTED_RE.search(text)
         assert m is not None, "Mismatched diluted tags should still match (intentional)"
@@ -549,7 +551,7 @@ class TestProductionHardeningFixes:
     def test_recover_incomplete_tool_call_has_tools_parameter(self):
         """recover_incomplete_tool_call must accept `tools` parameter for valid_tool_names."""
         import inspect
-        from llm.tool_prompting import recover_incomplete_tool_call
+        from llm.transformers.universal_tool_extraction import recover_incomplete_tool_call
         sig = inspect.signature(recover_incomplete_tool_call)
         assert "tools" in sig.parameters, (
             "tools parameter required — line 1154 fix relies on it for hallucination filtering"

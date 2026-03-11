@@ -74,6 +74,8 @@ class TestTransformContext:
             "route_override", "effective_context_window",
             "quality_score", "quality_issues", "refinement_attempt",
             "analysis_phase", "analysis_read_count",
+            "tools", "session_id",
+            "extracted_tool_calls", "xml_tool_buffer",
         }
         assert names == expected
 

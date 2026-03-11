@@ -9,8 +9,7 @@ logger = logging.getLogger(__name__)
 
 from llm.pipeline import Transformer, TransformContext
 from llm.compressor import compress_messages_if_needed, estimate_tools_tokens
-from llm.compressor import get_or_create_session, update_session
-from llm.tool_prompting import is_no_tools_model
+from utils.tool_utils import is_no_tools_model
 from config import CompressorConfig, ModelRouting
 
 

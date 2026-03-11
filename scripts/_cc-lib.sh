@@ -1,30 +1,45 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Returns the real directory of the current script, resolving symlinks.
-cc_script_dir() {
-  local src="${BASH_SOURCE[0]}"
-  while [[ -L "$src" ]]; do
-    local dir
-    dir="$(cd -P "$(dirname "$src")" && pwd)"
-    src="$(readlink "$src")"
-    [[ "$src" != /* ]] && src="${dir}/${src}"
-  done
-  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
-}
-
-# Repo root (ai-tooling)
+# Find repository root directory
 cc_repo_dir() {
-  local d
-  d="$(cc_script_dir)"
-  cd -P "${d}/.." >/dev/null 2>&1 && pwd
+    local dir="$(pwd)"
+    while [[ ! -d "$dir/.git" && "$dir" != "/" ]]; do
+        dir="$(dirname "$dir")"
+    done
+    if [[ -d "$dir/.git" ]]; then
+        echo "$dir"
+    else
+        echo "ERROR: Not in a git repository" >&2
+        return 1
+    fi
 }
 
-# Convenience: ensure commands exist
-cc_require() {
-  local cmd="$1"
-  command -v "$cmd" >/dev/null 2>&1 || {
-    echo "ERROR: missing dependency: $cmd" >&2
-    exit 1
-  }
+# Helper function to parse override file and extract service names
+parse_override_services() {
+    local override_file="$1"
+
+    if [[ ! -f "$override_file" ]]; then
+        echo "ERROR: Override file not found: $override_file" >&2
+        return 1
+    fi
+
+    # Use Python for robust YAML parsing
+    python3 - <<PY
+import yaml
+import sys
+
+try:
+    with open("$override_file", "r") as f:
+        config = yaml.safe_load(f)
+        if "services" in config:
+            services = sorted(config.get("services", {}).keys())
+            print("\n".join(services))
+            sys.stdout.flush()
+            sys.exit(0)
+        else:
+            print(f"ERROR: No \"services\" section in $override_file", file=sys.stderr)
+            sys.exit(1)
+except Exception as e:
+    print(f"ERROR: Failed to parse $override_file: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+
 }

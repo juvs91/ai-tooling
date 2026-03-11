@@ -35,6 +35,13 @@ from llm.transformers import (
     ProviderQuirksTransformer,
     CredentialTransformer,
     IntentEnforcementTransformer,
+    # ── AGNOSTIC RESPONSE TRANSFORMERS ────────────────────────────────────────
+    ReasoningHandlingTransformer,
+    UniversalToolExtractionTransformer,
+    ModelFeedbackTransformer,
+    QualityRefinementTransformer,
+    StreamEventTransformer,
+    # ──────────────────────────────────────────────────────────────────────────────────────
 )
 
 from config import ProxyConfig
@@ -67,10 +74,52 @@ def build_litellm_pipeline(cfg: ProxyConfig) -> Pipeline:
 
 
 def build_passthrough_pipeline(cfg: ProxyConfig) -> Pipeline:
-    """Phase 2b: Transformers for passthrough (Anthropic-compatible endpoints like Z.AI)."""
+    """Phase 2b: Request transformers for passthrough (Anthropic-compatible endpoints like Z.AI)."""
     return Pipeline([
         CompressionTransformer(cfg.compressor, cfg.routing),
     ])
+    # Note: Response transformers run AFTER model returns, NOT here
+    # See run_messages() passthrough path for response pipeline integration
+
+
+def build_response_pipeline(cfg: ProxyConfig) -> Pipeline:
+    """AGNOSTIC RESPONSE pipeline for universal tool extraction.
+
+    Runs AFTER model returns response, processes ALL output types:
+    - thinking, content, tools, mixed responses
+    - Works for ALL models (no model-specific logic)
+    - Extracts tools, cleans XML, provides AGNOSTIC feedback
+
+    Key Design Decisions:
+    1. NO model-specific if/elif blocks (AGNOSTIC)
+    2. Processes model OUTPUT (not INPUT)
+    3. Runs AFTER model endpoint, BEFORE client response
+    4. Uses existing Transformer classes (already implemented and tested)
+    """
+    return Pipeline([
+        ReasoningHandlingTransformer(cfg.analysis),
+        UniversalToolExtractionTransformer(),
+        ModelFeedbackTransformer(cfg),
+        QualityRefinementTransformer(cfg),
+        # StreamEventTransformer(enabled=False),  # Temporarily disabled due to Pydantic issues
+    ])
+
+
+async def _run_response_pipeline(response: Any, ctx: TransformContext, cfg: ProxyConfig) -> None:
+    """Build and execute the response pipeline, propagating request context.
+
+    Single canonical call site shared by LiteLLM non-stream (server.py) and
+    passthrough non-stream (proxy.py) so the TransformContext construction
+    and pipeline invocation are never duplicated.
+    """
+    response_ctx = TransformContext(
+        intent=ctx.intent,
+        is_analysis=ctx.is_analysis,
+        phase=ctx.phase,
+        analysis_phase=ctx.analysis_phase,
+        tools=ctx.tools,
+    )
+    await build_response_pipeline(cfg).process(response, response_ctx)
 
 
 _litellm_pipeline_cache: Pipeline | None = None
@@ -286,6 +335,9 @@ async def run_messages(
 
     Returns: (is_streaming, response_or_generator, provider_name)
     """
+    # Store original tools in context for response transformers to access
+    ctx.tools = getattr(request_obj, "tools", None)
+
     model = str(getattr(request_obj, "model", "") or "")
     model_ctx = ctx.effective_context_window or cfg.routing.model_context_window
 
@@ -333,12 +385,15 @@ async def run_messages(
                     logger.warning("[passthrough] stream failed on first chunk (timeout=%.0fs): %s", timeout, stream_err)
                     raise PassthroughError(str(stream_err)) from stream_err
 
+                # Passthrough streaming: tool extraction handled by passthrough_xml_tool_extraction in server.py
+                # Response transformers are designed for complete responses, not SSE event strings
                 async def _prepend_stream():
                     yield first_chunk
                     async for chunk in raw_stream:
                         yield chunk
 
                 return True, _prepend_stream(), "passthrough"
+                # ──────────────────────────────────────────────────────────────────────────────
             else:
                 # Non-streaming passthrough: use actual max_tokens to support
                 # quality refinement loop in server.py. The original max_tokens=1
@@ -346,8 +401,12 @@ async def run_messages(
                 body["max_tokens"] = getattr(request_obj, "max_tokens", 4096)
                 logger.info("[passthrough] non-stream phase=%s model=%s max_tokens=%d",
                             ctx.phase, body.get("model"), body["max_tokens"])
-                result = await pt.create_message(body)
-                return False, result, "passthrough"
+
+                # Get response from model, then run response pipeline
+                anthropic_response = await pt.create_message(body)
+                await _run_response_pipeline(anthropic_response, ctx, cfg)
+                return False, anthropic_response, "passthrough"
+                # ──────────────────────────────────────────────────────────────────────────────
         except (httpx.HTTPError, PassthroughError) as e:
             logger.warning("[passthrough] FALLBACK to litellm: %s: %s", type(e).__name__, e)
             # Fall through to normal litellm pipeline

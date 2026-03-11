@@ -1,0 +1,16 @@
+==================================================
+QUALITY REPORT
+==================================================
+
+Quality Score: 0.65/1.0
+
+Response length: 0 chars
+Lines: 1
+Bug mentions: 0
+Python file refs (.py:N): 0
+TypeScript refs (CRITICAL): 0
+Has architecture: False
+
+Issues:
+  - No .py:line references found (analysis must cite real Python files)
+  - Missing architectural analysis

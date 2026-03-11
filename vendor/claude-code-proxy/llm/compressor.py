@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -55,14 +56,18 @@ _state_lock = asyncio.Lock()
 class _CompressionCache:
     summary: str = ""              # The compressed summary text
     old_msg_count: int = 0         # How many old messages were compressed
-    timestamp: float = 0.0         # time.monotonic() when cached
+    timestamp: float = 0.0         # time.time() (Unix epoch) when cached
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))  # UUID-based session ID
     prefix_hash: str = field(default_factory=lambda: hashlib.sha256(b"").hexdigest()[:16])  # For backward compatibility
 
 _session_cache: Dict[str, _CompressionCache] = {}  # Multi-session support: session_id -> cache entry
-_SESSION_TTL = 86400.0           # 24 hours — extended from 5 minutes for session persistence
+_SESSION_TTL = 604800.0          # 7 days — matches typical dev session rhythm (survive weekend gaps)
 _CACHE_MSG_TOLERANCE = 100   # Reuse if ≤100 new old messages since last compression
 _CACHE_PREFIX_SIZE = 20      # Hash first 20 messages for session identity
+
+# Disk persistence — survives uvicorn --reload and proxy restarts
+_SESSION_CACHE_FILE = os.environ.get("PROXY_SESSION_CACHE_FILE", "/tmp/proxy_session_cache.json")
+_SESSION_CACHE_MAX_MB = int(os.environ.get("PROXY_SESSION_CACHE_MAX_MB", "1024"))
 
 
 def _compute_prefix_hash(messages: list[dict], n: int = _CACHE_PREFIX_SIZE) -> str:
@@ -70,6 +75,62 @@ def _compute_prefix_hash(messages: list[dict], n: int = _CACHE_PREFIX_SIZE) -> s
     prefix = messages[:n]
     raw = json.dumps(prefix, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _save_session_cache_to_disk() -> None:
+    """Persist _session_cache to JSON. Must be called within _state_lock."""
+    try:
+        data = {
+            str(sid) if sid is not None else "__default__": {
+                "summary": c.summary,
+                "old_msg_count": c.old_msg_count,
+                "timestamp": c.timestamp,
+                "session_id": c.session_id,
+            }
+            for sid, c in _session_cache.items()
+        }
+        with open(_SESSION_CACHE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[session] Failed to persist cache to disk: {e}")
+
+
+def _load_session_cache_from_disk() -> None:
+    """Restore _session_cache from JSON on startup. Skips expired entries and clears if oversized."""
+    if not os.path.exists(_SESSION_CACHE_FILE):
+        return
+    try:
+        size_mb = os.path.getsize(_SESSION_CACHE_FILE) / (1024 * 1024)
+        if size_mb > _SESSION_CACHE_MAX_MB:
+            print(f"[session] Cache file {size_mb:.0f}MB exceeds {_SESSION_CACHE_MAX_MB}MB limit — clearing")
+            os.remove(_SESSION_CACHE_FILE)
+            return
+    except OSError:
+        pass
+    try:
+        with open(_SESSION_CACHE_FILE) as f:
+            data = json.load(f)
+        now = time.time()
+        loaded = 0
+        for raw_sid, entry in data.items():
+            ts = entry.get("timestamp", 0.0)
+            if now - ts >= _SESSION_TTL:
+                continue  # expired — skip
+            sid = None if raw_sid == "__default__" else raw_sid
+            _session_cache[sid] = _CompressionCache(
+                session_id=entry.get("session_id", str(raw_sid)),
+                summary=entry.get("summary", ""),
+                old_msg_count=entry.get("old_msg_count", 0),
+                timestamp=ts,
+            )
+            loaded += 1
+        if loaded:
+            print(f"[session] Restored {loaded} session(s) from {_SESSION_CACHE_FILE}")
+    except Exception as e:
+        print(f"[session] Failed to load cache from disk: {e}")
+
+
+_load_session_cache_from_disk()  # restore sessions from previous proxy run
 
 
 _COMPRESS_PROMPT = (
@@ -407,21 +468,28 @@ async def compress_messages_if_needed(
     if messages and messages[0].get("role") == "system":
         system_msg = messages[0]
 
+    # ── Derive stable cache key ──
+    # Explicit X-Session-ID takes priority; otherwise generate a deterministic UUID from
+    # the conversation prefix so each CC window gets its own isolated cache slot.
+    effective_session_id = session_id if session_id else str(
+        uuid.uuid5(uuid.NAMESPACE_OID, _compute_prefix_hash(old_messages, _CACHE_PREFIX_SIZE))
+    )
+
     # ── Check compression cache before calling LLM ──
-    cached_summary = await get_or_create_session(session_id, old_messages)
+    cached_summary = await get_or_create_session(effective_session_id, old_messages)
     if cached_summary is not None:
         # Cache hit — reuse previous summary, skip the LLM call
         metrics.compression_cache_hits += 1
-        now = time.monotonic()
-        cache = _session_cache.get(session_id)
+        now = time.time()
+        cache = _session_cache.get(effective_session_id)
         age = int(now - cache.timestamp) if cache else 0
         delta = len(old_messages) - cache.old_msg_count if cache else 0
         print(f"[compress] Cache HIT: reusing summary "
-              f"(session={session_id}, cached {cache.old_msg_count if cache else 0} msgs, now {len(old_messages)} msgs, "
+              f"(session={effective_session_id}, cached {cache.old_msg_count if cache else 0} msgs, now {len(old_messages)} msgs, "
               f"delta={delta}, age={age}s)")
     else:
         metrics.compression_cache_misses += 1
-        print(f"[compress] Cache MISS (no session): compressing fresh (session={session_id})")
+        print(f"[compress] Cache MISS (no session): compressing fresh (session={effective_session_id})")
 
     if cached_summary is not None:
         compressed = _reassemble_with_summary(system_msg, cached_summary, recent_messages)
@@ -441,7 +509,7 @@ async def compress_messages_if_needed(
     if result:
         summary, model_used = result
         # Store in cache for next request
-        await update_session(session_id, summary, len(old_messages))
+        await update_session(effective_session_id, summary, len(old_messages))
         # Reassemble with summary
         merged = _reassemble_with_summary(system_msg, summary, recent_messages)
 
@@ -714,7 +782,7 @@ async def get_or_create_session(session_id: str, messages: list[dict]) -> Option
     Returns:
         Cached summary string if session exists and is valid, None otherwise
     """
-    now = time.monotonic()
+    now = time.time()
     async with _state_lock:
         session = _session_cache.get(session_id)
         if session is not None:
@@ -745,7 +813,7 @@ async def update_session(session_id: str, summary: str, old_count: int) -> None:
         summary: Compressed conversation summary
         old_count: Number of old messages that were compressed
     """
-    now = time.monotonic()
+    now = time.time()
     async with _state_lock:
         _session_cache[session_id] = _CompressionCache(
             session_id=session_id,
@@ -754,13 +822,14 @@ async def update_session(session_id: str, summary: str, old_count: int) -> None:
             timestamp=now
         )
         print(f"[session] Session updated: session_id={session_id[:8]}... old_count={old_count} summary_len={len(summary)}")
+        _save_session_cache_to_disk()
 
 async def cleanup_expired_sessions() -> None:
     """
     Remove expired sessions from cache to prevent memory leaks.
     Should be called periodically (e.g., every hour).
     """
-    now = time.monotonic()
+    now = time.time()
     async with _state_lock:
         expired_sessions = [
             session_id for session_id, session in _session_cache.items()
@@ -771,10 +840,11 @@ async def cleanup_expired_sessions() -> None:
             for session_id in expired_sessions:
                 session = _session_cache.pop(session_id, None)
                 age = int(now - session.timestamp)
-                print(f"[session] Cleaned up expired session: session_id={session_id[:8]}... age={age}s")
+                print(f"[session] Cleaned up expired session: session_id={str(session_id)[:8]}... age={age}s")
 
             if expired_sessions:
                 print(f"[session] Cleanup completed: removed {len(expired_sessions)} expired sessions")
                 metrics.record("sessions_cleaned", len(expired_sessions))
+                _save_session_cache_to_disk()
         else:
             print(f"[session] No expired sessions to clean up")
