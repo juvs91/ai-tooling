@@ -108,12 +108,18 @@ class PassthroughClient:
         self,
         body: dict,
         strip_reasoning: bool = False,
+        response_model: str | None = None,
     ) -> AsyncIterator[str]:
         """Streaming: POST and yield SSE event strings (relay to client).
 
         Yields complete SSE event strings like 'event: message_start\\ndata: {...}\\n\\n'.
         Collects lightweight metrics (tool_use count, text chars) during relay.
         Optionally strips <reasoning> tags from text_delta events.
+
+        response_model: if set, replaces the model field in the message_start event so the
+        VSCode extension receives the original request model name (e.g. "claude-sonnet-4-6")
+        rather than whatever the upstream provider returned (e.g. "glm-4.7"). This is required
+        for Claude Code to activate model-gated UI features like the CLAUDE'S PLAN panel.
         """
         body["stream"] = True
         self._metrics = PassthroughMetrics()
@@ -133,6 +139,18 @@ class PassthroughClient:
                         if '"text_delta"' in line:
                             # Rough char count from the line length
                             self._metrics.text_chars += len(line)
+
+                        # Normalize model name in message_start so CC's VSCode extension
+                        # receives the original request model (e.g. "claude-sonnet-4-6")
+                        # regardless of what the upstream returned.
+                        if response_model and '"message_start"' in line and line.startswith("data: "):
+                            try:
+                                data = json.loads(line[6:])
+                                if data.get("type") == "message_start":
+                                    data["message"]["model"] = response_model
+                                    line = "data: " + json.dumps(data, ensure_ascii=False)
+                            except (json.JSONDecodeError, KeyError):
+                                pass  # relay as-is if parse fails
 
                         # Strip reasoning from text_delta events
                         if strip_reasoning and "<reasoning>" in line:
