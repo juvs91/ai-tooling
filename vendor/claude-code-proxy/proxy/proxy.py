@@ -35,6 +35,7 @@ from llm.transformers import (
     ProviderQuirksTransformer,
     CredentialTransformer,
     IntentEnforcementTransformer,
+    DeferredToolsTransformer,
     # ── AGNOSTIC RESPONSE TRANSFORMERS ────────────────────────────────────────
     ReasoningHandlingTransformer,
     UniversalToolExtractionTransformer,
@@ -58,6 +59,7 @@ def build_request_pipeline(cfg: ProxyConfig, models_differ: bool) -> Pipeline:
         ),
         IntentEnforcementTransformer(enabled=True),  # Validate intent compliance
         GuardrailTransformer(cfg.policy.guard_system),
+        DeferredToolsTransformer(),               # Inject <available-deferred-tools> into request.tools
         TokenCapTransformer(cfg.policy, cfg.credentials.openai_base_url),
         ToolAllowlistTransformer(cfg.policy),
         ModelRouterTransformer(cfg.routing, cfg.credentials, cfg.analysis),
@@ -339,6 +341,10 @@ async def run_messages(
     ctx.tools = getattr(request_obj, "tools", None)
 
     model = str(getattr(request_obj, "model", "") or "")
+    # original_model is the CC-facing model name (e.g. "claude-opus-4-6") set by
+    # ModelRouterTransformer before it rewrites request.model to the provider model.
+    # Used as response_model so CC activates model-gated UI (Plan panel, etc.).
+    original_model = getattr(request_obj, "original_model", None) or model
     model_ctx = ctx.effective_context_window or cfg.routing.model_context_window
 
     # ── Passthrough: auto-detect Anthropic-compatible endpoints ──
@@ -374,7 +380,7 @@ async def run_messages(
                 logger.info("[passthrough] streaming phase=%s model=%s analysis=%s timeout=%.0fs", ctx.phase, body.get("model"), ctx.analysis_phase, timeout)
                 # Don't strip reasoning during analysis — the reasoning IS the value
                 strip = cfg.policy.strip_reasoning and not ctx.is_analysis
-                raw_stream = pt.stream_message(body, strip_reasoning=strip, response_model=model)
+                raw_stream = pt.stream_message(body, strip_reasoning=strip, response_model=original_model)
                 # Eagerly fetch first chunk to detect connection/timeout errors
                 # BEFORE returning StreamingResponse (enables litellm fallback)
                 try:
@@ -403,7 +409,10 @@ async def run_messages(
                             ctx.phase, body.get("model"), body["max_tokens"])
 
                 # Get response from model, then run response pipeline
-                anthropic_response = await pt.create_message(body)
+                # Pass response_model so CC receives the original request model name
+                # (e.g. "claude-opus-4-6") rather than the upstream model ("glm-4.7").
+                # Without this, CC won't activate model-gated UI like the Plan panel.
+                anthropic_response = await pt.create_message(body, response_model=original_model)
                 await _run_response_pipeline(anthropic_response, ctx, cfg)
                 return False, anthropic_response, "passthrough"
                 # ──────────────────────────────────────────────────────────────────────────────

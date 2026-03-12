@@ -501,10 +501,32 @@ should_exit_gracefully() {
         claude_exit_signal=$(jq -r '.analysis.exit_signal // false' "$RESPONSE_ANALYSIS_FILE" 2>/dev/null || echo "false")
     fi
 
+    # Read exit contract (project-specific exit criteria, dependency inversion)
+    # Projects define their own completion conditions in .ralph/exit_contract.md
+    local _contract_fix_plan_required=false
+    local _exit_contract="$RALPH_DIR/exit_contract.md"
+    if [[ -f "$_exit_contract" ]] && grep -q "fix_plan_complete: true" "$_exit_contract"; then
+        _contract_fix_plan_required=true
+    fi
+
     if [[ $recent_completion_indicators -ge 2 ]] && [[ "$claude_exit_signal" == "true" ]]; then
-        log_status "WARN" "Exit condition: Strong completion indicators ($recent_completion_indicators) with EXIT_SIGNAL=true" >&2
-        echo "project_complete"
-        return 0
+        # Gate: if exit contract requires fix_plan_complete, enforce it before exiting
+        if [[ "$_contract_fix_plan_required" == "true" ]] && [[ -f "$RALPH_DIR/fix_plan.md" ]]; then
+            local _contract_unchecked
+            _contract_unchecked=$(grep -cE "^[[:space:]]*- \[ \]" "$RALPH_DIR/fix_plan.md" 2>/dev/null || echo 0)
+            if [[ "$_contract_unchecked" -gt 0 ]]; then
+                log_status "WARN" "exit_contract: fix_plan_complete=true required but ${_contract_unchecked} tasks still [ ]. Blocking project_complete exit."
+                # Fall through — don't exit, allow another loop to mark checkboxes
+            else
+                log_status "WARN" "Exit condition: Strong completion indicators ($recent_completion_indicators) with EXIT_SIGNAL=true" >&2
+                echo "project_complete"
+                return 0
+            fi
+        else
+            log_status "WARN" "Exit condition: Strong completion indicators ($recent_completion_indicators) with EXIT_SIGNAL=true" >&2
+            echo "project_complete"
+            return 0
+        fi
     fi
     
     # 5. Check fix_plan.md for completion
@@ -623,6 +645,13 @@ build_loop_context() {
         local incomplete_tasks=$(grep -cE "^[[:space:]]*- \[ \]" "$RALPH_DIR/fix_plan.md" 2>/dev/null || true)
         [[ -z "$incomplete_tasks" ]] && incomplete_tasks=0
         context+="Remaining tasks: ${incomplete_tasks}. "
+        # Inject first 5 pending task lines so model can match and mark them
+        if [[ "$incomplete_tasks" -gt 0 ]]; then
+            local task_preview
+            task_preview=$(grep -E "^[[:space:]]*- \[ \]" "$RALPH_DIR/fix_plan.md" 2>/dev/null \
+                           | head -5 | sed 's/^[[:space:]]*//' | tr '\n' '|')
+            context+="Pending: ${task_preview} "
+        fi
     fi
 
     # Add circuit breaker state

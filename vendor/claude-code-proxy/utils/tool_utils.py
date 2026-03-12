@@ -5,9 +5,44 @@ They are shared across multiple transformers and should be in a separate module.
 """
 
 import os
+import re
 from functools import lru_cache
 from typing import Any, List, Dict, FrozenSet
 from utils.utils import get_tool_name
+
+
+# ---------------------------------------------------------------------------
+# Deferred tools (Claude Code injects these in system prompt, not request.tools)
+# ---------------------------------------------------------------------------
+
+_DEFERRED_TOOLS_RE = re.compile(
+    r'<available-deferred-tools>\s*(.*?)\s*</available-deferred-tools>',
+    re.DOTALL,
+)
+
+
+def extract_deferred_tool_names(system: str | list | None) -> list[str]:
+    """Parse <available-deferred-tools> block from Claude Code system prompt.
+
+    Claude Code injects special tools (EnterPlanMode, ExitPlanMode, TodoWrite,
+    AskUserQuestion, etc.) as a text block in the system prompt rather than as
+    formal tool definitions in request.tools.  This function extracts those names
+    so the proxy can inject minimal definitions and include them in valid_names.
+
+    Returns a list of tool names (one per non-empty line).
+    """
+    if not system:
+        return []
+    if isinstance(system, str):
+        text = system
+    else:
+        text = " ".join(
+            b.get("text", "") if isinstance(b, dict) else str(b) for b in system
+        )
+    m = _DEFERRED_TOOLS_RE.search(text)
+    if not m:
+        return []
+    return [name.strip() for name in m.group(1).splitlines() if name.strip()]
 
 
 # ---------------------------------------------------------------------------
