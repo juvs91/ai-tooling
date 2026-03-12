@@ -48,6 +48,17 @@ from llm.transformers.universal_tool_extraction import (
 
 logger = logging.getLogger(__name__)
 
+# Known Claude Code workflow tools injected via <available-deferred-tools> in system prompt.
+# These must never be filtered as "hallucinated" — models may legitimately call them even
+# when the current request's system prompt omits the deferred-tools block (e.g. BUILD turns
+# that follow a PLAN turn where the model already saw ExitPlanMode in conversation history).
+_CC_WORKFLOW_TOOLS: frozenset[str] = frozenset({
+    "EnterPlanMode", "ExitPlanMode", "TodoWrite",
+    "AskUserQuestion", "CronCreate", "CronDelete", "CronList",
+    "EnterWorktree", "ExitWorktree", "TaskOutput", "TaskStop",
+    "NotebookEdit", "WebFetch", "WebSearch",
+})
+
 
 # ── Event type constants (AGNOSTIC - same for ALL models) ────────────
 
@@ -724,8 +735,11 @@ async def handle_streaming(
                                 print(f"[streaming] WARNING: Skipping tool_call with empty name (index={current_index})")
                                 continue
 
-                            # Validate tool name against request tools (detect hallucinated names)
-                            if ctx.valid_names and not validate_tool_name(name, ctx.valid_names):
+                            # Validate tool name against request tools (detect hallucinated names).
+                            # CC workflow tools (_CC_WORKFLOW_TOOLS) are always allowed — they may
+                            # appear in conversation context even when absent from this request's
+                            # system prompt (e.g. ExitPlanMode called during a BUILD turn).
+                            if ctx.valid_names and name not in _CC_WORKFLOW_TOOLS and not validate_tool_name(name, ctx.valid_names):
                                 metrics.increment_tool_counter("hallucinated")
                                 if ctx.model_id:
                                     metrics.record_model_event(ctx.model_id, "tool_hallucination")

@@ -83,8 +83,14 @@ class PassthroughClient:
     def _url(self, path: str = "/v1/messages") -> str:
         return f"{self._base_url}{path}"
 
-    async def create_message(self, body: dict) -> dict:
-        """Non-streaming: POST and return full response."""
+    async def create_message(self, body: dict, response_model: str | None = None) -> dict:
+        """Non-streaming: POST and return full response.
+
+        response_model: if set, replaces the model field in the response so CC's VSCode
+        extension receives the original request model name (e.g. "claude-opus-4-6") rather
+        than whatever the upstream provider returned (e.g. "glm-4.7"). Required for Claude
+        Code to activate model-gated UI features like the CLAUDE'S PLAN panel.
+        """
         body["stream"] = False
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             try:
@@ -96,6 +102,9 @@ class PassthroughClient:
                 if not content:
                     logger.warning("[passthrough] empty response content from provider")
                     raise PassthroughError("Empty response content from provider")
+                # Normalize model name so CC recognizes the response as its own
+                if response_model:
+                    result["model"] = response_model
                 return result
             except httpx.HTTPStatusError as e:
                 logger.error("[passthrough] HTTP %d: %s", e.response.status_code, e.response.text[:500])

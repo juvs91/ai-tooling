@@ -223,8 +223,19 @@ class QualityRefinementTransformer(Transformer):
 
 # ── Shared feedback builder (used by both stream and non-stream paths) ──────
 
-def _build_refinement_feedback(score: float, issues: list[str], quality_threshold: float) -> str:
-    """Build human-readable quality feedback for a re-request."""
+def _build_refinement_feedback(
+    score: float,
+    issues: list[str],
+    quality_threshold: float,
+    request_messages: list[Any] | None = None,
+) -> str:
+    """Build human-readable quality feedback for a re-request.
+
+    If request_messages is provided, re-injects the last meaningful user message
+    as a REMINDER prefix so the model stays anchored to its original task while
+    addressing quality issues. This is agnostic — the proxy just echoes the user's
+    own words back; it knows nothing about the task content.
+    """
     issue_specific: list[str] = []
     for issue in issues:
         if "factual_verification" in issue:
@@ -247,6 +258,19 @@ def _build_refinement_feedback(score: float, issues: list[str], quality_threshol
     if issue_specific:
         parts.append("\nMANDATORY FIXES:\n" + "\n".join(issue_specific))
     parts.append("\nRe-read the codebase. Cite SPECIFIC locations. Prove your claims.")
+
+    # Re-inject original task intent so quality feedback doesn't displace it.
+    # Uses get_last_user_text() which strips tool results and system reminders.
+    if request_messages:
+        try:
+            from router.llm_router import get_last_user_text
+            original_intent = get_last_user_text(request_messages)
+            if original_intent:
+                reminder = f"REMINDER — complete your original task:\n{original_intent[:800]}"
+                parts.insert(0, reminder)
+        except Exception:
+            pass  # Never let re-injection break the feedback path
+
     return "\n".join(parts)
 
 
@@ -289,7 +313,8 @@ async def analysis_quality_nonstream(
         )
         ctx.refinement_attempt = attempt
 
-        feedback = _build_refinement_feedback(score, issues, quality_threshold)
+        feedback = _build_refinement_feedback(score, issues, quality_threshold,
+                                              request_messages=request.messages)
         resp_text = extract_response_text(anthropic_response)
 
         if not hasattr(request, "messages") or request.messages is None:
@@ -397,7 +422,8 @@ async def analysis_quality_stream(
             target_path = getattr(request, "target_path", "vendor/")
             verification_feedback = await _build_verification_feedback(text, target_path)
 
-        feedback = _build_refinement_feedback(score, issues, quality_threshold)
+        feedback = _build_refinement_feedback(score, issues, quality_threshold,
+                                              request_messages=request.messages)
         if verification_feedback:
             feedback = feedback.replace(
                 "\nRe-read the codebase.",

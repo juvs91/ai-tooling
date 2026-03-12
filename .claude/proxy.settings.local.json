@@ -9,8 +9,11 @@
     ]
   },
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:8083"
+    "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "8562b26182ec40caa1a4cf3833ada2ea.Ul6oJu6x8r3zjH8b",
+    "ANTHROPIC_MODEL": "glm-4.7"
   },
+  
   "model": "claude-sonnet-4-6",
   "hooks": {
     "PreToolUse": [
