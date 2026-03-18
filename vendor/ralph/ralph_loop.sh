@@ -430,6 +430,49 @@ wait_for_reset() {
     log_status "SUCCESS" "Rate limit reset! Ready for new calls."
 }
 
+# Sync completed TodoWrite todos → fix_plan.md checkboxes (Option A safety sync)
+# Reads last TodoWrite call from the most recent stream log, marks matching [ ] → [x]
+# Belt-and-suspenders: runs after every successful execute_claude_code() even if model
+# skipped calling Edit directly (e.g. due to compression wiping prior instructions).
+sync_todos_to_fix_plan() {
+    local fix_plan="$RALPH_DIR/fix_plan.md"
+    [[ ! -f "$fix_plan" ]] && return 0
+
+    # Find the most recently written stream log (just produced by execute_claude_code)
+    local stream_file
+    stream_file=$(ls -t "$LOG_DIR"/claude_output_*_stream.log 2>/dev/null | head -1)
+    [[ -z "$stream_file" || ! -f "$stream_file" ]] && return 0
+
+    # Extract completed todo content strings from the LAST TodoWrite call in the stream.
+    # Stream is NDJSON: each line is one JSON event. grep finds TodoWrite lines, tail -1
+    # gets the most recent call (which has the authoritative todo state for the loop).
+    local completed_todos
+    completed_todos=$(
+        grep -E '"name"[[:space:]]*:[[:space:]]*"TodoWrite"' "$stream_file" 2>/dev/null \
+        | tail -1 \
+        | jq -r '.message.content[]? | select(.name == "TodoWrite") | .input.todos[]? | select(.status == "completed") | .content' 2>/dev/null
+    )
+    [[ -z "$completed_todos" ]] && return 0
+
+    local count=0
+    while IFS= read -r task_content; do
+        [[ -z "$task_content" ]] && continue
+        # Extract task identifier like "Fase-9.1" from the todo content string
+        local task_id
+        task_id=$(printf '%s' "$task_content" | grep -oE 'Fase-[0-9]+\.[0-9]+' | head -1)
+        [[ -z "$task_id" ]] && continue
+        # Mark checkbox: "- [ ] ...Fase-9.1..." → "- [x] ...Fase-9.1..."
+        if grep -qE "\- \[ \].*${task_id}" "$fix_plan"; then
+            # macOS sed requires -i '', Linux -i — try both
+            sed -i '' "s/- \[ \]\(.*${task_id}\)/- [x]\1/" "$fix_plan" 2>/dev/null \
+                || sed -i "s/- \[ \]\(.*${task_id}\)/- [x]\1/" "$fix_plan" 2>/dev/null
+            (( count++ ))
+        fi
+    done <<< "$completed_todos"
+
+    [[ $count -gt 0 ]] && log_status "INFO" "TodoSync: marked ${count} completed todos → fix_plan.md" >&2
+}
+
 # Check if we should gracefully exit
 should_exit_gracefully() {
     
@@ -490,6 +533,37 @@ should_exit_gracefully() {
         log_status "WARN" "🚨 SAFETY CIRCUIT BREAKER: Force exit after 5 consecutive EXIT_SIGNAL=true responses ($recent_completion_indicators)" >&2
         echo "safety_circuit_breaker"
         return 0
+    fi
+
+    # 3b. Confidence stall: no increase in last N loops at low confidence
+    # Triggers when confidence is stuck at a low value with no meaningful increase,
+    # indicating the session is genuinely stagnant (not just being cautious).
+    local stall_n=${CONFIDENCE_STALL_THRESHOLD:-5}
+    local stall_ceiling=${CONFIDENCE_STALL_MAX_CONF:-72}
+    local stall_file="$RALPH_DIR/.confidence_history"
+    local current_conf=0
+    if [[ -f "$RESPONSE_ANALYSIS_FILE" ]]; then
+        current_conf=$(jq -r '.analysis.confidence_score // 0' "$RESPONSE_ANALYSIS_FILE" 2>/dev/null || echo 0)
+    fi
+    # Skip 0 — means no analysis has run yet (loop start before execute_claude_code)
+    [[ "$current_conf" -gt 0 ]] && echo "$current_conf" >> "$stall_file"
+    # Rotate: keep only last 100 entries to prevent unbounded growth (only if file exists and has content)
+    if [[ -f "$stall_file" && -s "$stall_file" ]]; then
+        local tmp_rotate="${stall_file}.tmp"
+        tail -n 100 "$stall_file" > "$tmp_rotate" && mv "$tmp_rotate" "$stall_file"
+    fi
+    local history_len
+    history_len=$(wc -l < "$stall_file" 2>/dev/null || echo 0)
+    if [[ $history_len -ge $stall_n ]]; then
+        local max_conf min_conf conf_range
+        max_conf=$(tail -n "$stall_n" "$stall_file" | sort -rn | head -1)
+        min_conf=$(tail -n "$stall_n" "$stall_file" | sort -n | head -1)
+        conf_range=$(( max_conf - min_conf ))
+        if [[ $max_conf -le $stall_ceiling ]] && [[ $conf_range -lt 5 ]]; then
+            log_status "WARN" "CONFIDENCE STALL: no increase over last $stall_n loops (range: ${min_conf}–${max_conf}%, ceiling: ${stall_ceiling}%)" >&2
+            echo "confidence_stall"
+            return 0
+        fi
     fi
 
     # 4. Strong completion indicators (only if Claude's EXIT_SIGNAL is true)
@@ -662,11 +736,18 @@ build_loop_context() {
         fi
     fi
 
-    # Add previous loop summary (truncated)
+    # Add previous loop summary (truncated) + corrective if tool calls appeared as raw text
     if [[ -f "$RESPONSE_ANALYSIS_FILE" ]]; then
         local prev_summary=$(jq -r '.analysis.work_summary // ""' "$RESPONSE_ANALYSIS_FILE" 2>/dev/null | head -c 200)
         if [[ -n "$prev_summary" && "$prev_summary" != "null" ]]; then
-            context+="Previous: ${prev_summary}"
+            # Detect if previous summary contains unexecuted tool call XML (DSML or <tool_call>)
+            # This means the model emitted tool calls as text that were never executed.
+            if echo "$prev_summary" | grep -qE '<\|DSML\||<tool_call'; then
+                context+="ALERTA: tus tool calls anteriores quedaron como texto sin ejecutar. "
+                context+="Ejecuta UNA herramienta a la vez y espera su resultado antes de continuar. "
+            else
+                context+="Previous: ${prev_summary}"
+            fi
         fi
     fi
 
@@ -1174,6 +1255,7 @@ execute_claude_code() {
 
         # jq filter: show text + tool names + newlines for readability
         local jq_filter='
+            # Handle stream-json format (Claude Code native)
             if .type == "stream_event" then
                 if .event.type == "content_block_delta" and .event.delta.type == "text_delta" then
                     .event.delta.text
@@ -1184,6 +1266,31 @@ execute_claude_code() {
                 else
                     empty
                 end
+            # Handle SSE data format (proxy output) - parsed by awk
+            elif .type == "content_block_delta" and .delta.type == "text_delta" then
+                .delta.text
+            elif .type == "content_block_start" and .content_block.type == "tool_use" then
+                "\n\n⚡ [" + .content_block.name + "]\n"
+            elif .type == "content_block_stop" then
+                "\n"
+            # Handle message_start (proxy sends this first)
+            elif .type == "message_start" then
+                empty
+            # Handle message_delta (proxy sends this at end)
+            elif .type == "message_delta" then
+                empty
+            # Handle message_stop (proxy sends this at end)
+            elif .type == "message_stop" then
+                empty
+            # Handle [DONE] sentinel
+            elif . == "[DONE]" then
+                empty
+            # Handle stream-quality ping events
+            elif .type == "ping" then
+                empty
+            # Fallback for any text content
+            elif .delta and .delta.text then
+                .delta.text
             else
                 empty
             end'
@@ -1198,10 +1305,27 @@ execute_claude_code() {
         # which would cause set -e to silently kill the entire script (Issue #175)
         set +e
         set -o pipefail
-        portable_timeout ${timeout_seconds}s stdbuf -oL "${LIVE_CMD_ARGS[@]}" \
-            < /dev/null 2>&1 | stdbuf -oL tee "$output_file" | { stdbuf -oL jq --unbuffered -j "$jq_filter" 2>/dev/null; cat; } | tee "$LIVE_LOG_FILE"
 
-        # Capture exit codes from pipeline
+        # SSE parser: Extract JSON data from SSE events for proxy output
+        # Proxy sends SSE format: "event: ...\ndata: {...}\n\n"
+        # We extract only "data:" lines and remove the "data: " prefix
+        local sse_to_json='
+            /^data: / {
+                sub(/^data: /, "")
+                print
+            }
+            /^[{]/ {
+                # Passthrough raw JSON (stream-json format)
+                print
+            }
+        '
+
+        portable_timeout ${timeout_seconds}s stdbuf -oL "${LIVE_CMD_ARGS[@]}" \
+            < /dev/null 2>&1 | stdbuf -oL tee "$output_file" | \
+            { stdbuf -oL awk "$sse_to_json" 2>/dev/null; cat; } | \
+            { stdbuf -oL jq --unbuffered -j "$jq_filter" 2>/dev/null; cat; } | tee "$LIVE_LOG_FILE"
+
+        # Capture exit codes from pipeline (5 stages with new awk parser)
         local -a pipe_status=("${PIPESTATUS[@]}")
         set +o pipefail
         set -e  # Re-enable errexit now that exit codes are captured
@@ -1219,9 +1343,14 @@ execute_claude_code() {
             log_status "WARN" "Failed to write stream output to log file (exit code ${pipe_status[1]})"
         fi
 
-        # Check for jq failures (third command) - warn but don't fail
+        # Check for awk failures (third command) - SSE parser
         if [[ ${pipe_status[2]} -ne 0 ]]; then
-            log_status "WARN" "jq filter had issues parsing some stream events (exit code ${pipe_status[2]})"
+            log_status "WARN" "SSE parser had issues (exit code ${pipe_status[2]})"
+        fi
+
+        # Check for jq failures (fourth command) - warn but don't fail
+        if [[ ${pipe_status[3]} -ne 0 ]]; then
+            log_status "WARN" "jq filter had issues parsing some stream events (exit code ${pipe_status[3]})"
         fi
 
         echo ""
@@ -1610,6 +1739,10 @@ main() {
         if [ $exec_result -eq 0 ]; then
             update_status "$loop_count" "$(cat "$CALL_COUNT_FILE")" "completed" "success"
 
+            # Sync completed TodoWrite todos → fix_plan.md checkboxes (Option A safety sync)
+            # Runs even if model forgot to call Edit directly (belt-and-suspenders with prompt enforcement)
+            sync_todos_to_fix_plan
+
             # Brief pause between successful executions
             sleep 5
         elif [ $exec_result -eq 3 ]; then
@@ -1762,11 +1895,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -t|--timeout)
-            if [[ "$2" =~ ^[1-9][0-9]*$ ]] && [[ "$2" -le 120 ]]; then
+            if [[ "$2" =~ ^[1-9][0-9]*$ ]] && [[ "$2" -le 480 ]]; then
                 CLAUDE_TIMEOUT_MINUTES="$2"
                 _cli_CLAUDE_TIMEOUT_MINUTES="$2"  # preserve across load_ralphrc()
             else
-                echo "Error: Timeout must be a positive integer between 1 and 120 minutes"
+                echo "Error: Timeout must be a positive integer between 1 and 480 minutes"
                 exit 1
             fi
             shift 2
