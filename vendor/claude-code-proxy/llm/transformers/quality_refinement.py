@@ -20,11 +20,17 @@ model-specific logic across multiple files (stream_quality.py, etc.).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional, TYPE_CHECKING
+from llm.transformers.grounding_validator import GroundingValidatorTransformer
 
-from llm.pipeline import Transformer, TransformContext
+from llm.pipeline import TransformContext
 from utils.quality import score_response as score_response_quality
-from llm.transformers.stream_event import accumulate_stream
+
+# Import accumulate_stream via TYPE_CHECKING to avoid circular dependency
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from llm.transformers.stream_event import accumulate_stream
 
 if TYPE_CHECKING:
     from config import ProxyConfig
@@ -78,147 +84,89 @@ def _validate_intent_outcome(intent: str, text: str, tool_calls: list, output_to
     return True  # Unknown intent — don't penalize
 
 
-class QualityRefinementTransformer(Transformer):
+# ── Two-tier quality gate helpers ────────────────────────────────────────────
+
+async def _llm_quality_gate(
+    score: float,
+    issues: list[str],
+    intent: str,
+    response_text: str,
+    cfg_obj: "ProxyConfig",
+) -> bool:
+    """Call the classifier LLM to judge ambiguous quality scores.
+
+    Returns True if refinement is needed, False to skip.
+    Only called for scores in the ambiguous zone [certainty_floor, quality_threshold).
+    Uses the classifier endpoint (DeepSeek-chat) — cheap, fast, no circular deps.
     """
-    AGNOSTIC transformer for quality scoring and refinement decisions.
+    try:
+        import httpx
 
-    Extracts and consolidates quality evaluation logic from stream_quality.py:
-    - Quality scoring thresholds (AGNOSTIC, no model-specific)
-    - Phase-based decisions (READ vs SYNTHESIZING, AGNOSTIC, no model-specific)
-    - Tool-heavy response detection (AGNOSTIC, no model-specific)
-    - Quality-based feedback generation (AGNOSTIC, no model-specific)
+        prompt = (
+            f"Task intent: {intent}\n\n"
+            f"Model response (first 800 chars):\n{response_text[:800]}\n\n"
+            f"Quality heuristics flagged: {', '.join(issues) if issues else 'none'}\n"
+            f"Heuristic score: {score:.2f} / 1.0\n\n"
+            "Does this response adequately address the task? "
+            "Reply with a single word only: PASS or REFINE."
+        )
+        headers = {
+            "Authorization": f"Bearer {cfg_obj.classifier.api_key}",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "model": cfg_obj.classifier.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 5,
+            "temperature": 0.0,
+        }
+        base_url = (cfg_obj.classifier.base_url or "https://api.openai.com/v1").rstrip("/")
+        url = base_url + "/chat/completions"
+        timeout = min(cfg_obj.classifier.timeout, 8.0)
 
-    AGNOSTIC DESIGN REQUIREMENT:
-    - Zero model-specific if/elif blocks (no model_name checks)
-    - Same refinement rules for ALL models
-    - Future-proof: New models automatically supported
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, headers=headers, json=body, timeout=timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            answer = data["choices"][0]["message"]["content"].strip().upper()
 
-    This replaces scattered model-specific quality logic in stream_quality.py
-    with a centralized, AGNOSTIC configuration system.
+        should_refine = "REFINE" in answer
+        logger.info("[quality-gate] verdict=%s score=%.2f issues=%s", answer, score, issues)
+        return should_refine
+
+    except Exception as e:
+        logger.warning("[quality-gate] LLM gate failed (%s) — defaulting to REFINE", e)
+        return True  # safe default: if gate fails, allow refinement
+
+
+async def _should_refine(
+    score: float,
+    issues: list[str],
+    intent: str,
+    response_text: str,
+    cfg_obj: "ProxyConfig",
+) -> bool:
+    """Two-tier refinement decision gate.
+
+    Tier 1 — deterministic (0ms):
+      score >= quality_threshold  → False (definitely good, skip)
+      score <  certainty_floor    → True  (definitely bad, refine)
+    Tier 2 — LLM judgment (3-6s, only in ambiguous zone):
+      [certainty_floor, quality_threshold) + llm_score_gate=True → ask LLM
+
+    Returns True if refinement should proceed.
     """
+    quality_threshold = cfg_obj.analysis.quality_threshold
+    certainty_floor = cfg_obj.analysis.score_certainty_floor
 
-    @property
-    def name(self) -> str:
-        return "quality_refinement"
-
-    def __init__(self, enabled: bool = True):
-        self.enabled = enabled
-
-        # AGNOSTIC quality thresholds (same for ALL models, no model-specific)
-        self.quality_threshold = 0.70  # Default threshold
-        self.max_refinements = 3  # Default max refinements
-
-    async def transform(self, request: object, ctx: TransformContext) -> None:
-        """
-        Evaluate quality and decide if refinement is needed.
-
-        AGNOSTIC: Applies to ALL models, no model-specific logic.
-
-        Returns None (modifies request messages in-place).
-        """
-        if not self.enabled:
-            return
-
-        # Skip refinement during READ phase (model is still gathering data)
-        # AGNOSTIC: No model-specific checks
-        if ctx.analysis_phase == "READ":
-            logger.debug(
-                f"[quality-refinement] SKIP: analysis_phase=READ — intermediate response, no refinement"
-            )
-            return
-
-        # Skip refinement if no request messages to modify
-        # AGNOSTIC: No model-specific checks
-        if not hasattr(request, "messages") or request.messages is None:
-            logger.debug(
-                f"[quality-refinement] SKIP: no messages to refine"
-            )
-            return
-
-        # Accumulate full response content for scoring
-        # AGNOSTIC: No model-specific logic
-        text = "".join(
-            m.get("text", "") if isinstance(m, dict) else str(m) for m in request.messages
-        )
-        tool_calls = getattr(request, "tool_calls_from_reasoning", []) or []
-
-        # Evaluate quality using unified scorer
-        # AGNOSTIC: Same scoring for ALL models, no model-specific adjustments
-        score, issues = score_response_quality(
-            ctx.intent, text, tool_calls, is_analysis=True
-        )
-
-        logger.debug(
-            f"[quality-refinement] Quality score: {score:.2%} | Threshold: {self.quality_threshold:.0%} | Issues: {', '.join(issues)}"
-        )
-
-        # AGNOSTIC refinement rules (same for ALL models):
-        is_good_enough = score >= self.quality_threshold
-
-        if is_good_enough:
-            # Quality is acceptable - no refinement needed
-            logger.info(
-                f"[quality-refinement] SKIP: score {score:.2%} >= threshold {self.quality_threshold:.0%} — good enough quality"
-            )
-            return
-
-        # Tool-heavy response detection (AGNOSTIC, no model-specific logic)
-        # Skip refinement for tool-heavy responses (model is mid-execution)
-        # AGNOSTIC: Same rule for ALL models
-        tool_call_count = len(tool_calls)
-        text_len = len(text.strip())
-        text_ratio = text_len / max(text_len + tool_call_count * 200, 1)
-        if text_ratio < 0.3:
-            logger.info(
-                f"[quality-refinement] SKIP: tool_call_count={tool_call_count} text_len={text_len} text_ratio={text_ratio:.2f} — tool-heavy, no refinement"
-            )
-            return
-
-        # Determine refinement attempt
-        current_refinements = getattr(ctx, "refinement_count", 0)
-        if current_refinements >= self.max_refinements:
-            logger.info(
-                f"[quality-refinement] SKIP: max refinements {self.max_refinements} reached"
-            )
-            return
-
-        # Refine response (AGNOSTIC: same process for ALL models)
-        logger.info(
-            f"[quality-refinement] REFINING: score={score:.2f} threshold={self.quality_threshold:.0f} issues={', '.join(issues)}"
-        )
-
-        # Generate refinement feedback (AGNOSTIC, no model-specific messages)
-        # Generic feedback based on quality issues, not model name checks
-        feedback_parts = [
-            f"[quality-refinement] Score: {score:.2%} | Threshold: {self.quality_threshold:.0%}",
-            f"Issues: {', '.join(issues)}",
-        ]
-
-        # Add generic quality guidance (AGNOSTIC, no model-specific)
-        if issues:
-            guidance = "\n🔍 QUALITY ISSUES DETECTED:\n"
-            for issue in issues:
-                guidance += f"• {issue}\n"
-            guidance += "Consider re-reading the codebase. Cite SPECIFIC locations.\n"
-            guidance += "Improve the response to be more detailed and accurate."
-            feedback_parts.append(guidance)
-
-        # Update refinement count (AGNOSTIC)
-        setattr(ctx, "refinement_count", current_refinements + 1)
-
-        # Add feedback to request messages (append, don't replace)
-        if not hasattr(request, "messages") or request.messages is None:
-            request.messages = []
-
-        request.messages.append(
-            {"role": "assistant", "content": "\n".join(feedback_parts)[:4000]}
-        )
-
-        logger.info(
-            f"[quality-refinement] Added refinement feedback with {len(feedback_parts)} parts"
-        )
-
-        return None
+    if score >= quality_threshold:
+        return False
+    if score < certainty_floor:
+        return True
+    # Ambiguous zone: use LLM gate if enabled
+    if cfg_obj.analysis.llm_score_gate:
+        return await _llm_quality_gate(score, issues, intent, response_text, cfg_obj)
+    return True  # gate disabled: deterministic fallback
 
 
 # ── Shared feedback builder (used by both stream and non-stream paths) ──────
@@ -274,6 +222,57 @@ def _build_refinement_feedback(
     return "\n".join(parts)
 
 
+def _build_grounding_feedback(
+    ctx: TransformContext,
+    response_text: str,  # pylint: disable=unused-argument  # Kept for future analysis
+    grounding_threshold: float,
+) -> str:
+    """Build feedback to fix grounding issues."""
+    parts = [
+        f"[grounding-validation] Score: {ctx.grounding_score:.0%} | Threshold: {grounding_threshold:.0%}",
+        "GROUNDING ISSUES:",
+    ]
+
+    for issue in ctx.grounding_issues:
+        parts.append(f"  - {issue}")
+
+    parts.extend([
+        "",
+        "MANDATORY FIXES:",
+        "  1. For EVERY factual claim, cite (file.py:line) from a file you've READ",
+        "  2. If you mention a function/class, QUOTE the code that does what you claim",
+        "  3. If you haven't read the file, say 'I need to read this file first'",
+        "  4. Never assume file paths, function names, or line numbers",
+        "  5. Include code snippets for behavioral claims",
+        "",
+        "EXAMPLE OF CORRECT CITATION:",
+        "The AuthService.validateToken() method checks if the token is expired (auth.py:42):",
+        "```python",
+        "if token.expiry < now:",
+        "    raise InvalidTokenError",
+        "```",
+        "",
+        "Unverified claims will be rejected. Read the files first, then cite them with code snippets.",
+    ])
+
+    return "\n".join(parts)
+
+
+def _build_code_evidence(ctx: TransformContext) -> str:
+    """Build code evidence from snippet cache."""
+    parts = []
+    for citation, evidence in ctx.evidence_links.items():
+        file_path, snippet = evidence
+        if snippet:
+            parts.append(f"{citation} - {file_path}")
+            parts.append("```")
+            parts.append(snippet[:300])  # First 300 chars
+            parts.append("...")
+            parts.append("```")
+            parts.append("")
+    return "\n".join(parts[:10])  # Limit to 10 citations
+
+
 # ── Non-streaming quality refinement loop ──────────────────────────────
 
 async def analysis_quality_nonstream(
@@ -293,29 +292,59 @@ async def analysis_quality_nonstream(
     from llm.schemas import Message
 
     max_refinements = cfg_obj.analysis.max_refinements if ctx.is_analysis else 0
-    quality_threshold = cfg_obj.analysis.quality_threshold
     provider_used = "primary"
 
     if max_refinements <= 0:
         return anthropic_response, provider_used
 
-    score, issues = score_anthropic_response(anthropic_response, ctx.intent, is_analysis=True)
-    ctx.quality_score = score
-    ctx.quality_issues = issues
+    # Use grounding validation instead of quality scoring
+    grounding_threshold = float(
+        os.environ.get("GROUNDING_THRESHOLD", "0.8")
+    ) if ctx.is_analysis else 1.0  # Disable for non-analysis
+
+    logger.info(
+        "[nonstream-grounding] Start: max_refinements=%d grounding_enabled=%s threshold=%.2f",
+        max_refinements,
+        cfg_obj.policy.grounding_validation_enabled if hasattr(cfg_obj, "policy") else False,
+        grounding_threshold
+    )
+
+    # Grounding validation already run in response pipeline (server.py:345 or proxy.py:425)
+    # Use ctx.grounding_score from response pipeline - DO NOT duplicate
+    if ctx.is_analysis and cfg_obj.policy.grounding_validation_enabled:
+        grounding_score = ctx.grounding_score if ctx.grounding_score > 0 else 1.0
+    else:
+        grounding_score = 1.0  # Disable if not in analysis
+
+    logger.info(
+        "[nonstream-grounding] Start: max_refinements=%d grounding_enabled=%s threshold=%.2f score=%.2f",
+        max_refinements,
+        cfg_obj.policy.grounding_validation_enabled if hasattr(cfg_obj, "policy") else False,
+        grounding_threshold,
+        grounding_score,
+    )
 
     for attempt in range(1, max_refinements + 1):
-        if score >= quality_threshold:
+        # Check grounding score (skip if not analysis or validation disabled)
+        if not ctx.is_analysis or not cfg_obj.policy.grounding_validation_enabled:
+            break
+
+        if grounding_score >= grounding_threshold:
             break
 
         logger.info(
-            "[refinement] attempt=%d/%d score=%.2f threshold=%.2f issues=%s",
-            attempt, max_refinements, score, quality_threshold, issues,
+            "[refinement] attempt=%d/%d grounding_score=%.2f threshold=%.2f issues=%s",
+            attempt, max_refinements, grounding_score, grounding_threshold, ctx.grounding_issues,
         )
         ctx.refinement_attempt = attempt
 
-        feedback = _build_refinement_feedback(score, issues, quality_threshold,
-                                              request_messages=request.messages)
-        resp_text = extract_response_text(anthropic_response)
+        feedback = _build_grounding_feedback(ctx, resp_text, grounding_threshold)
+
+        # Add code snippets to feedback for verification
+        if ctx.code_snippet_cache:
+            code_evidence = _build_code_evidence(ctx)
+            if code_evidence:
+                feedback += "\n\nCODE EVIDENCE FROM TOOL RESULTS:\n" + code_evidence
 
         if not hasattr(request, "messages") or request.messages is None:
             break
@@ -331,14 +360,15 @@ async def analysis_quality_nonstream(
             model_context_window=ctx.effective_context_window or cfg_obj.routing.model_context_window,
             strip_reasoning=cfg_obj.policy.strip_reasoning,
         )
-        score, issues = score_anthropic_response(anthropic_response, ctx.intent, is_analysis=True)
-        ctx.quality_score = score
-        ctx.quality_issues = issues
+
+        # Response pipeline runs on re-request - use ctx.grounding_score
+        grounding_score = ctx.grounding_score if ctx.is_analysis else 1.0
+        resp_text = extract_response_text(anthropic_response)
 
     if ctx.refinement_attempt > 0:
         logger.info(
-            "[refinement] done: attempts=%d final_score=%.2f issues=%s",
-            ctx.refinement_attempt, ctx.quality_score, ctx.quality_issues,
+            "[nonstream-grounding] Refined: attempts=%d final_score=%.2f issues=%s",
+            ctx.refinement_attempt, ctx.grounding_score, ctx.grounding_issues,
         )
 
     return anthropic_response, provider_used
@@ -362,6 +392,9 @@ async def analysis_quality_stream(
     quality_threshold = cfg_obj.analysis.quality_threshold
     max_refinements = cfg_obj.analysis.max_refinements
 
+    # Import here to avoid circular dependency
+    from llm.transformers.stream_event import accumulate_stream
+
     # 1. Accumulate the full first-attempt stream
     text, chunks, tool_names = await accumulate_stream(stream_generator)
     tool_use_count = len(tool_names)
@@ -374,6 +407,35 @@ async def analysis_quality_stream(
             "[stream-refinement] SKIP: tool_use_count=%d text_len=%d text_ratio=%.2f — tool-heavy, no refinement",
             tool_use_count, text_len, text_ratio,
         )
+        ctx.quality_score = 1.0  # tool-heavy = healthy work, not unscored
+        ctx.quality_issues = []
+        for chunk in chunks:
+            yield chunk
+        return
+
+    # 1.55. Skip refinement when ANY tool calls are present — tool execution IS productive work.
+    # Refining a tool-call response replaces the response before Claude Code can execute the tools,
+    # breaking the tool result chain. Score the turn as passing to avoid LLM gate overhead.
+    if tool_use_count > 0:
+        logger.info(
+            "[stream-refinement] SKIP: tool_use_count=%d — tool execution in progress, no refinement",
+            tool_use_count,
+        )
+        ctx.quality_score = 1.0
+        ctx.quality_issues = []
+        for chunk in chunks:
+            yield chunk
+        return
+
+    # 1.6. Skip refinement if response contains CC workflow tools (EnterPlanMode, ExitPlanMode, etc.)
+    # Re-requesting could drop these tool calls, breaking CC plan mode / workflow prompts.
+    from llm.transformers.stream_event import _CC_WORKFLOW_TOOLS
+    cc_workflow_hits = [n for n in tool_names if n in _CC_WORKFLOW_TOOLS]
+    if cc_workflow_hits:
+        logger.info(
+            "[stream-refinement] SKIP: CC workflow tools %s — no refinement to preserve plan mode",
+            cc_workflow_hits,
+        )
         for chunk in chunks:
             yield chunk
         return
@@ -384,17 +446,8 @@ async def analysis_quality_stream(
     ctx.quality_score = score
     ctx.quality_issues = issues
 
-    # 3. If good enough, replay the original chunks
-    if score >= quality_threshold or max_refinements <= 0:
-        for chunk in chunks:
-            yield chunk
-        return
-
-    # 3.5. Skip refinement during READ phase
-    if ctx.analysis_phase == "READ":
-        logger.info(
-            "[stream-refinement] SKIP: analysis_phase=READ — intermediate response, no refinement",
-        )
+    # 3. Two-tier gate: skip refinement if score is good or gate says PASS
+    if max_refinements <= 0 or not await _should_refine(score, issues, ctx.intent, text, cfg_obj):
         for chunk in chunks:
             yield chunk
         return

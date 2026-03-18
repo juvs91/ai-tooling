@@ -41,7 +41,6 @@ from llm.transformers import (
     ReasoningHandlingTransformer,
     UniversalToolExtractionTransformer,
     ModelFeedbackTransformer,
-    QualityRefinementTransformer,
     StreamEventTransformer,
 )
 # ──────────────────────────────────────────────────────────────────────────────────────
@@ -49,13 +48,13 @@ from llm.schemas import MessagesRequest, TokenCountRequest, TokenCountResponse
 from llm.streaming import handle_streaming, passthrough_xml_tool_extraction
 from router.model_mapper import map_claude_alias_to_target
 from utils.metrics import metrics, RequestLog
-from llm.stream_quality import (
+from llm.transformers.quality_refinement import (
     extract_response_text,
     score_anthropic_response,
     analysis_quality_stream,
     analysis_quality_nonstream,
-    tracked_stream,
 )
+from llm.transformers.stream_event import tracked_stream
 from config import load_config
 
 
@@ -251,11 +250,24 @@ async def create_message(request: MessagesRequest, raw_request: Request):
         if provider_used == "passthrough":
             est_input_tokens = max(1, len(body) // 6)
             if is_stream:
+                # ──────────────────────────────────────────────────────────────────────────────
+                # Passthrough Streaming Path
+                # ──────────────────────────────────────────────────────────────────────────────
+                # Entry: proxy.py:_passthrough_route (is_stream=True)
+                # Flow:
+                #   1. passthrough_xml_tool_extraction() - Extract tool calls from XML
+                #   2. analysis_quality_stream() - Quality refinement (re-sends if needed)
+                #   3. tracked_stream() - Metrics + async grounding validation
+                #
+                # IMPORTANT: Response pipeline NOT called here - requires complete response objects.
+                # Grounding validation runs asynchronously via _run_post_stream_validation().
+                # No re-sending based on grounding score to preserve DX (client receives response immediately).
+                # ──────────────────────────────────────────────────────────────────────────────
                 # SSE relay — extract GLM argkv tools, then quality loop, then tracked_stream
                 stream_gen = out
                 if getattr(request, "tools", None):
                     stream_gen = passthrough_xml_tool_extraction(stream_gen, request)
-                if ctx.is_analysis and cfg.analysis.max_refinements > 0:
+                if ctx.intent != "CHAT" and cfg.analysis.max_refinements > 0:
                     stream_gen = analysis_quality_stream(stream_gen, request, ctx, cfg)
                 stream_gen = tracked_stream(stream_gen, request, ctx, cfg)
                 metrics.record(RequestLog(
@@ -301,6 +313,19 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 return out
 
         if is_stream:
+            # ──────────────────────────────────────────────────────────────────────────────
+            # LiteLLM Streaming Path
+            # ──────────────────────────────────────────────────────────────────────────────
+            # Entry: server.py:_route_litellm (is_stream=True)
+            # Flow:
+            #   1. handle_streaming() - Convert to SSE events
+            #   2. analysis_quality_stream() - Quality refinement (re-sends if needed)
+            #   3. tracked_stream() - Metrics + async grounding validation
+            #
+            # IMPORTANT: Response pipeline NOT called here - requires complete response objects.
+            # Grounding validation runs asynchronously via _run_post_stream_validation().
+            # No re-sending based on grounding score to preserve DX (client receives response immediately).
+            # ──────────────────────────────────────────────────────────────────────────────
             # Streaming: tool extraction handled by handle_streaming()
             # Response transformers are designed for complete responses, not SSE event strings
             stream_gen = handle_streaming(
@@ -311,7 +336,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 classifier_base_url=cfg.classifier.base_url,
                 strip_reasoning=cfg.policy.strip_reasoning,
             )
-            if ctx.is_analysis and cfg.analysis.max_refinements > 0:
+            if ctx.intent != "CHAT" and cfg.analysis.max_refinements > 0:
                 stream_gen = analysis_quality_stream(stream_gen, request, ctx, cfg)
 
             # Wrap stream to capture post-stream metrics (tokens, quality, cost)
@@ -338,6 +363,18 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 media_type="text/event-stream",
             )
 
+        # ──────────────────────────────────────────────────────────────────────────────
+        # LiteLLM Non-Streaming Path
+        # ──────────────────────────────────────────────────────────────────────────────
+        # Entry: server.py:_route_litellm (is_stream=False)
+        # Flow:
+        #   1. convert_litellm_to_anthropic() - Format conversion
+        #   2. _run_response_pipeline() - Runs response pipeline (includes GroundingValidator)
+        #   3. analysis_quality_nonstream() - Quality refinement (re-sends if needed)
+        #
+        # IMPORTANT: _run_response_pipeline() runs grounding validation.
+        # DO NOT duplicate in analysis_quality_nonstream() - use ctx.grounding_score instead.
+        # ──────────────────────────────────────────────────────────────────────────────
         anthropic_response = convert_litellm_to_anthropic(
             out, request, model_context_window=ctx.effective_context_window or cfg.routing.model_context_window,
             strip_reasoning=cfg.policy.strip_reasoning,
