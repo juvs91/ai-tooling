@@ -20,6 +20,8 @@ from litellm.exceptions import (
     InternalServerError as LiteLLMInternalServerError,
 )
 from llm.passthrough import PassthroughClient, PassthroughError
+from llm.compressor import _track_grounding_hop
+from llm.transformers import GroundingValidatorTransformer
 
 logger = logging.getLogger(__name__)
 from utils.metrics import metrics
@@ -39,8 +41,8 @@ from llm.transformers import (
     # ── AGNOSTIC RESPONSE TRANSFORMERS ────────────────────────────────────────
     ReasoningHandlingTransformer,
     UniversalToolExtractionTransformer,
+    GroundingValidatorTransformer,
     ModelFeedbackTransformer,
-    QualityRefinementTransformer,
     StreamEventTransformer,
     # ──────────────────────────────────────────────────────────────────────────────────────
 )
@@ -70,7 +72,7 @@ def build_litellm_pipeline(cfg: ProxyConfig) -> Pipeline:
     """Phase 2: Transformers that operate on the LiteLLM-format request."""
     return Pipeline([
         CompressionTransformer(cfg.compressor, cfg.routing),
-        ProviderQuirksTransformer(cfg.stream_extra_body),
+        ProviderQuirksTransformer(cfg.stream_extra_body, cfg.litellm_thinking_params),
         CredentialTransformer(cfg.credentials, cfg.analysis),
     ])
 
@@ -79,6 +81,7 @@ def build_passthrough_pipeline(cfg: ProxyConfig) -> Pipeline:
     """Phase 2b: Request transformers for passthrough (Anthropic-compatible endpoints like Z.AI)."""
     return Pipeline([
         CompressionTransformer(cfg.compressor, cfg.routing),
+        ProviderQuirksTransformer(cfg.stream_extra_body, cfg.litellm_thinking_params),
     ])
     # Note: Response transformers run AFTER model returns, NOT here
     # See run_messages() passthrough path for response pipeline integration
@@ -101,9 +104,8 @@ def build_response_pipeline(cfg: ProxyConfig) -> Pipeline:
     return Pipeline([
         ReasoningHandlingTransformer(cfg.analysis),
         UniversalToolExtractionTransformer(),
+        GroundingValidatorTransformer(enabled=cfg.policy.grounding_validation_enabled if hasattr(cfg, "policy") and hasattr(cfg.policy, "grounding_validation_enabled") else True),
         ModelFeedbackTransformer(cfg),
-        QualityRefinementTransformer(cfg),
-        # StreamEventTransformer(enabled=False),  # Temporarily disabled due to Pydantic issues
     ])
 
 
@@ -260,7 +262,13 @@ def _is_passthrough_compatible(model: str, cfg: ProxyConfig) -> bool:
         return False
     # Check model prefix
     if "/" not in model:
-        return True  # bare model → assume primary provider
+        # Bare model name (no provider prefix, e.g. "claude-opus-4-6").
+        # Default: require explicit prefix to prevent bare DeepSeek/GLM names from
+        # accidentally activating passthrough when ANTHROPIC_BASE_URL is set.
+        # Set PASSTHROUGH_REQUIRE_PREFIX=0 to restore legacy behaviour.
+        if cfg.passthrough_require_prefix:
+            return False
+        return True  # legacy: bare model → assume primary provider
     return model.split("/", 1)[0].lower() == "anthropic"
 
 
@@ -303,11 +311,12 @@ def _build_passthrough_body(
         ]
     if getattr(request, "temperature", None) is not None:
         body["temperature"] = request.temperature
-    # Inject thinking params for ANALYZING/READ phase only.
+    # Inject thinking params for ANALYZING/READ/SYNTHESIZING phases.
     # analysis_thinking comes from ANALYSIS_THINKING_PARAMS env var — it's specific to
     # the model configured there (e.g. GLM-4.7 via Anthropic passthrough). We don't
     # propagate CC's thinking param to other models since they may not support it.
-    if ctx and ctx.analysis_phase in ("ANALYZING", "READ") and analysis_thinking:
+    # SYNTHESIZING needs thinking to verify evidence across multiple hops.
+    if ctx and ctx.analysis_phase in ("ANALYZING", "READ", "SYNTHESIZING") and analysis_thinking:
         # Skip thinking for very large contexts — reasoning overhead causes timeouts
         thinking_cap = int(os.environ.get("THINKING_MAX_INPUT_CHARS", "0"))
         if thinking_cap > 0:
@@ -354,7 +363,7 @@ async def run_messages(
             is_stream = getattr(request_obj, "stream", False)
             has_thinking = (
                 is_stream
-                and ctx and ctx.analysis_phase in ("ANALYZING", "READ")
+                and ctx and ctx.analysis_phase in ("ANALYZING", "READ", "SYNTHESIZING")
                 and cfg.analysis.thinking_params
             )
             # Dynamic timeout: reasoning models need more time with large contexts
@@ -374,7 +383,7 @@ async def run_messages(
             body = _build_passthrough_body(
                 request_obj, pt_model,
                 ctx=ctx,
-                analysis_thinking=cfg.analysis.thinking_params if is_stream else None,
+                analysis_thinking=cfg.analysis.thinking_params,
             )
             if is_stream:
                 logger.info("[passthrough] streaming phase=%s model=%s analysis=%s timeout=%.0fs", ctx.phase, body.get("model"), ctx.analysis_phase, timeout)
@@ -391,6 +400,17 @@ async def run_messages(
                     logger.warning("[passthrough] stream failed on first chunk (timeout=%.0fs): %s", timeout, stream_err)
                     raise PassthroughError(str(stream_err)) from stream_err
 
+                # ──────────────────────────────────────────────────────────────────────────────
+                # NOTE: Response Pipeline NOT Called for Streaming
+                # ──────────────────────────────────────────────────────────────────────────────
+                # Streaming responses are generators of SSE event strings.
+                # Response transformers (including GroundingValidatorTransformer) expect complete
+                # response objects with .content attribute.
+                #
+                # Therefore, response pipeline is SKIPPED for streaming.
+                # Grounding validation runs asynchronously via _run_post_stream_validation()
+                # in stream_event.py:tracked_stream() (called from server.py).
+                # ──────────────────────────────────────────────────────────────────────────────
                 # Passthrough streaming: tool extraction handled by passthrough_xml_tool_extraction in server.py
                 # Response transformers are designed for complete responses, not SSE event strings
                 async def _prepend_stream():
@@ -408,6 +428,18 @@ async def run_messages(
                 logger.info("[passthrough] non-stream phase=%s model=%s max_tokens=%d",
                             ctx.phase, body.get("model"), body["max_tokens"])
 
+                # ──────────────────────────────────────────────────────────────────────────────
+                # Passthrough Non-Streaming Path
+                # ──────────────────────────────────────────────────────────────────────────────
+                # Entry: proxy.py:_passthrough_route (is_stream=False)
+                # Flow:
+                #   1. pt.create_message() - Direct model call
+                #   2. _run_response_pipeline() - Runs response pipeline (includes GroundingValidator)
+                #   3. Return to server.py for quality refinement
+                #
+                # IMPORTANT: _run_response_pipeline() runs grounding validation.
+                # DO NOT duplicate in analysis_quality_nonstream() - use ctx.grounding_score instead.
+                # ──────────────────────────────────────────────────────────────────────────────
                 # Get response from model, then run response pipeline
                 # Pass response_model so CC receives the original request model name
                 # (e.g. "claude-opus-4-6") rather than the upstream model ("glm-4.7").
