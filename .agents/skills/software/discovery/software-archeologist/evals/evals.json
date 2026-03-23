@@ -1,0 +1,56 @@
+{
+  "skill_name": "software-archeologist",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Make the software archeology of this repository. Generate the executions graph.",
+      "expected_output": "Full archaeology workflow: (1) Appends a new entry to docs/findings/FINDINGS.md before writing to knowledge/; (2) Runs or invokes retro-engineer for automated analysis; (3) Produces an executions graph (Graphviz dot or Mermaid) showing entry points → core modules → external APIs; (4) Creates a call tree; (5) Generates an external API inventory; (6) Updates context/run_context.md with confirmed facts; (7) Identifies hardware signals and dispatches to hardware-analyst if present.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "docs/findings/FINDINGS.md is updated with a new F-XXX entry BEFORE writing to knowledge/",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "An executions graph is produced (dot, mermaid, or ASCII)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "An external API inventory is included (every system call with file and line)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "context/run_context.md is updated with confirmed technology stack facts",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Backtrack this codebase to understand why `process_payment()` calls `validate_card()` before `charge()`. What's the execution path?",
+      "expected_output": "Targeted backtracking: (1) Locate process_payment() entry point; (2) Trace the call chain: process_payment → validate_card → (card validation logic) → charge → (payment gateway API); (3) Identify any guards or preconditions; (4) Document the decision (validate before charge = fail-fast pattern, security mandate); (5) Add finding to FINDINGS.md. The output shows the full call tree from process_payment down to external APIs.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "The full call chain from process_payment to the payment gateway is documented",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The reason for validate-before-charge ordering is identified (fail-fast or security mandate)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Finding is appended to FINDINGS.md",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

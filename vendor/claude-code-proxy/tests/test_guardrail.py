@@ -117,9 +117,8 @@ class TestGuardrailTransformer:
         req = _request(tools=None)
         ctx = TransformContext(is_analysis=True, analysis_phase="SYNTHESIZING")
         await t.transform(req, ctx)
-        assert "[synthesis-guard]" in req.system
+        assert "[synthesis-guide]" in req.system
         assert "[code-analysis-guard]" not in req.system
-        assert "NO TOOL CALLS" in req.system
 
     @pytest.mark.asyncio
     async def test_synthesizing_strips_tools(self):
@@ -129,9 +128,9 @@ class TestGuardrailTransformer:
         req = _request(tools=tools)
         ctx = TransformContext(is_analysis=True, analysis_phase="SYNTHESIZING")
         await t.transform(req, ctx)
-        assert req.tools is None
+        assert req.tools is not None  # tools kept — Override F handles phase reset if agent calls a tool
         assert "[tool-guard]" not in (req.system or "")
-        assert "[synthesis-guard]" in req.system
+        assert "[synthesis-guide]" in req.system
 
     @pytest.mark.asyncio
     async def test_analysis_reasoning_prompt_with_tools(self):

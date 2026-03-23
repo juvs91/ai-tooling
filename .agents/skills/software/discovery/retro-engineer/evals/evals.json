@@ -1,0 +1,51 @@
+{
+  "skill_name": "retro-engineer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Run a structural analysis of this codebase at /home/user/myproject. Generate the retro report.",
+      "expected_output": "Retro-engineer checks for tools/retro/main.py (or tools/software/discovery/main.py). If found, runs: python tools/software/discovery/main.py /home/user/myproject --output retro-report.md --json. Reads the generated retro-report.md and retro-report.json. Produces a summary covering: technology stack, module structure, entry points, external API calls, and hardware signals (if any). If hardware signals detected, dispatches to hardware-analyst.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Checks for and attempts to run the automated analysis tool before doing manual analysis",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Output includes: technology stack, architecture map, entry points",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "If hardware APIs are detected, dispatches to hardware-analyst",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Analyze this project but the tools/retro/main.py script doesn't exist yet.",
+      "expected_output": "Falls back to manual analysis: uses Grep, Glob, and Read tools to perform the analysis steps manually. Covers: (1) language detection via file extensions; (2) entry points via main.py, __init__.py, setup.py patterns; (3) import graph via grep for import statements; (4) external API calls via grep for known library patterns. Documents findings in retro-report.md. Does NOT silently fail — proceeds with available tools and notes the missing automated tool.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Does not crash or refuse to work when main.py is absent",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Performs manual analysis using available search tools",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Notes the missing automated tool and suggests invoking tool-writer to create it",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

@@ -9,20 +9,11 @@ services:
     restart: unless-stopped
     env_file:
       - ./.env
-      - profile-envs/cloud.mixed-router.env
+      - profile-envs/cloud.zai-anthropic.env
     environment:
       - PYTHONUNBUFFERED=1
       - UV_LINK_MODE=copy
-      # Modelos configurados para testing (económicos pero funcionales)
-      - BIG_MODEL=glm-4.7
-      - SMALL_MODEL=deepseek-chat
-      # NO sobrescribir aquí para mantener la configuración multi-modelo
-      - ANALYSIS_MODEL=anthropic/glm-4.7
-      - CLASSIFIER_MODEL=openai/deepseek-chat
-      - CLASSIFIER_TIMEOUT=15.0  # Aumentado para evitar timeouts en deepseek
-      # Límites de costo para seguridad durante pruebas
-      - SESSION_COST_LIMIT_USD=2.00
-      - SESSION_COST_WARNING_USD=1.00
+      - STRIP_REASONING=1  # Strip deepseek-reasoner <think> blocks
     ports:
       - "8085:8082"  # Puerto diferente: 8085 (test) vs 8083 (production)
     volumes:
@@ -31,7 +22,3 @@ services:
     networks:
       - default
 
-  # Production proxy (sin cambios) - sigue corriendo en 8083
-  proxy_cloud:
-    networks:
-      - default

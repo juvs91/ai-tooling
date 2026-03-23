@@ -33,8 +33,8 @@ class TestIntentEnforcementTransformer:
         assert "[INTENT-ENFORCEMENT]" in req.system
         assert "READ/ANALYZING mode" in req.system
         # Must have anti-speculative generation rules
-        assert "file not found" in req.system
-        assert "do NOT invent" in req.system
+        assert "Never assume" in req.system
+        assert "No citation = no claim" in req.system
 
     @pytest.mark.asyncio
     async def test_analyzing_phase_injects_read_note(self):
@@ -60,7 +60,7 @@ class TestIntentEnforcementTransformer:
 
     @pytest.mark.asyncio
     async def test_synthesizing_intent_injects_system_note(self):
-        """SYNTHESIZING intent must inject no-tools-available note."""
+        """SYNTHESIZING intent must inject synthesis guidance note."""
         t = IntentEnforcementTransformer(enabled=True)
         req = _request(system=None)
         ctx = _ctx(intent="SYNTHESIZING")
@@ -68,8 +68,8 @@ class TestIntentEnforcementTransformer:
         assert req.system is not None
         assert "[INTENT-ENFORCEMENT]" in req.system
         assert "SYNTHESIZING mode" in req.system
-        # Must tell model tools are unavailable (for deepseek-reasoner)
-        assert "none are available" in req.system
+        # Must prioritize written synthesis over tool calls
+        assert "minimize tool calls" in req.system
 
     @pytest.mark.asyncio
     async def test_building_intent_injects_system_note(self):
@@ -112,16 +112,16 @@ class TestIntentEnforcementTransformer:
         req = _request(system=None)
         ctx = _ctx(intent="READ")
         await t.transform(req, ctx)
-        assert "do NOT invent" in req.system
+        assert "Never assume" in req.system
 
     @pytest.mark.asyncio
     async def test_synthesizing_enforcement_has_no_tools_available_rule(self):
-        """SYNTHESIZING enforcement must state no tools are available (deepseek-reasoner context)."""
+        """SYNTHESIZING enforcement must minimize tool calls and focus on written synthesis."""
         t = IntentEnforcementTransformer(enabled=True)
         req = _request(system=None)
         ctx = _ctx(intent="SYNTHESIZING")
         await t.transform(req, ctx)
-        assert "none are available" in req.system
+        assert "minimize tool calls" in req.system
 
     @pytest.mark.asyncio
     async def test_building_enforcement_has_execute_now_rule(self):

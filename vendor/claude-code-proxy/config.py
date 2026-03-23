@@ -80,6 +80,7 @@ class ModelRouting:
     # Per-route provider overrides (when model lives on a different provider)
     small_route: Optional[RouteOverride] = None
     building_route: Optional[RouteOverride] = None
+    low_confidence_threshold: float = 0.65  # ENV: LOW_CONFIDENCE_THRESHOLD
 
 
 @dataclass
@@ -120,6 +121,11 @@ class AnalysisConfig:
     context_window: int = 0        # ENV: ANALYSIS_CONTEXT_WINDOW (default: 0 = use global)
     thinking_params: Optional[dict] = None  # ENV: ANALYSIS_THINKING_PARAMS (JSON body params for passthrough)
     synthesize_reads_fallback: int = 15     # ENV: ANALYSIS_SYNTHESIZE_READS_FALLBACK (safety net)
+    llm_score_gate: bool = False            # ENV: ANALYSIS_LLM_SCORE_GATE (1=enable LLM second opinion for ambiguous scores)
+    score_certainty_floor: float = 0.50     # ENV: ANALYSIS_SCORE_CERTAINTY_FLOOR (below this: skip LLM gate, always refine)
+    grounding_threshold: float = 0.80       # ENV: GROUNDING_THRESHOLD
+    grounding_refinement_enabled: bool = True  # ENV: GROUNDING_REFINEMENT
+    stream_buffer_quality: bool = True       # ENV: STREAM_BUFFER_QUALITY
 
 
 @dataclass
@@ -132,6 +138,17 @@ class PolicyConfig:
     tool_upgrade_threshold: int
     strip_reasoning: bool = False  # strip <reasoning> tags from final response
     guard_system: str = ""         # loaded from GUARDRAILS_FILE or default
+    grounding_validation_enabled: bool = True  # ENV: GROUNDING_VALIDATION_ENABLED (default: True)
+    multihop_grounding_enabled: bool = True   # ENV: MULTIHOP_GROUNDING_ENABLED (default: True)
+
+
+@dataclass
+class AdaptiveRoutingConfig:
+    enabled: bool = True               # ENV: ADAPTIVE_ROUTING
+    quality_fallback_threshold: float = 0.65  # ENV: ADAPTIVE_QUALITY_THRESHOLD
+    min_sample_size: int = 5           # ENV: ADAPTIVE_MIN_SAMPLE
+    quality_window_size: int = 20      # ENV: ADAPTIVE_WINDOW_SIZE
+    min_quality_advantage: float = 0.10  # ENV: ADAPTIVE_MIN_ADVANTAGE
 
 
 @dataclass
@@ -163,15 +180,18 @@ class ProxyConfig:
     policy: PolicyConfig
     analysis: AnalysisConfig
     model_costs: ModelCosts
+    max_retries: int
+    retry_base_delay: float
     passthrough_disabled: bool     # ENV: PASSTHROUGH_DISABLED (default: False, auto-detect)
+    passthrough_require_prefix: bool  # ENV: PASSTHROUGH_REQUIRE_PREFIX (default: True — bare model names skip passthrough)
     passthrough_timeout: float     # ENV: PASSTHROUGH_TIMEOUT (default: 120)
     passthrough_thinking_timeout: float  # ENV: PASSTHROUGH_THINKING_TIMEOUT (default: 300)
     thinking_max_input_chars: int  # ENV: THINKING_MAX_INPUT_CHARS (0 = no cap)
-    max_retries: int
-    retry_base_delay: float
-    cache_enabled: bool
-    cache_ttl: int
-    stream_extra_body: Optional[dict]
+    adaptive: AdaptiveRoutingConfig = field(default_factory=AdaptiveRoutingConfig)
+    litellm_thinking_params: Optional[dict] = None  # Provider-specific thinking params for LiteLLM
+    cache_enabled: bool = True
+    cache_ttl: int = 60
+    stream_extra_body: Optional[dict] = None
     # Safety nets
     max_turns: int = 300           # ENV: MAX_TURNS_PER_SESSION (0 = unlimited)
     session_cost_warning: float = 3.0   # ENV: SESSION_COST_WARNING_USD
@@ -225,6 +245,22 @@ def _parse_thinking_params() -> Optional[dict]:
     during ANALYZING phase (e.g. {"thinking":{"type":"enabled"},"clear_thinking":false}).
     """
     raw = os.environ.get("ANALYSIS_THINKING_PARAMS", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) and parsed else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _parse_litellm_thinking_params() -> Optional[dict]:
+    """Parse LITELLM_THINKING_PARAMS JSON env var.
+
+    Provider-specific thinking configuration for LiteLLM providers.
+    Example: {"deepseek": {"max_tokens": 8000}, "minimax": {"thinking": {"type": "enabled"}}}
+    """
+    raw = os.environ.get("LITELLM_THINKING_PARAMS", "").strip()
     if not raw:
         return None
     try:
@@ -321,6 +357,7 @@ def load_config() -> ProxyConfig:
             reasoning_max_tokens=int(_env("REASONING_MAX_TOKENS", "16000")),
             small_route=small_route,
             building_route=building_route,
+            low_confidence_threshold=float(_env("LOW_CONFIDENCE_THRESHOLD", "0.65")),
         ),
         classifier=ClassifierConfig(
             model=classifier_model,
@@ -354,6 +391,7 @@ def load_config() -> ProxyConfig:
             tool_upgrade_threshold=int(_env("TOOL_UPGRADE_THRESHOLD", "5")),
             strip_reasoning=_env_stripped("STRIP_REASONING", "0") == "1",
             guard_system=_load_guard_system(),
+            grounding_validation_enabled=_env_stripped("GROUNDING_VALIDATION_ENABLED", "1") == "1",
         ),
         analysis=AnalysisConfig(
             model=analysis_model,
@@ -365,19 +403,33 @@ def load_config() -> ProxyConfig:
             context_window=int(_env("ANALYSIS_CONTEXT_WINDOW", "0")),
             thinking_params=_parse_thinking_params(),
             synthesize_reads_fallback=int(_env("ANALYSIS_SYNTHESIZE_READS_FALLBACK", "15")),
+            llm_score_gate=_env_stripped("ANALYSIS_LLM_SCORE_GATE", "0") == "1",
+            score_certainty_floor=float(_env("ANALYSIS_SCORE_CERTAINTY_FLOOR", "0.50")),
+            grounding_threshold=float(_env("GROUNDING_THRESHOLD", "0.80")),
+            grounding_refinement_enabled=_env_stripped("GROUNDING_REFINEMENT", "true") == "true",
+            stream_buffer_quality=_env_stripped("STREAM_BUFFER_QUALITY", "true") == "true",
         ),
         model_costs=_parse_model_costs(),
+        adaptive=AdaptiveRoutingConfig(
+            enabled=_env_stripped("ADAPTIVE_ROUTING", "true") == "true",
+            quality_fallback_threshold=float(_env("ADAPTIVE_QUALITY_THRESHOLD", "0.65")),
+            min_sample_size=int(_env("ADAPTIVE_MIN_SAMPLE", "5")),
+            quality_window_size=int(_env("ADAPTIVE_WINDOW_SIZE", "20")),
+            min_quality_advantage=float(_env("ADAPTIVE_MIN_ADVANTAGE", "0.10")),
+        ),
         passthrough_disabled=_env("PASSTHROUGH_DISABLED", "0") == "1",
+        passthrough_require_prefix=_env("PASSTHROUGH_REQUIRE_PREFIX", "1") == "1",
         passthrough_timeout=float(_env("PASSTHROUGH_TIMEOUT", "120")),
         passthrough_thinking_timeout=float(_env("PASSTHROUGH_THINKING_TIMEOUT", "300")),
         thinking_max_input_chars=int(_env("THINKING_MAX_INPUT_CHARS", "0")),
-        max_turns=int(_env("MAX_TURNS_PER_SESSION", "300")),
-        session_cost_warning=float(_env("SESSION_COST_WARNING_USD", "3.0")),
-        session_cost_limit=float(_env("SESSION_COST_LIMIT_USD", "5.0")),
+        litellm_thinking_params=_parse_litellm_thinking_params(),
         max_retries=int(_env("MAX_RETRIES", "5")),
         retry_base_delay=float(_env("RETRY_BASE_DELAY", "1.0")),
         cache_enabled=_env_stripped("CACHE_ENABLED", "0") == "1",
         cache_ttl=int(_env("CACHE_TTL", "60")),
         stream_extra_body=_parse_stream_extra_body(),
+        max_turns=int(_env("MAX_TURNS_PER_SESSION", "300")),
+        session_cost_warning=float(_env("SESSION_COST_WARNING_USD", "3.0")),
+        session_cost_limit=float(_env("SESSION_COST_LIMIT_USD", "5.0")),
         fallback_providers=_load_fallback_providers(),
     )

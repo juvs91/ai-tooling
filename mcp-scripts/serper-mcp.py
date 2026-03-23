@@ -13,7 +13,26 @@ from pathlib import Path
 
 # Configuración
 SCRIPT_DIR = Path(__file__).parent
-SERPER_API_KEY = "[REDACTED]"
+
+# Load SERPER_API_KEY from .env (root of project), fall back to environment
+def _load_api_key() -> str:
+    env_file = SCRIPT_DIR.parent / ".env"
+    if env_file.exists():
+        try:
+            from dotenv import dotenv_values
+            values = dotenv_values(env_file)
+            if "SERPER_API_KEY" in values:
+                return values["SERPER_API_KEY"]
+        except ImportError:
+            # dotenv not installed — fall through to os.environ
+            pass
+    key = os.environ.get("SERPER_API_KEY", "")
+    if not key:
+        print("ERROR: SERPER_API_KEY not set. Add it to .env or export it in your shell.")
+        sys.exit(1)
+    return key
+
+SERPER_API_KEY = _load_api_key()
 
 def print_usage():
     """Muestra el uso del script."""
@@ -41,7 +60,7 @@ def start_server():
         sys.exit(1)
 
     print("[serper] Iniciando servidor Serper...")
-    print(f"[serper] API Key: {SERPER_API_KEY[:20]}...{SERPER_API_KEY[-4:]}")
+    print(f"[serper] API Key: {'*' * 20}...{SERPER_API_KEY[-4:]}")
     print("[serper] Presiona Ctrl+C para detener")
 
     try:

@@ -33,7 +33,7 @@ from litellm.exceptions import (
     ContentPolicyViolationError,
 )
 from utils.utils import cached_token_count, store_token_count, scale_tokens
-from proxy.proxy import build_request_pipeline, run_messages, _run_response_pipeline
+from proxy.proxy import build_request_pipeline, build_response_pipeline, run_messages, _run_response_pipeline
 from llm.converters import convert_litellm_to_anthropic, extract_xml_tools_from_passthrough_response
 from llm.pipeline import TransformContext
 # ── AGNOSTIC RESPONSE TRANSFORMERS ────────────────────────────────────────
@@ -53,6 +53,7 @@ from llm.transformers.quality_refinement import (
     score_anthropic_response,
     analysis_quality_stream,
     analysis_quality_nonstream,
+    stream_response_pipeline,
 )
 from llm.transformers.stream_event import tracked_stream
 from config import load_config
@@ -76,6 +77,9 @@ _models_differ = (
 
 # Build the request pipeline once at startup (transformers 1-5: Anthropic-format)
 _request_pipeline = build_request_pipeline(cfg, _models_differ)
+
+# Build the response pipeline once at startup (for P1 stream buffering)
+_response_pipeline = build_response_pipeline(cfg)
 
 # Startup validation: warn if classifier is half-configured
 if cfg.classifier.model and not cfg.classifier.api_key:
@@ -267,8 +271,8 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 stream_gen = out
                 if getattr(request, "tools", None):
                     stream_gen = passthrough_xml_tool_extraction(stream_gen, request)
-                if ctx.intent != "CHAT" and cfg.analysis.max_refinements > 0:
-                    stream_gen = analysis_quality_stream(stream_gen, request, ctx, cfg)
+                if ctx.intent != "CHAT" and cfg.analysis.stream_buffer_quality:
+                    stream_gen = stream_response_pipeline(stream_gen, request, ctx, cfg, _response_pipeline)
                 stream_gen = tracked_stream(stream_gen, request, ctx, cfg)
                 metrics.record(RequestLog(
                     timestamp=datetime.now(timezone.utc).isoformat(),
@@ -336,8 +340,8 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 classifier_base_url=cfg.classifier.base_url,
                 strip_reasoning=cfg.policy.strip_reasoning,
             )
-            if ctx.intent != "CHAT" and cfg.analysis.max_refinements > 0:
-                stream_gen = analysis_quality_stream(stream_gen, request, ctx, cfg)
+            if ctx.intent != "CHAT" and cfg.analysis.stream_buffer_quality:
+                stream_gen = stream_response_pipeline(stream_gen, request, ctx, cfg, _response_pipeline)
 
             # Wrap stream to capture post-stream metrics (tokens, quality, cost)
             stream_gen = tracked_stream(stream_gen, request, ctx, cfg)

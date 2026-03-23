@@ -123,6 +123,39 @@ _PARTIAL_XML_TAGS_RE = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# DeepSeek-R1 / deepseek-reasoner native DSML format
+# ---------------------------------------------------------------------------
+# DeepSeek-R1 outputs tool calls using its internal DSML token separator format:
+#   <｜DSML｜function_calls>
+#     <｜DSML｜invoke name="ToolName">
+#       <｜DSML｜parameter name="param1" string="true">value</｜DSML｜parameter>
+#       <｜DSML｜parameter name="param2" string="false">{"key": "val"}</｜DSML｜parameter>
+#     </｜DSML｜invoke>
+#   </｜DSML｜function_calls>
+#
+# The ｜ separator is U+FF5C FULLWIDTH VERTICAL LINE.
+# Character class [|\uff5c] matches both ASCII pipe and fullwidth pipe for robustness.
+
+# Matches one complete <｜DSML｜invoke>...</｜DSML｜invoke> block
+_DSML_INVOKE_RE = re.compile(
+    r'<[|\uff5c]DSML[|\uff5c]invoke\s+name="([^"]+)">([\s\S]*?)</[|\uff5c]DSML[|\uff5c]invoke>',
+    re.DOTALL,
+)
+
+# Matches one <｜DSML｜parameter> block inside an invoke
+_DSML_PARAM_RE = re.compile(
+    r'<[|\uff5c]DSML[|\uff5c]parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)</[|\uff5c]DSML[|\uff5c]parameter>',
+    re.DOTALL,
+)
+
+# String constants for fast buffer scanning (no regex overhead)
+# Used for quick "is DSML present?" checks before running the full regex
+_DSML_INVOKE_OPEN = "<\uff5cDSML\uff5cinvoke"     # <｜DSML｜invoke
+_DSML_FCALLS_OPEN = "<\uff5cDSML\uff5cfunction_calls"  # <｜DSML｜function_calls
+_DSML_INVOKE_CLOSE = "</\uff5cDSML\uff5cinvoke>"   # </｜DSML｜invoke>
+_DSML_FCALLS_CLOSE = "</\uff5cDSML\uff5cfunction_calls>"  # </｜DSML｜function_calls>
+
 # Export all patterns
 __all__ = [
     '_INNER_TAG',
@@ -145,4 +178,10 @@ __all__ = [
     '_PARTIAL_TOOL_RE',
     '_PARTIAL_ARGKV_RE',
     '_PARTIAL_XML_TAGS_RE',
+    '_DSML_INVOKE_RE',
+    '_DSML_PARAM_RE',
+    '_DSML_INVOKE_OPEN',
+    '_DSML_FCALLS_OPEN',
+    '_DSML_INVOKE_CLOSE',
+    '_DSML_FCALLS_CLOSE',
 ]

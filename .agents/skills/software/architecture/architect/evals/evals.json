@@ -1,0 +1,56 @@
+{
+  "skill_name": "architect",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review this system design: we have a UserService that imports OrderService, and OrderService imports UserService to validate user IDs. Both also import a shared NotificationService. Is this OK?",
+      "expected_output": "Circular dependency identified between UserService and OrderService — this violates the Acyclic Dependencies Principle. Analysis: (1) CRITICAL — UserService ↔ OrderService is a cycle; (2) Likely cause: UserService.validate_user() is needed by OrderService, but it should be passed as a dependency or extracted to a shared UserValidator/UserRepository; (3) NotificationService as shared dependency is fine if it's a stable leaf module with no imports back into User/Order; (4) Fix options: extract UserRepository interface, invert dependency with DI, or introduce a domain event. Recommend opening ADR before refactoring.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Identifies the circular dependency between UserService and OrderService",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Cites the Acyclic Dependencies Principle by name or equivalent",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Provides at least one concrete resolution (DI, event, extraction)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Recommends an ADR before making structural changes",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "We want to add a global config singleton: a Config class with class-level attributes that any module can import and read. It gets populated at startup. Is this a good pattern?",
+      "expected_output": "Mixed verdict — explain trade-offs: (1) Global singletons create hidden coupling — any module can import Config, making dependencies invisible; (2) Makes testing hard — tests must reset global state between runs; (3) Thread safety: class-level attributes are not thread-safe during the startup population window; (4) Alternative: dependency injection — pass config as constructor argument; this makes dependencies explicit and testable; (5) For read-only config after startup, the risk is lower but still present for testing; (6) Recommend documenting in ADR since this is an architectural decision affecting every module.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Identifies hidden coupling as the primary problem with global singletons",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Mentions testability as a specific concern (resetting global state between tests)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Recommends dependency injection as the alternative",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

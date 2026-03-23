@@ -10,6 +10,7 @@ python-dotenv>=1.0.0
 google-auth>=2.41.1
 google-cloud-aiplatform>=1.120.0
 json-repair>=0.30.0
+toksum>=0.7.0
 
 # MCP servers (local) - for browser automation and web testing
 playwright>=1.49.0

@@ -26,6 +26,7 @@ from typing import Any, Optional, Dict
 
 from litellm import token_counter
 from utils.metrics import metrics
+from utils.utils import count_tokens_accurate  # toksum integration
 
 
 # Circuit breaker state (module-level, persists across requests)
@@ -33,6 +34,10 @@ _consecutive_failures: int = 0
 _circuit_open_until: float = 0.0
 _CIRCUIT_BREAKER_THRESHOLD = 5   # failures before opening circuit
 _CIRCUIT_BREAKER_COOLDOWN = 60.0  # seconds to skip compressor after circuit opens
+
+# Compression token budget to limit DeepSeek calls per session
+_COMPRESSION_TOKEN_BUDGET = 50000  # Max tokens to spend on DeepSeek per session
+_compression_tokens_spent: dict[str, int] = {}  # session_id -> tokens spent
 
 # Lock for all module-level mutable state (_compression_cache, _consecutive_failures, _circuit_open_until)
 _state_lock = asyncio.Lock()
@@ -60,6 +65,14 @@ class _CompressionCache:
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))  # UUID-based session ID
     prefix_hash: str = field(default_factory=lambda: hashlib.sha256(b"").hexdigest()[:16])  # For backward compatibility
 
+    # Grounding state (multi-hop evidence tracking)
+    grounding_graph: dict[str, dict] = field(default_factory=dict)
+    # Entity → {file, related, citations, code_snippet, last_seen}
+    verified_claims: set[str] = field(default_factory=set)
+    # Set of claim hashes that have been verified across conversation
+    citation_history: list[tuple[str, str]] = field(default_factory=list)
+    # List of (turn_id, citation) tuples for multi-hop tracking
+
 _session_cache: Dict[str, _CompressionCache] = {}  # Multi-session support: session_id -> cache entry
 _SESSION_TTL = 604800.0          # 7 days — matches typical dev session rhythm (survive weekend gaps)
 _CACHE_MSG_TOLERANCE = 100   # Reuse if ≤100 new old messages since last compression
@@ -86,6 +99,9 @@ def _save_session_cache_to_disk() -> None:
                 "old_msg_count": c.old_msg_count,
                 "timestamp": c.timestamp,
                 "session_id": c.session_id,
+                "grounding_graph": c.grounding_graph,
+                "verified_claims": list(c.verified_claims),
+                "citation_history": c.citation_history,
             }
             for sid, c in _session_cache.items()
         }
@@ -122,10 +138,18 @@ def _load_session_cache_from_disk() -> None:
                 summary=entry.get("summary", ""),
                 old_msg_count=entry.get("old_msg_count", 0),
                 timestamp=ts,
+                grounding_graph=entry.get("grounding_graph", {}),
+                verified_claims=set(entry.get("verified_claims", [])),
+                citation_history=entry.get("citation_history", []),
             )
             loaded += 1
         if loaded:
             print(f"[session] Restored {loaded} session(s) from {_SESSION_CACHE_FILE}")
+            grounding_loaded = sum(1 for c in _session_cache.values() if c.grounding_graph)
+            if grounding_loaded:
+                print(f"[session] Restored grounding state for {grounding_loaded} session(s)")
+    except Exception as e:
+        print(f"[session] Failed to load cache from disk: {e}")
     except Exception as e:
         print(f"[session] Failed to load cache from disk: {e}")
 
@@ -146,25 +170,9 @@ _COMPRESS_PROMPT = (
 )
 
 
-def _count_message_tokens(messages: list[dict], model: str = "") -> int:
-    """
-    Count tokens using litellm's tokenizer (deterministic, local, no API call).
-    Falls back to chars/3 heuristic if tokenizer fails.
-    """
-    if not messages:
-        return 0
-
-    try:
-        count = token_counter(model=model, messages=messages)
-        return max(1, count)
-    except Exception as e:
-        # Fallback: chars/3 (better than chars/4 for JSON/XML-heavy content)
-        print(f"[compress] token_counter failed ({type(e).__name__}), using chars/3 fallback")
-        total = 0
-        for msg in messages:
-            content = msg.get("content", "") or ""
-            total += len(content) // 3
-        return max(1, total)
+# _count_message_tokens() replaced by count_tokens_accurate() from utils/utils.py
+# This provides toksum integration with LiteLLM fallback and character approximation
+# All usages replaced below
 
 
 def estimate_tools_tokens(tools: list[dict] | None) -> int:
@@ -295,23 +303,29 @@ def _split_conversation(
     summary_trigger_ratio: float,
     recent_window_ratio: float,
     message_threshold: int = 20,  # Use message count threshold for early compression
+    avg_tokens_per_msg: float = 300.0,  # Dynamic: computed from actual session data
 ) -> tuple[list[dict], list[dict]]:
     """
     Split conversation into old (to be summarized) and recent (to keep intact).
 
     All thresholds are calculated dynamically from config ratios - no magic numbers.
-    Uses message count (not just tokens) to ensure compression triggers early.
+    avg_tokens_per_msg is passed from compress_messages() using actual token count /
+    message count, so the recent window adapts to the real session density.
     """
     # Calculate dynamic thresholds from config ratios
     summary_trigger_tokens = int(model_context_window * summary_trigger_ratio)
     recent_window_tokens = int(model_context_window * recent_window_ratio)
 
-    # Use message threshold for triggering (not token-based)
-    # This ensures compression starts at 20 messages, not 400
-    recent_window_msgs = max(10, recent_window_tokens // 300)  # Keep at least 10 recent
+    # Use actual avg tok/msg (not hardcoded 300) — analysis sessions average 700+ tok/msg
+    # (tool results + file reads), which would inflate recent_window_msgs to 300 with the
+    # old assumption and swallow the entire conversation into the "recent" window.
+    recent_window_msgs = max(10, int(recent_window_tokens / avg_tokens_per_msg))
 
-    # Not enough messages to split
-    if len(messages) <= message_threshold + recent_window_msgs:
+    # Not enough messages to split — all messages fall inside the recent window.
+    # NOTE: do NOT add message_threshold here; that's the trigger threshold (checked
+    # upstream in compress_messages). Adding it here blocked compression for all sessions
+    # under (message_threshold + recent_window_msgs) = 510 messages.
+    if len(messages) <= recent_window_msgs:
         return [], messages
 
     # Split into old and recent
@@ -338,7 +352,7 @@ def _trim_by_token_budget(
     max_tokens is passed from caller (calculated from config).
     Tracks aggressive trims in metrics.
     """
-    current_tokens = _count_message_tokens(messages, model=target_model)
+    current_tokens = count_tokens_accurate(messages, model=target_model)
     if current_tokens <= max_tokens:
         return messages
 
@@ -347,12 +361,12 @@ def _trim_by_token_budget(
     # Remove oldest messages until we fit the budget
     trimmed = messages.copy()
     while len(trimmed) > 10:  # Keep at least 10 messages minimum
-        current_tokens = _count_message_tokens(trimmed, model=target_model)
+        current_tokens = count_tokens_accurate(trimmed, model=target_model)
         if current_tokens <= max_tokens:
             break
         trimmed.pop(0)
 
-    new_tokens = _count_message_tokens(trimmed, model=target_model)
+    new_tokens = count_tokens_accurate(trimmed, model=target_model)
     metrics.compression_aggressive_trims += 1
     print(f"[compress] Trimmed to {len(trimmed)} messages: {current_tokens} → {new_tokens} tokens")
     return trimmed
@@ -412,16 +426,6 @@ async def compress_messages_if_needed(
     if model_context_window <= 0 or not compressor_model or not compressor_api_key:
         return messages, False
 
-    # Calculate dynamic limits from config ratios
-    max_messages = int(model_context_window * cfg.max_messages_ratio // 300)
-    max_tokens = int(model_context_window * cfg.max_tokens_ratio)
-    summary_trigger_tokens = int(model_context_window * cfg.summary_trigger_ratio)
-    recent_window_tokens = int(model_context_window * cfg.recent_window_ratio)
-
-    print(f"[compress] Dynamic limits for model (context_window={model_context_window}): "
-          f"max_messages={max_messages}, max_tokens={max_tokens}, "
-          f"summary_trigger={summary_trigger_tokens} tokens, recent_window={recent_window_tokens} tokens")
-
     # Step 1: Normalize messages
     messages = _normalize_messages(messages)
 
@@ -429,8 +433,26 @@ async def compress_messages_if_needed(
     if _detect_tool_inflation(messages, cfg.tool_inflation_threshold):
         print(f"[compress] Tool inflation detected: >{cfg.tool_inflation_threshold} tool messages")
 
-    estimated_tokens = _count_message_tokens(messages, model=target_model) + tools_overhead_tokens
+    estimated_tokens = count_tokens_accurate(messages, model=target_model) + tools_overhead_tokens
     threshold = int(cfg.trigger_ratio * model_context_window)
+
+    # Compute dynamic avg tok/msg from actual session data.
+    # Analysis sessions average 700+ tok/msg vs the old hardcoded 300 assumption.
+    # Used for recent_window_msgs in _split_conversation and max_messages cap below.
+    msg_count = len(messages)
+    msg_only_tokens = max(1, estimated_tokens - tools_overhead_tokens)
+    avg_tokens_per_msg = max(100.0, msg_only_tokens / msg_count) if msg_count > 0 else 300.0
+
+    # Calculate dynamic limits from config ratios (uses avg_tokens_per_msg, not hardcoded 300)
+    max_messages = int(model_context_window * cfg.max_messages_ratio / avg_tokens_per_msg)
+    max_tokens = int(model_context_window * cfg.max_tokens_ratio)
+    summary_trigger_tokens = int(model_context_window * cfg.summary_trigger_ratio)
+    recent_window_tokens = int(model_context_window * cfg.recent_window_ratio)
+
+    print(f"[compress] Dynamic limits for model (context_window={model_context_window}): "
+          f"max_messages={max_messages}, max_tokens={max_tokens}, "
+          f"summary_trigger={summary_trigger_tokens} tokens, recent_window={recent_window_tokens} tokens "
+          f"avg_tok_per_msg={avg_tokens_per_msg:.0f}")
 
     print(f"[compress] Check: tokens={estimated_tokens} (tools_overhead={tools_overhead_tokens}) "
           f"threshold={threshold} (window={model_context_window} × ratio={cfg.trigger_ratio}) "
@@ -451,6 +473,7 @@ async def compress_messages_if_needed(
         cfg.summary_trigger_ratio,
         cfg.recent_window_ratio,
         cfg.message_threshold,
+        avg_tokens_per_msg=avg_tokens_per_msg,
     )
 
     # Not enough old messages to compress
@@ -471,8 +494,9 @@ async def compress_messages_if_needed(
     # ── Derive stable cache key ──
     # Explicit X-Session-ID takes priority; otherwise generate a deterministic UUID from
     # the conversation prefix so each CC window gets its own isolated cache slot.
+    # FIX: Use full messages instead of old_messages for stable session ID
     effective_session_id = session_id if session_id else str(
-        uuid.uuid5(uuid.NAMESPACE_OID, _compute_prefix_hash(old_messages, _CACHE_PREFIX_SIZE))
+        uuid.uuid5(uuid.NAMESPACE_OID, _compute_prefix_hash(messages, _CACHE_PREFIX_SIZE))
     )
 
     # ── Check compression cache before calling LLM ──
@@ -491,9 +515,14 @@ async def compress_messages_if_needed(
         metrics.compression_cache_misses += 1
         print(f"[compress] Cache MISS (no session): compressing fresh (session={effective_session_id})")
 
+    # ── Prune grounding graph if compression happened ──
+    # This runs async in the background to not delay compression
+    if effective_session_id:
+        asyncio.create_task(_prune_grounding_graph(effective_session_id))
+
     if cached_summary is not None:
         compressed = _reassemble_with_summary(system_msg, cached_summary, recent_messages)
-        new_tokens = _count_message_tokens(compressed, model=target_model)
+        new_tokens = count_tokens_accurate(compressed, model=target_model)
         print(f"[compress] Success (cached): {estimated_tokens} → {new_tokens} tokens "
               f"(saved {estimated_tokens - new_tokens})")
         return compressed, True
@@ -519,7 +548,7 @@ async def compress_messages_if_needed(
         # Step 6: Enforce message cap
         merged = _enforce_message_cap(merged, max_messages)
 
-        new_tokens = _count_message_tokens(merged, model=target_model)
+        new_tokens = count_tokens_accurate(merged, model=target_model)
         print(f"[compress] Success ({model_used}): {estimated_tokens} → {new_tokens} tokens "
               f"(saved {estimated_tokens - new_tokens})")
         return merged, True
@@ -537,7 +566,7 @@ async def compress_messages_if_needed(
     trimmed = _trim_by_token_budget(trimmed, max_tokens, target_model)
     trimmed = _enforce_message_cap(trimmed, max_messages)
 
-    new_tokens = _count_message_tokens(trimmed, model=target_model)
+    new_tokens = count_tokens_accurate(trimmed, model=target_model)
     print(f"[compress] Trimmed: {estimated_tokens} → {new_tokens} tokens")
     return trimmed, True
 
@@ -559,6 +588,12 @@ async def _llm_compress_single(
     for attempt in range(retries):
         print(f"[compress] {label} calling {model} (attempt {attempt + 1}/{retries})")
         try:
+            # Check token budget for this session
+            session_budget = _compression_tokens_spent.get(model, 0)
+            if session_budget > _COMPRESSION_TOKEN_BUDGET:
+                print(f"[compress] Token budget exceeded for model {model}, using simple trimming")
+                return None
+
             kwargs: dict[str, Any] = {
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
@@ -622,6 +657,12 @@ async def _llm_compress(
     if summary:
         async with _state_lock:
             _consecutive_failures = 0
+            # Track tokens spent after successful LLM compression
+            # Simple estimation: prompt length / 3 (approximate tokens)
+            compression_tokens = len(prompt) // 3
+            _compression_tokens_spent[model] = (
+                _compression_tokens_spent.get(model, 0) + compression_tokens
+            )
         return summary, model
 
     # Try fallback compressor if configured (3 retries)
@@ -633,6 +674,11 @@ async def _llm_compress(
         if summary:
             async with _state_lock:
                 _consecutive_failures = 0
+                # Track tokens spent after successful LLM compression (fallback)
+                compression_tokens = len(prompt) // 3
+                _compression_tokens_spent[fallback_model] = (
+                    _compression_tokens_spent.get(fallback_model, 0) + compression_tokens
+                )
             return summary, fallback_model
 
     # Both failed — update circuit breaker
@@ -766,8 +812,7 @@ def _reassemble_trimmed(
     if not _validate_tool_references(result):
         print("[compress] WARNING: orphan tool references detected after trimming, fixing...")
         result = _fix_orphan_tool_messages(result)
-
-        return result
+    return result
 
 # ── Session management functions (Phase 3 Enhancement) ──
 
@@ -847,4 +892,184 @@ async def cleanup_expired_sessions() -> None:
                 metrics.record("sessions_cleaned", len(expired_sessions))
                 _save_session_cache_to_disk()
         else:
-            print(f"[session] No expired sessions to clean up")
+            pass
+
+
+# =============================================================================
+# Multi-Hop Grounding Tracking (CAREFUL IMPLEMENTATION)
+# =============================================================================
+
+async def _track_grounding_hop(
+    session_id: str,
+    entity_a: str,
+    entity_b: str,
+    evidence: list[str],
+    code_snippet: str = "",
+) -> None:
+    """
+    Track a multi-hop grounding relationship across conversation turns.
+
+    Example: entity_a = "AuthService" → entity_b = "validateToken()"
+
+    CAREFUL IMPLEMENTATION NOTES:
+    - Only track if evidence is verified (citations exist in tool results)
+    - Limit graph size to prevent memory bloat (max 100 entities)
+    - Use claim hashes (not full text) to save memory
+    - Prune old entries when cache is compressed
+    - Never let grounding errors break the proxy (catch all exceptions)
+    - Creates session if it doesn't exist (for testing and edge cases)
+
+    Args:
+        session_id: UUID-based session identifier
+        entity_a: Source entity name (e.g., class name, function name)
+        entity_b: Target entity name (e.g., called function, related class)
+        evidence: List of citation strings (e.g., ["(auth.py:42)", "(validator.py:123)"])
+        code_snippet: Actual code snippet from file (first 500 chars)
+    """
+    try:
+        # Guard: Don't track if no verified evidence
+        if not evidence:
+            return
+
+        async with _state_lock:
+            # Create session if it doesn't exist
+            if session_id not in _session_cache:
+                _session_cache[session_id] = _CompressionCache(
+                    session_id=session_id,
+                    summary="",
+                    old_msg_count=0,
+                    timestamp=time.time()
+                )
+
+            session = _session_cache.get(session_id)
+            if session is None:
+                return
+
+            # Guard: Limit graph size
+            max_entities = int(os.environ.get("GROUNDING_GRAPH_MAX_ENTITIES", "100"))
+            if len(session.grounding_graph) >= max_entities:
+                # Prune oldest entries (simple LRU by last_seen)
+                oldest_entity = min(
+                    session.grounding_graph.keys(),
+                    key=lambda k: session.grounding_graph[k].get("last_seen", 0)
+                )
+                del session.grounding_graph[oldest_entity]
+                print(f"[grounding] Pruned entity: {oldest_entity} (graph size {max_entities} reached)")
+
+            # Track entity A
+            if entity_a not in session.grounding_graph:
+                session.grounding_graph[entity_a] = {
+                    "file": "",
+                    "related": [],
+                    "citations": [],
+                    "code_snippet": "",
+                    "last_seen": time.time()
+                }
+
+            # Track relationship A → B
+            if entity_b not in session.grounding_graph[entity_a]["related"]:
+                session.grounding_graph[entity_a]["related"].append(entity_b)
+
+            # Track evidence and code snippet
+            session.grounding_graph[entity_a]["citations"].extend(evidence)
+            if code_snippet and not session.grounding_graph[entity_a]["code_snippet"]:
+                session.grounding_graph[entity_a]["code_snippet"] = code_snippet
+
+            # Update last seen timestamp
+            session.grounding_graph[entity_a]["last_seen"] = time.time()
+
+            # Add to verified claims (hash of claim for memory efficiency)
+            for citation in evidence:
+                claim_hash = hashlib.sha256(citation.encode()).hexdigest()[:16]
+                session.verified_claims.add(claim_hash)
+
+            print(f"[grounding] Tracked: {entity_a} → {entity_b} (evidence: {evidence[:2]})")
+    except Exception as e:
+        print(f"[grounding] Error tracking grounding hop: {e}")
+        # Never let grounding errors break the proxy
+
+
+async def _prune_grounding_graph(session_id: str) -> None:
+    """
+    Prune old entries from the grounding graph when compression happens.
+
+    Removes entities with no recent citations (older than 10 minutes).
+    This prevents memory bloat while preserving active evidence.
+
+    Args:
+        session_id: UUID-based session identifier
+    """
+    try:
+        prune_age = int(os.environ.get("GROUNDING_GRAPH_PRUNE_AGE", "600"))  # 10 minutes
+        now = time.time()
+
+        async with _state_lock:
+            session = _session_cache.get(session_id)
+            if session is None:
+                return
+
+            # Initialize grounding_graph if not exists
+            if not hasattr(session, "grounding_graph") or session.grounding_graph is None:
+                session.grounding_graph = {}
+
+            # Prune old entities
+            entities_to_prune = []
+            for entity, data in list(session.grounding_graph.items()):
+                if entity == "grounding_graph":
+                    continue
+                if now - data.get("last_seen", 0) > prune_age:
+                    entities_to_prune.append(entity)
+
+            for entity in entities_to_prune:
+                del session.grounding_graph[entity]
+                print(f"[grounding] Pruned old entity: {entity} (age > {prune_age}s)")
+
+            if entities_to_prune:
+                print(f"[grounding] Pruned {len(entities_to_prune)} old entities from grounding graph")
+    except Exception as e:
+        print(f"[grounding] Error pruning grounding graph: {e}")
+        # Never let grounding errors break the proxy
+
+
+async def get_grounding_state(session_id: str) -> dict:
+    """
+    Retrieve the grounding state for a session.
+
+    Returns a copy of the grounding graph to avoid mutations.
+
+    Args:
+        session_id: UUID-based session identifier
+
+    Returns:
+        Dictionary with grounding state:
+        {
+            "grounding_graph": {entity: {file, related, citations, code_snippet}},
+            "verified_claims": set of claim hashes,
+            "citation_history": list of (turn_id, citation) tuples
+        }
+    """
+    try:
+        async with _state_lock:
+            session = _session_cache.get(session_id)
+            if session is None:
+                return {"grounding_graph": {}, "verified_claims": set(), "citation_history": []}
+
+            return {
+                "grounding_graph": session.grounding_graph.copy(),
+                "verified_claims": session.verified_claims.copy(),
+                "citation_history": list(session.citation_history),
+            }
+    except Exception as e:
+        print(f"[grounding] Error getting grounding state: {e}")
+        return {"grounding_graph": {}, "verified_claims": set(), "citation_history": []}
+
+
+# =============================================================================
+# Logging Helper
+# =============================================================================
+
+def log_compaction(event_type: str, session_id: str, model: str, **kwargs) -> None:
+    """Log compression events for debugging."""
+    metadata = ", ".join(f"{k}={v}" for k, v in kwargs.items())
+    print(f"[compress] {event_type}: session={session_id[:8]}..., model={model}, {metadata}")
+    print(f"[session] No expired sessions to clean up")

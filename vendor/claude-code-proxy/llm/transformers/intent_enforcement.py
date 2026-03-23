@@ -68,48 +68,60 @@ class IntentEnforcementTransformer(Transformer):
         return ""
 
     def _get_read_prompt(self) -> str:
-        """READ/ANALYZING intent: Must use tools BEFORE concluding."""
+        """READ/ANALYZING intent: Grounding requirements with code snippet verification."""
         return (
             "[INTENT-ENFORCEMENT] READ/ANALYZING mode active:\n"
             "RULE 1: STOP before analyzing. Execute tool calls FIRST. Read the actual files.\n"
             "RULE 2: Only reference content you have explicitly read. "
             "Never assume file names, paths, or extensions.\n"
-            "RULE 3: Every claim requires proof: cite (file.py:line) from a file you ACTUALLY read.\n"
-            "RULE 4: If a file does not exist when you try to read it, say \"file not found\" "
-            "— do NOT invent content.\n"
-            "RULE 5: DO NOT generate analysis conclusions in the same response as your tool calls. "
-            "Wait for tool results first."
+            "RULE 3: EVERY claim must have a citation: cite (file.py:line) from a file you ACTUALLY read.\n"
+            "RULE 4: When making a claim about code behavior, QUOTE the exact code snippet that supports it.\n"
+            "RULE 5: Format code citations as: (file.py:line) with the actual code inline.\n"
+            "RULE 6: DO NOT generate analysis conclusions in the same response as your tool calls. "
+            "Wait for tool results first.\n"
+            "GROUNDING RULE: Citations must point to ACTUAL file:line pairs from files you've read. "
+            "No citation = no claim. Unverified content = hallucination.\n"
+            "CODE VERIFICATION: Include relevant code snippets in your analysis. "
+            "For example: 'The function validateToken() checks if the token is expired (auth.py:42):\n"
+            '```python\nif token.expiry < now:\n    raise InvalidTokenError\n```'
         )
 
     def _get_plan_prompt(self) -> str:
-        """PLAN intent: Must have structured output."""
+        """PLAN intent: Grounding requirements for implementation planning."""
         return (
             "[INTENT-ENFORCEMENT] PLAN mode active:\n"
             "Produce a structured implementation plan. Required sections:\n"
-            "## Context (why this change is needed)\n"
-            "## Approach (your recommended solution)\n"
-            "## Steps (numbered, specific, actionable)\n"
-            "## Files to Modify (list with line ranges)\n"
-            "## Verification (how to test the change)\n"
-            "Do NOT write implementation code — this is a plan, not execution."
+            "## Context (why this change is needed) - Cite evidence from codebase\n"
+            "## Approach (your recommended solution) - Reference existing patterns\n"
+            "## Steps (numbered, specific, actionable) - Include file:line references\n"
+            "## Files to Modify (list with line ranges) - Must have read these files\n"
+            "## Verification (how to test the change) - Cite test files and test methods\n"
+            "Do NOT write implementation code — this is a plan, not execution.\n"
+            "GROUNDING RULE: Every section must cite (file.py:line) from files you've read. "
+            "Unverified plans will be rejected."
         )
 
     def _get_synthesizing_prompt(self) -> str:
-        """SYNTHESIZING intent: Should NOT make new tool calls."""
+        """SYNTHESIZING intent: Grounding requirements for synthesis with code verification."""
         return (
             "[INTENT-ENFORCEMENT] SYNTHESIZING mode active:\n"
-            "You have gathered all necessary information from the codebase. "
-            "Now synthesize ONLY from what was collected.\n"
-            "RULE 1: DO NOT attempt to call tools — none are available in this phase.\n"
-            "RULE 2: Reference specific findings from the analysis phase. "
-            "Cite (file.py:line) you read earlier.\n"
-            "RULE 3: Structure your output: ## Summary → ## Key Findings → ## Recommendations\n"
-            "RULE 4: For each finding, state: what you observed, where you found it, what it means.\n"
-            "RULE 5: DO NOT speculate about code you did not read. Mark uncertainties explicitly."
+            "You have gathered significant information from the codebase. "
+            "Now begin writing your comprehensive synthesis.\n"
+            "RULE 1: PRIORITY is producing a written analysis — start writing now.\n"
+            "RULE 2: EVERY claim must cite (file.py:line) from files you've read.\n"
+            "RULE 3: Include code snippets to support complex claims about behavior.\n"
+            "RULE 4: Structure your output: ## Summary → ## Key Findings → ## Recommendations\n"
+            "RULE 5: For each finding, state: what you observed, where you found it, "
+            "what it means, with code evidence.\n"
+            "RULE 6: DO NOT speculate about code you did not read. Mark uncertainties explicitly.\n"
+            "RULE 7: If you need to verify a specific claim before citing it, "
+            "you may use tools — but minimize tool calls.\n"
+            "GROUNDING RULE: Synthesis must be grounded in verified evidence. "
+            "Include code snippets for any behavioral claims."
         )
 
     def _get_building_prompt(self) -> str:
-        """BUILDING intent: Must use edit tools."""
+        """BUILDING intent: Grounding requirements for code changes."""
         return (
             "[INTENT-ENFORCEMENT] BUILDING mode active:\n"
             "RULE 1: Make the file changes NOW. Do not describe what you will do — just do it.\n"
@@ -118,15 +130,23 @@ class IntentEnforcementTransformer(Transformer):
             "RULE 3: Each change must be atomic: read → edit → verify.\n"
             "RULE 4: After each file change, confirm the edit applied correctly "
             "(Read the changed section).\n"
-            "RULE 5: If a change requires multiple files, use TodoWrite to track all pending changes."
+            "RULE 5: If you're adding a new function, cite where it's called from (caller.py:line).\n"
+            "RULE 6: If you're modifying an existing function, explain the change with "
+            "before/after code snippets.\n"
+            "RULE 7: If a change requires multiple files, use TodoWrite to track all pending changes.\n"
+            "GROUNDING RULE: Verify changes by reading the modified code. "
+            "Cite the lines you changed."
         )
 
     def _get_verify_prompt(self) -> str:
-        """VERIFY intent: Run tests and validate."""
+        """VERIFY intent: Grounding requirements for testing."""
         return (
             "[INTENT-ENFORCEMENT] VERIFY mode active:\n"
             "RULE 1: Run tests or validation commands using Bash tool.\n"
             "RULE 2: Report actual output — do not describe what you expect to happen.\n"
             "RULE 3: If tests fail, identify the specific failure and root cause.\n"
-            "RULE 4: Verify in this order: unit tests → integration tests → smoke test."
+            "RULE 4: Cite the failing test file and test method (test_file.py:line).\n"
+            "RULE 5: Verify in this order: unit tests → integration tests → smoke test.\n"
+            "GROUNDING RULE: All verification claims must cite actual test results. "
+            "Include test output as evidence."
         )

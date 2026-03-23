@@ -121,6 +121,25 @@ wheels = [
 ]
 
 [[package]]
+name = "anthropic"
+version = "0.85.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "docstring-parser" },
+    { name = "httpx" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c5/08/c620a0eb8625539a8ea9f5a6e06f13d131be0bc8b5b714c235d4b25dd1b5/anthropic-0.85.0.tar.gz", hash = "sha256:d45b2f38a1efb1a5d15515a426b272179a0d18783efa2bb4c3925fa773eb50b9", size = 542034, upload-time = "2026-03-16T17:00:44.324Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e1/5a/9d85b85686d5cdd79f5488c8667e668d7920d06a0a1a1beb454a5b77b2db/anthropic-0.85.0-py3-none-any.whl", hash = "sha256:b4f54d632877ed7b7b29c6d9ba7299d5e21c4c92ae8de38947e9d862bff74adf", size = 458237, upload-time = "2026-03-16T17:00:45.877Z" },
+]
+
+[[package]]
 name = "anthropic-proxy"
 version = "0.1.0"
 source = { virtual = "." }
@@ -133,6 +152,7 @@ dependencies = [
     { name = "litellm" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "toksum" },
     { name = "uvicorn" },
 ]
 
@@ -152,6 +172,7 @@ requires-dist = [
     { name = "litellm", specifier = ">=1.77.7" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "toksum", specifier = ">=0.7.0" },
     { name = "uvicorn", specifier = ">=0.34.0" },
 ]
 
@@ -2208,6 +2229,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/5f/aa/8ae85f69a9f6012c6f8011c6f4aa1c96154c816e9eea2e1b758601157833/tokenizers-0.21.1-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:e5a69c1a4496b81a5ee5d2c1f3f7fbdf95e90a0196101b0ee89ed9956b8a168f", size = 9384380, upload-time = "2025-03-13T10:51:16.526Z" },
     { url = "https://files.pythonhosted.org/packages/e8/5b/a5d98c89f747455e8b7a9504910c865d5e51da55e825a7ae641fb5ff0a58/tokenizers-0.21.1-cp39-abi3-win32.whl", hash = "sha256:1039a3a5734944e09de1d48761ade94e00d0fa760c0e0551151d4dd851ba63e3", size = 2239506, upload-time = "2025-03-13T10:51:20.643Z" },
     { url = "https://files.pythonhosted.org/packages/e6/b6/072a8e053ae600dcc2ac0da81a23548e3b523301a442a6ca900e92ac35be/tokenizers-0.21.1-cp39-abi3-win_amd64.whl", hash = "sha256:0f0dcbcc9f6e13e675a66d7a5f2f225a736745ce484c1a4e07476a89ccdad382", size = 2435481, upload-time = "2025-03-13T10:51:19.243Z" },
+]
+
+[[package]]
+name = "toksum"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "tiktoken" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b8/e3/85cfa8cf7bc9771ce7e40d048e7cd579877bd664518d64171ff345e4e363/toksum-1.1.0.tar.gz", hash = "sha256:3970e95225a35396eba56c410f337be4f174ec74d19f7370994e839a866b78cd", size = 68129, upload-time = "2025-12-27T02:05:37.964Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e3/4c/7ad1bf07d171f18f67b5e01825bd215bed9ce804c2017bed32b92ed450f8/toksum-1.1.0-py3-none-any.whl", hash = "sha256:e3bd50b6a3543a6ef687c259cb22dc673026fc8b289e1567c55a3bd3f92fd860", size = 38814, upload-time = "2025-12-27T02:05:36.712Z" },
 ]
 
 [[package]]

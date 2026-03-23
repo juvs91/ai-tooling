@@ -32,6 +32,7 @@ from llm.transformers import (
     GuardrailTransformer,
     TokenCapTransformer,
     ToolAllowlistTransformer,
+    AdaptiveContextTransformer,
     ModelRouterTransformer,
     CompressionTransformer,
     ProviderQuirksTransformer,
@@ -44,6 +45,7 @@ from llm.transformers import (
     GroundingValidatorTransformer,
     ModelFeedbackTransformer,
     StreamEventTransformer,
+    QualityRecorderTransformer,
     # ──────────────────────────────────────────────────────────────────────────────────────
 )
 
@@ -64,7 +66,8 @@ def build_request_pipeline(cfg: ProxyConfig, models_differ: bool) -> Pipeline:
         DeferredToolsTransformer(),               # Inject <available-deferred-tools> into request.tools
         TokenCapTransformer(cfg.policy, cfg.credentials.openai_base_url),
         ToolAllowlistTransformer(cfg.policy),
-        ModelRouterTransformer(cfg.routing, cfg.credentials, cfg.analysis),
+        AdaptiveContextTransformer(cfg),
+        ModelRouterTransformer(cfg.routing, cfg.credentials, cfg.analysis, cfg.adaptive),
     ])
 
 
@@ -106,6 +109,7 @@ def build_response_pipeline(cfg: ProxyConfig) -> Pipeline:
         UniversalToolExtractionTransformer(),
         GroundingValidatorTransformer(enabled=cfg.policy.grounding_validation_enabled if hasattr(cfg, "policy") and hasattr(cfg.policy, "grounding_validation_enabled") else True),
         ModelFeedbackTransformer(cfg),
+        QualityRecorderTransformer(),
     ])
 
 

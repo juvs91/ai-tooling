@@ -1,0 +1,56 @@
+{
+  "skill_name": "decision-logger",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Extract all embedded decisions from this code:\n```python\nMAX_RETRIES = 3\nCONNECT_TIMEOUT = 500  # ms\nRF_FIELD_DELAY = 0.05  # seconds — ASUS exclusive lock window\nAPDU_GET_UID = bytes([0xFF, 0xCA, 0x00, 0x00, 0x00])\nHASH_ITERATIONS = 100_000\n```",
+      "expected_output": "A structured decision log with 5 entries: (1) MAX_RETRIES=3 — retry budget decision, unknown rationale, candidate for ADR; (2) CONNECT_TIMEOUT=500ms — timing decision, likely chosen for USB HID response latency, candidate for decision-logger doc; (3) RF_FIELD_DELAY=0.05s — DOCUMENTED inline ('ASUS exclusive lock window'), this is a hardware workaround for a specific vendor driver behavior, HIGH PRIORITY for ADR; (4) APDU_GET_UID — protocol constant, should reference ISO 7816/pseudo-APDU spec; (5) HASH_ITERATIONS=100_000 — security decision, aligns with NIST minimum for PBKDF2-SHA256, candidate for security ADR.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "All 5 constants are identified and catalogued",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "RF_FIELD_DELAY is flagged as a hardware workaround (highest priority finding)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "HASH_ITERATIONS is identified as a security decision with a reference to standards",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Each entry includes: what it is, why it might have been chosen, and ADR recommendation",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Why does this code use T=0 instead of T=1?\n```python\nprotocol = SCARD_PROTOCOL_T0  # not T1\nconn.connect(CardConnection.T0_protocol)\n```",
+      "expected_output": "Decision extraction: T=0 vs T=1 is an explicit protocol selection. T=0 is byte-oriented (single APDU byte at a time), T=1 is block-oriented (full APDU in one transmission). Possible reasons: (1) Legacy card that only supports T=0; (2) Reader/driver compatibility issue with T=1; (3) Known bug in T=1 chaining with specific card type. This is an architectural decision about protocol compatibility — should be documented with the specific card model and reason. Recommend creating a decision log entry and potentially an ADR if the reason is a known hardware workaround.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Explains the difference between T=0 and T=1 protocols",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Provides multiple plausible reasons for the T=0 choice",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Recommends documenting the reason and suggests an ADR",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

@@ -167,7 +167,12 @@ _CLASSIFY_PROMPT = (
     "- 'Can you help me?' → CHAT\n"
     "- 'Como funciona esto?' → CHAT\n\n"
     "Message: {message}\n\n"
-    "Category:"
+    "Respond with ONLY valid JSON (no markdown, no explanation):\n"
+    "{{\"intent\": \"BUILD\", \"confidence\": 0.95}}\n\n"
+    "If the request mixes multiple intents (e.g., \"analyze then implement\"), add:\n"
+    "{{\"intent\": \"READ\", \"confidence\": 0.65, \"secondary\": \"BUILD\"}}\n\n"
+    "confidence: 0.90-1.0 = very clear; 0.70-0.89 = mostly clear; 0.50-0.69 = ambiguous.\n\n"
+    "JSON:"
 )
 
 _VALID_INTENTS = {"PLAN", "BUILD", "CHAT", "READ", "SYNTHESIZING", "VERIFY"}
@@ -215,15 +220,15 @@ async def classify_intent(
     api_base: Optional[str] = None,
     timeout_s: float = 3.0,
     tool_context: str = "",
-) -> str:
+) -> tuple[str, float, str | None]:
     """
     Classify user intent using a cheap LLM call.
-    Returns: "PLANNING", "BUILDING", or "CHAT".
+    Returns: (intent, confidence, secondary_intent).
     Falls back to regex on any error or timeout.
     Tool context (recent tools used) is included in prompt for holistic routing.
     """
     if not text or not text.strip():
-        return "CHAT"
+        return "CHAT", 1.0, None
 
     # Truncate to keep classifier fast but with enough context
     truncated = text[:1000]
@@ -234,7 +239,7 @@ async def classify_intent(
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 5,
+            "max_tokens": 30,  # was 5 — JSON needs room
             "temperature": 0.0,
             "stream": False,
         }
@@ -248,22 +253,41 @@ async def classify_intent(
             timeout=timeout_s,
         )
 
-        raw = (resp.choices[0].message.content or "").strip().upper()
-        # Extract first valid intent word
-        for word in raw.split():
+        raw = (resp.choices[0].message.content or "").strip()
+
+        # Try JSON parsing first (new format with confidence)
+        try:
+            json_str = raw.strip("`").strip()
+            if json_str.lower().startswith("json"):
+                json_str = json_str[4:].strip()
+            parsed = json.loads(json_str)
+            intent = str(parsed.get("intent", "")).upper()
+            confidence = float(parsed.get("confidence", 0.8))
+            confidence = max(0.0, min(1.0, confidence))
+            secondary = str(parsed.get("secondary", "")).upper() or None
+            if secondary and secondary not in _VALID_INTENTS:
+                secondary = None
+            if intent in _VALID_INTENTS:
+                metrics.classifier_llm_success += 1
+                return intent, confidence, secondary
+        except (json.JSONDecodeError, ValueError, AttributeError, KeyError):
+            pass  # fallback to word extraction
+
+        # Word extraction fallback (old behavior, confidence=0.8 for plain text)
+        for word in raw.upper().split():
             cleaned = word.strip(".,;:!?\"'")
             if cleaned in _VALID_INTENTS:
                 metrics.classifier_llm_success += 1
-                return cleaned
+                return cleaned, 0.8, None
 
         # LLM responded but not a valid category
         metrics.classifier_regex_fallback += 1
-        return _regex_fallback_intent(text)
+        return _regex_fallback_intent(text), 0.5, None
 
     except (asyncio.TimeoutError, Exception) as e:
         print(f"[classify_intent] fallback to regex: {type(e).__name__}: {e}")
         metrics.classifier_regex_fallback += 1
-        return _regex_fallback_intent(text)
+        return _regex_fallback_intent(text), 0.5, None
 
 def content_to_rough_text(content: Any) -> str:
     """

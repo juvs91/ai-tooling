@@ -111,12 +111,12 @@ class TestApproxTokensFromBytes:
         assert approx_tokens_from_bytes(b"") == 1
 
     def test_small_content(self):
-        # 12 bytes / 6 = 2 tokens
-        assert approx_tokens_from_bytes(b"hello world!") == 2
+        # 12 bytes / 3 = 4 tokens
+        assert approx_tokens_from_bytes(b"hello world!") == 4
 
     def test_larger_content(self):
         content = b"x" * 600
-        assert approx_tokens_from_bytes(content) == 100
+        assert approx_tokens_from_bytes(content) == 200
 
 
 class TestEnsureSystemNote:

@@ -553,6 +553,263 @@ async def analysis_quality_stream(
             yield chunk
 
 
+# ── Stream Response Pipeline (P1 — buffer + pipeline + quality gate) ──────────
+
+def _build_unified_feedback(
+    quality_score: float,
+    quality_issues: list[str],
+    ctx: "TransformContext",
+    cfg: "ProxyConfig",
+    request_messages: list | None,
+    response_text: str,
+) -> str:
+    """Build combined quality + grounding feedback for a re-request."""
+    parts = []
+
+    # Quality feedback
+    if quality_score < cfg.analysis.quality_threshold and quality_issues:
+        parts.append(_build_refinement_feedback(
+            quality_score, quality_issues, cfg.analysis.quality_threshold, request_messages,
+        ))
+
+    # Grounding feedback
+    if (ctx.is_analysis
+            and ctx.grounding_score < cfg.analysis.grounding_threshold
+            and ctx.grounding_issues):
+        parts.append(_build_grounding_feedback(ctx, response_text, cfg.analysis.grounding_threshold))
+
+    return "\n\n".join(parts) if parts else "[quality-refinement] Improve response quality."
+
+
+def _build_stream_envelope(
+    text: str,
+    tool_names: list[str],
+    input_tokens: int,
+    output_tokens: int,
+    stop_reason: str,
+    request: Any,
+) -> Any:
+    """Build a vendor-agnostic SimpleNamespace response envelope for stream buffering.
+
+    Compatible with _ensure_request_object() in UniversalToolExtractionTransformer.
+    The pipeline normalises any object to SimpleNamespace internally.
+    """
+    from types import SimpleNamespace
+
+    content = []
+    if text.strip():
+        content.append(SimpleNamespace(type="text", text=text))
+    for i, name in enumerate(tool_names):
+        content.append(SimpleNamespace(
+            type="tool_use",
+            id=f"toolu_stream_{i:03d}",
+            name=name,
+            input={},  # args not available from stream; sufficient for quality/grounding
+        ))
+
+    return SimpleNamespace(
+        id="stream_synthetic",
+        model=getattr(request, "model", ""),
+        role="assistant",
+        content=content,
+        type="message",
+        stop_reason=stop_reason,
+        reasoning_content=None,
+        usage=SimpleNamespace(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        ),
+    )
+
+
+def _parse_stream_tokens(chunks: list[str]) -> tuple[int, int, str]:
+    """Extract input_tokens, output_tokens, stop_reason from buffered SSE chunks."""
+    import json as _json
+    input_tokens = 0
+    output_tokens = 0
+    stop_reason = "end_turn"
+    for chunk in chunks:
+        for line in chunk.split("\n"):
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:].strip()
+            if data_str == "[DONE]":
+                continue
+            try:
+                data = _json.loads(data_str)
+            except (ValueError, _json.JSONDecodeError):
+                continue
+            evt_type = data.get("type", "")
+            if evt_type == "message_start":
+                usage = data.get("message", {}).get("usage", {})
+                input_tokens = usage.get("input_tokens", 0) or input_tokens
+            elif evt_type == "message_delta":
+                usage = data.get("usage", {})
+                output_tokens = usage.get("output_tokens", 0) or output_tokens
+                sr = data.get("delta", {}).get("stop_reason")
+                if sr:
+                    stop_reason = sr
+    return input_tokens, output_tokens, stop_reason
+
+
+async def stream_response_pipeline(
+    stream_generator: Any,
+    request: Any,
+    ctx: "TransformContext",
+    cfg: "ProxyConfig",
+    response_pipeline: Any,
+):
+    """Buffer a streaming response, run the response pipeline, quality-gate, then replay or re-request.
+
+    Equivalent to the non-streaming path for quality/grounding: the client waits,
+    but receives a validated response.
+
+    Yields SSE event strings compatible with StreamingResponse.
+    """
+    from llm.sse import response_to_sse_events
+    from llm.schemas import Message
+    from llm.pipeline import TransformContext
+
+    # Import here to avoid circular dependency
+    from llm.transformers.stream_event import accumulate_stream
+
+    # STEP 1: Buffer the full stream (single async iteration)
+    text, chunks, tool_names = await accumulate_stream(stream_generator)
+
+    # Skip if tool-heavy (model is mid-execution — don't interrupt)
+    if tool_names:
+        logger.info(
+            "[stream-pipeline] SKIP: tool_names=%s — tool execution in progress",
+            tool_names[:3],
+        )
+        for chunk in chunks:
+            yield chunk
+        return
+
+    # Skip quality gate during READ/ANALYZING phase (mid-analysis intermediate text).
+    # In this phase the model produces brief planning thoughts ("I'll examine X next")
+    # between tool-calling turns — those are NOT final analyses and score poorly by design.
+    # Quality gate only makes sense on SYNTHESIZING (final write-up) or non-analysis intents.
+    if ctx.is_analysis and ctx.analysis_phase in ("READ", "ANALYZING"):
+        logger.info(
+            "[stream-pipeline] SKIP: analysis_phase=%s — mid-analysis text, quality gate reserved for SYNTHESIZING",
+            ctx.analysis_phase,
+        )
+        for chunk in chunks:
+            yield chunk
+        return
+
+    # STEP 2: Parse token counts from buffered SSE events
+    input_tokens, output_tokens, stop_reason = _parse_stream_tokens(chunks)
+    ctx.stream_input_tokens = input_tokens
+    ctx.stream_output_tokens = output_tokens
+    ctx.stream_finish_reason = stop_reason
+
+    # STEP 3: Build vendor-agnostic synthetic response
+    synthetic = _build_stream_envelope(
+        text, tool_names, input_tokens, output_tokens, stop_reason, request
+    )
+
+    # STEP 4: Run response pipeline (grounding + tool extraction + feedback)
+    resp_ctx = TransformContext(
+        intent=ctx.intent,
+        is_analysis=ctx.is_analysis,
+        phase=ctx.phase,
+        analysis_phase=ctx.analysis_phase,
+        tools=ctx.tools,
+        session_id=ctx.session_id,
+    )
+    try:
+        await response_pipeline.process(synthetic, resp_ctx)
+    except Exception as e:
+        logger.warning("[stream-pipeline] response pipeline failed: %s — replaying original", e)
+        for chunk in chunks:
+            yield chunk
+        return
+
+    # Propagate grounding results to main ctx
+    ctx.grounding_score = resp_ctx.grounding_score
+    ctx.grounding_issues = resp_ctx.grounding_issues
+    ctx.evidence_links = resp_ctx.evidence_links
+    ctx.evidence_graph = resp_ctx.evidence_graph
+
+    # STEP 5: Quality gate
+    real_tools = [{"type": "tool_use", "name": n} for n in tool_names]
+    quality_score, issues = score_response_quality(
+        ctx.intent, text, real_tools,
+        is_analysis=ctx.is_analysis,
+        input_tokens=input_tokens,
+    )
+    ctx.quality_score = quality_score
+    ctx.quality_issues = issues
+
+    needs_quality = await _should_refine(quality_score, issues, ctx.intent, text, cfg)
+    needs_grounding = (
+        ctx.is_analysis
+        and cfg.analysis.grounding_refinement_enabled
+        and ctx.grounding_score < cfg.analysis.grounding_threshold
+        and len(resp_ctx.grounding_issues) > 0
+    )
+
+    # STEP 6a: PASS → replay original chunks
+    if not needs_quality and not needs_grounding:
+        for chunk in chunks:
+            yield chunk
+        return
+
+    logger.info(
+        "[stream-pipeline] REFINE: quality=%.2f needs_quality=%s grounding=%.2f needs_grounding=%s",
+        quality_score, needs_quality, ctx.grounding_score, needs_grounding,
+    )
+
+    # STEP 6b: FAIL → non-streaming re-request
+    # Lazy import to avoid circular dependency
+    from proxy.proxy import run_messages
+    from llm.converters import convert_litellm_to_anthropic
+
+    feedback = _build_unified_feedback(quality_score, issues, ctx, cfg, request.messages, text)
+
+    if not hasattr(request, "messages") or request.messages is None:
+        for chunk in chunks:
+            yield chunk
+        return
+
+    request.messages.append(Message(role="assistant", content=text[:4000]))
+    request.messages.append(Message(role="user", content=feedback))
+
+    original_stream = getattr(request, "stream", True)
+    request.stream = False  # force non-streaming for re-request
+
+    try:
+        is_stream, refined_out, _ = await run_messages(
+            request_obj=request, cfg=cfg, ctx=ctx,
+        )
+        if is_stream or refined_out is None:
+            for chunk in chunks:
+                yield chunk
+            return
+
+        refined_anthropic = convert_litellm_to_anthropic(
+            refined_out, request,
+            model_context_window=ctx.effective_context_window or cfg.routing.model_context_window,
+            strip_reasoning=cfg.policy.strip_reasoning,
+        )
+        ctx.refinement_attempt += 1
+
+        model = getattr(request, "original_model", None) or request.model
+        in_tokens = (refined_anthropic.usage.input_tokens
+                     if refined_anthropic.usage else input_tokens)
+        for event in response_to_sse_events(refined_anthropic, model, in_tokens):
+            yield event
+
+    except Exception as e:
+        logger.warning("[stream-pipeline] re-request failed: %s — replaying original", e)
+        for chunk in chunks:
+            yield chunk
+    finally:
+        request.stream = original_stream
+
+
 async def _build_verification_feedback(
     response_text: str,
     target_path: str,

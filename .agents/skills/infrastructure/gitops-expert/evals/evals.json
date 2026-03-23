@@ -1,0 +1,51 @@
+{
+  "skill_name": "gitops-expert",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review this GitHub Actions workflow:\n```yaml\nname: Deploy\non: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v3\n      - run: pip install -r requirements.txt\n      - env:\n          DB_PASSWORD: mypassword123\n          API_KEY: sk-prod-abc123\n        run: python deploy.py\n```",
+      "expected_output": "Critical findings: (1) CRITICAL — hardcoded secrets in workflow YAML (DB_PASSWORD, API_KEY) — these are committed to git and visible in GitHub UI; fix: use ${{ secrets.DB_PASSWORD }} and store in GitHub repository secrets; (2) on: push deploys on every push to every branch — add branch filter: on: push: branches: [main]; (3) No environment protection rules — add GitHub environment 'production' with required reviewers; (4) pip install without pinned hashes — supply chain risk, use pip-compile with hashes.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Identifies hardcoded secrets as CRITICAL finding",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Provides the correct fix using ${{ secrets.NAME }} syntax",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Flags that deployment triggers on all branches without a branch filter",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Our team wants to switch from long-lived feature branches (sometimes months old) to trunk-based development. What changes do we need to make?",
+      "expected_output": "Trunk-based development transition plan: (1) Branch protection on main — require PR, at least 1 reviewer, passing CI; (2) Feature flags — replace long branches with flags so partial features can land in main safely; (3) Short-lived branches max 1-2 days — enforce with branch age alerts; (4) CI must be fast (<10 min) to enable frequent merges; (5) Database migrations must be backward-compatible (expand-contract pattern); (6) Deployment frequency increases — ensure monitoring and quick rollback capability.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Recommends feature flags as the key enabler for trunk-based development",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Mentions the expand-contract (or parallel change) pattern for database migrations",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Addresses CI speed as a prerequisite for frequent merges",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

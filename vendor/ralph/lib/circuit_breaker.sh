@@ -419,6 +419,9 @@ reset_circuit_breaker() {
 }
 EOF
 
+    # Reset confidence history (stall detection uses separate file)
+    rm -f "$RALPH_DIR/.confidence_history"
+
     echo -e "${GREEN}✅ Circuit breaker reset to CLOSED state${NC}"
 }
 

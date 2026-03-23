@@ -1,0 +1,51 @@
+{
+  "skill_name": "database-expert",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review this SQLAlchemy ORM code:\n```python\ndef get_posts_with_authors():\n    posts = session.query(Post).all()\n    result = []\n    for post in posts:\n        result.append({\n            'title': post.title,\n            'author': post.author.name  # lazy load\n        })\n    return result\n```",
+      "expected_output": "Classic N+1 query problem: 1 query to get all Posts, then N queries (one per post) to lazy-load each author. Fix: use joinedload or selectinload. Example: session.query(Post).options(joinedload(Post.author)).all(). For large result sets, consider selectinload which uses a separate IN query instead of a JOIN. Also flag: no LIMIT — unbounded query will load entire table.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Identifies the N+1 query problem explicitly",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Provides the joinedload or selectinload fix with correct SQLAlchemy syntax",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Flags the missing LIMIT as a scalability risk",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "We need to add a `status` column to a `payments` table in production (500M rows, accessed 24/7). How should we do this migration safely?",
+      "expected_output": "Zero-downtime migration strategy: (1) Add column as nullable first — ALTER TABLE payments ADD COLUMN status VARCHAR(20) NULL; (2) Backfill in batches — UPDATE payments SET status='completed' WHERE id BETWEEN x AND y (avoid locking the whole table); (3) Add NOT NULL constraint only after backfill completes (PostgreSQL can do this without table lock if default is set); (4) Add index CONCURRENTLY to avoid table lock; (5) Remove old constraint/default in separate migration. Also: test rollback path — ALTER TABLE DROP COLUMN if needed.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Recommends adding column as nullable first (not NOT NULL immediately)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Recommends batched backfill instead of single UPDATE on 500M rows",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Mentions CREATE INDEX CONCURRENTLY to avoid table lock",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

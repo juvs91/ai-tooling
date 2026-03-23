@@ -30,12 +30,16 @@
 - `ai-notes/` — Session artifacts (learnings, analyses, plans)
 
 ### MCP Servers
-Configured in `settings.local.json` → `mcpServers`:
+Configured in `.mcp.json` → `mcpServers`:
 - `alloydb` — AlloyDB queries (postgres-mcp)
 - `atlassian` — Jira/Confluence (uvx mcp-atlassian)
-- `bitbucket` — Bitbucket (npx @aashari/mcp-server-atlassian-bitbucket)
 - `squit` — Legacy SP search (npx mcp-remote)
 - `cloudsql` — CloudSQL wrapper (scripts/cloudsql-mcp.sh)
+- `context7` — Live library/framework docs (npx @upstash/context7-mcp)
+- `serper` — Web search (npx serper-search-scrape-mcp-server)
+- `playwright` — Browser automation (npx @executeautomation/playwright-mcp-server)
+- `sequential-thinking` — Chain-of-thought reasoning (npx @modelcontextprotocol/server-sequential-thinking)
+- `memory` — Cross-session persistent facts (npx @modelcontextprotocol/server-memory)
 
 ## Skills
 
@@ -67,9 +71,9 @@ All MCP credentials are stored as environment variables (see `.env`):
 |----------|---------------|-------------|
 | **AlloyDB** | `ALLOYDB_PASSWORD` | Password for postgres connection |
 | **Atlassian** | `ATLASSIAN_CONFLUENCE_TOKEN`, `ATLASSIAN_JIRA_API_TOKEN` | Confluence & Jira tokens |
-| **Bitbucket** | `ATLASSIAN_BITBUCKET_API_TOKEN` | API token |
 | **Squit** | `SQUIT_API_KEY` | API key |
 | **CloudSQL** | `WPC_ENV` + `PROD/QA/DEV_*` | Per-environment DB credentials |
+| **Serper** | `SERPER_API_KEY` | Web search API key |
 
 ## Utility Scripts
 
@@ -78,3 +82,10 @@ All MCP credentials are stored as environment variables (see `.env`):
 | `check-mcp-status.sh` | Check health of all MCP services |
 | `cloudsql-mcp.sh` | Wrapper for CloudSQL MCP (switches WPC_ENV) |
 | `_load-skill-doc.sh` | Helper to load markdown docs for dynamic skills |
+
+## Agent Skills
+
+Agent routing and specialized personas are defined in `AGENTS.md`.
+Read `@AGENTS.md` for complete routing directives, deduplication mandates, and learning protocols.
+
+Use `.agents/skills/` subagents for deep analysis tasks to keep the main context lean.

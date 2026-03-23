@@ -1,0 +1,51 @@
+{
+  "skill_name": "unknown-domain-protocol",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "We found this in the codebase: `response = device.send(b'\\x1B\\x40')`. We don't know what protocol this is. What do we do?",
+      "expected_output": "Unknown-domain-protocol kicks in: (1) Does NOT say 'I don't know' and stop; (2) Analyzes the byte sequence: 0x1B is ESC, 0x40 is '@' — this looks like ESC/POS printer protocol (ESC @ = initialize printer); (3) Searches for related context: what is `device`? What library is imported? (4) Looks up ESC/POS spec or recognizes it from common printer protocols; (5) Documents finding. The agent should identify or strongly suspect ESC/POS and provide the next investigative steps.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Does NOT stop with 'I don't know' — follows the research protocol",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Identifies or suspects ESC/POS as the likely protocol for 0x1B 0x40",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Recommends investigative steps (look at imports, search for ESC/POS documentation)",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "We found references to 'ISO 15118' in the charging station code. What is this?",
+      "expected_output": "Section A (Known Standard Space): ISO 15118 is identified as 'Road vehicles — Vehicle to grid communication interface'. Research steps: fetch the standard overview, identify it as the EV charging communication protocol (Vehicle-to-Grid, V2G). It covers AC/DC charging communication between EVs and EVSE (Electric Vehicle Supply Equipment). Key sub-parts: ISO 15118-2 (AC), ISO 15118-20 (DC). Agent should look up the spec and report back with a usable summary, then apply the unknown-domain-protocol research steps to understand the implementation.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Recognizes 'ISO' prefix as a known standard space (Section A)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Correctly identifies ISO 15118 as the EV charging communication standard",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Does not halt — provides actionable next steps for deeper investigation",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

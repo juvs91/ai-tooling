@@ -82,7 +82,7 @@ class TestLLMClassifier:
             _policy_cfg(), models_differ=True,
         )
         ctx = TransformContext()
-        with patch("llm.transformers.intent_classifier.classify_intent", new_callable=AsyncMock, return_value="BUILD") as mock:
+        with patch("llm.transformers.intent_classifier.classify_intent", new_callable=AsyncMock, return_value=("BUILD", 1.0, None)) as mock:
             await t.transform(_request("implement the feature"), ctx)
             mock.assert_called_once()
             assert ctx.intent == "BUILD"
@@ -870,7 +870,7 @@ class TestLLMClassifierFiveIntents:
         ctx = TransformContext()
         with patch(
             "llm.transformers.intent_classifier.classify_intent",
-            new_callable=AsyncMock, return_value="READ",
+            new_callable=AsyncMock, return_value=("READ", 0.9, None),
         ):
             await self._make_llm_transformer().transform(_request(messages=msgs), ctx)
         assert ctx.intent == "READ"
@@ -896,7 +896,7 @@ class TestLLMClassifierFiveIntents:
         ctx = TransformContext()
         with patch(
             "llm.transformers.intent_classifier.classify_intent",
-            new_callable=AsyncMock, return_value="SYNTHESIZING",
+            new_callable=AsyncMock, return_value=("SYNTHESIZING", 0.9, None),
         ):
             await self._make_llm_transformer().transform(_request(messages=msgs), ctx)
         assert ctx.intent == "SYNTHESIZING"
@@ -912,7 +912,7 @@ class TestLLMClassifierFiveIntents:
         ctx = TransformContext()
         with patch(
             "llm.transformers.intent_classifier.classify_intent",
-            new_callable=AsyncMock, return_value="BUILD",
+            new_callable=AsyncMock, return_value=("BUILD", 0.9, None),
         ):
             await self._make_llm_transformer().transform(
                 _request("Analyze the codebase exhaustively and fix bugs"), ctx,
@@ -927,7 +927,7 @@ class TestLLMClassifierFiveIntents:
         ctx = TransformContext()
         with patch(
             "llm.transformers.intent_classifier.classify_intent",
-            new_callable=AsyncMock, return_value="CHAT",
+            new_callable=AsyncMock, return_value=("CHAT", 0.95, None),
         ):
             await self._make_llm_transformer().transform(
                 _request("Hello, how are you?"), ctx,
@@ -949,7 +949,7 @@ class TestLLMClassifierFiveIntents:
         ctx = TransformContext()
         with patch(
             "llm.transformers.intent_classifier.classify_intent",
-            new_callable=AsyncMock, return_value="READ",
+            new_callable=AsyncMock, return_value=("READ", 0.9, None),
         ):
             await self._make_llm_transformer().transform(_request(messages=msgs), ctx)
         assert ctx.intent == "BUILD"
