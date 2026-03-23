@@ -1218,40 +1218,49 @@ async def accumulate_stream(
     text_parts: list[str] = []
     tool_names: list[str] = []
 
-    async for chunk in stream_generator:
-        chunks.append(chunk)
-        for line in chunk.split("\n"):
-            if not line.startswith("data: "):
-                continue
-            data_str = line[6:].strip()
-            if data_str == "[DONE]":
-                continue
-            try:
-                data = json.loads(data_str)
-            except (ValueError, json.JSONDecodeError):
-                continue
-            evt_type = data.get("type", "")
-            if evt_type == "content_block_delta":
-                delta = data.get("delta", {})
-                if delta.get("type") == "text_delta":
-                    text = delta.get("text", "")
-                    text_parts.append(text)
-                    # Detect XML tool calls from GLM-4.7 / Z.AI passthrough.
-                    # Path A (handle_streaming + XmlToolBuffer) already converts these
-                    # to native SSE for CC. This path only needs accurate counts for
-                    # quality heuristics so scores don't falsely hit 0.00.
-                    if "<invoke name=" in text or "<tool_call" in text or "\uff5cDSML\uff5c" in text:
-                        for m in re.finditer(
-                            r'<invoke\s+name=["\']([^"\']+)["\']'
-                            r'|<tool_call\s+name=["\']([^"\']+)["\']'
-                            r'|\uff5cDSML\uff5cinvoke\s+name=["\']([^"\']+)["\']',
-                            text,
-                        ):
-                            tool_names.append(m.group(1) or m.group(2) or m.group(3))
-            elif evt_type == "content_block_start":
-                block = data.get("content_block", {})
-                if block.get("type") == "tool_use":
-                    tool_names.append(block.get("name", "unknown"))
+    try:
+        async for chunk in stream_generator:
+            chunks.append(chunk)
+            for line in chunk.split("\n"):
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    continue
+                try:
+                    data = json.loads(data_str)
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                evt_type = data.get("type", "")
+                if evt_type == "content_block_delta":
+                    delta = data.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        text_parts.append(text)
+                        # Detect XML tool calls from GLM-4.7 / Z.AI passthrough.
+                        # Path A (handle_streaming + XmlToolBuffer) already converts these
+                        # to native SSE for CC. This path only needs accurate counts for
+                        # quality heuristics so scores don't falsely hit 0.00.
+                        if "<invoke name=" in text or "<tool_call" in text or "\uff5cDSML\uff5c" in text:
+                            for m in re.finditer(
+                                r'<invoke\s+name=["\']([^"\']+)["\']'
+                                r'|<tool_call\s+name=["\']([^"\']+)["\']'
+                                r'|\uff5cDSML\uff5cinvoke\s+name=["\']([^"\']+)["\']',
+                                text,
+                            ):
+                                tool_names.append(m.group(1) or m.group(2) or m.group(3))
+                elif evt_type == "content_block_start":
+                    block = data.get("content_block", {})
+                    if block.get("type") == "tool_use":
+                        tool_names.append(block.get("name", "unknown"))
+    except Exception as e:  # noqa: BLE001
+        # Upstream timed out or errored mid-stream.
+        # Return whatever we accumulated so the quality pipeline can replay partial content
+        # instead of propagating the exception and giving the client a clean disconnect.
+        logger.warning(
+            "[accumulate-stream] upstream interrupted (%s: %s) — returning %d partial chunks",
+            type(e).__name__, e, len(chunks),
+        )
 
     # Strip XML tool blocks from accumulated text so quality heuristics score prose only.
     # H7/H17 penalize XML as "unverified claims" — removing it prevents false 0.00 scores.
