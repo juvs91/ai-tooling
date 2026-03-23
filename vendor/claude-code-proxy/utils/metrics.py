@@ -76,6 +76,9 @@ class ProxyMetrics:
         self.phase_counts: dict[str, int] = {}
         self.phase_quality_sum: dict[str, float] = {}
         self.phase_quality_count: dict[str, int] = {}
+        # Adaptive routing: per-model quality windows
+        self._model_quality_window: dict[str, deque] = {}
+        self._model_grounding_window: dict[str, deque] = {}
         # Classifier outcome accuracy: did the response behavior match the classified intent?
         self.intent_outcome_correct: int = 0
         self.intent_outcome_wrong: int = 0
@@ -295,6 +298,47 @@ class ProxyMetrics:
             "total": total,
             "success_rate_pct": round((native + xml + recovered) / max(total, 1) * 100, 1),
         }
+
+    def update_model_quality(
+        self,
+        model: str,
+        quality_score: float,
+        grounding_score: float = 1.0,
+        intent: str = "CHAT",
+    ) -> None:
+        """Record quality score for a model in the rolling quality window."""
+        if quality_score >= 1.0 and grounding_score >= 1.0:
+            return  # skip default values (no real evaluation happened)
+        with self._lock:
+            key = model.rsplit("/", 1)[-1]  # strip provider prefix
+            window_size = 20  # matches ADAPTIVE_WINDOW_SIZE default
+            if key not in self._model_quality_window:
+                self._model_quality_window[key] = deque(maxlen=window_size)
+                self._model_grounding_window[key] = deque(maxlen=window_size)
+            self._model_quality_window[key].append(quality_score)
+            self._model_grounding_window[key].append(grounding_score)
+
+    def get_model_quality_stats(self, model: str) -> dict:
+        """Return quality stats for a model from the rolling window."""
+        with self._lock:
+            key = model.rsplit("/", 1)[-1]
+            q_scores = list(self._model_quality_window.get(key, []))
+            g_scores = list(self._model_grounding_window.get(key, []))
+            if not q_scores:
+                return {"avg_quality": None, "avg_grounding": None, "sample_size": 0, "trend": "unknown"}
+            avg = sum(q_scores) / len(q_scores)
+            trend = "stable"
+            if len(q_scores) >= 8:
+                recent = sum(q_scores[-4:]) / 4
+                older = sum(q_scores[-8:-4]) / 4
+                trend = ("improving" if recent > older + 0.05 else
+                         "degrading" if recent < older - 0.05 else "stable")
+            return {
+                "avg_quality": round(avg, 3),
+                "avg_grounding": round(sum(g_scores) / len(g_scores), 3) if g_scores else None,
+                "sample_size": len(q_scores),
+                "trend": trend,
+            }
 
 
 # Singleton

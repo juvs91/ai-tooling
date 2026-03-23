@@ -14,6 +14,7 @@ dependencies = [
     "google-auth>=2.41.1",
     "google-cloud-aiplatform>=1.120.0",
     "json-repair>=0.30.0",
+    "toksum>=0.7.0",
 ]
 
 [dependency-groups]

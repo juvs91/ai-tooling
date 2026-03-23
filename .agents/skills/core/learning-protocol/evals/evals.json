@@ -1,0 +1,135 @@
+{
+  "skill_name": "learning-protocol",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I've been analyzing this codebase for hours and discovered that all SQL stored procedures follow a strict naming convention: `usp_[Module]_[Action]_[Version]`. Any procedure without a version suffix is a deprecated legacy entry point. This is undocumented and critical for future analysis. Persist this finding.",
+      "expected_output": "A new or updated Markdown file in docs/knowledge/ documenting the naming convention and its implications. The learning log at docs/knowledge/learning_log.md is updated with a new entry. A commit is made with a message starting with `docs(learning):`.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "A file was created or updated under docs/knowledge/ containing the naming convention rule",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "docs/knowledge/learning_log.md was updated with a new dated entry",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The knowledge is written as a general, project-agnostic pattern — no hardcoded table or procedure names",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "A commit was staged or made with a message starting with docs(learning):",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "We keep having to manually parse COBOL copybook files during archaeology. Every time we encounter one, we spend an hour figuring it out from scratch. We need a dedicated cobol-analyst skill for this. Create it.",
+      "expected_output": "A new SKILL.md file at .agents/skills/software/discovery/cobol-analyst/SKILL.md with proper YAML frontmatter (name and description fields). Evals are created at .agents/skills/software/discovery/cobol-analyst/evals/evals.json with at least 2 test cases. AGENTS.md is updated to register the new skill. A commit is made with feat(agents):",
+      "files": [],
+      "assertions": [
+        {
+          "text": "SKILL.md exists with valid YAML frontmatter containing both `name` and `description` fields",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The description field is specific and trigger-oriented (starts with 'Use when' or similar imperative form)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "evals/evals.json exists with at least 2 evals including assertions",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "AGENTS.md was updated to register the new skill with its trigger conditions",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "No existing skill was duplicated — the agent checked AGENTS.md before creating",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "The retro-engineer skill doesn't handle Rust codebases — it assumes Python or Java. I've written a patch that adds Rust support. Persist this improvement.",
+      "expected_output": "The existing retro-engineer SKILL.md is updated (not a new duplicate skill created). The update adds Rust-specific guidance. The learning log is updated. AGENTS.md description for retro-engineer is refined if the trigger description needs updating. No new retro-engineer-rust or similar duplicate is created.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "The existing retro-engineer SKILL.md was modified, not a new duplicate created",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "AGENTS.md was checked for existing capabilities before any new artifact was proposed",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Learning log was updated with the refinement",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "I need to add a new payment-processor skill to analyze PCI-DSS compliance in codebases. I've already tried to design this with the Tool Writer three times but we keep going in circles about whether it should be a skill or a script. We're on our 4th iteration now and still no agreement.",
+      "expected_output": "The circuit breaker protocol is triggered. The agent halts the automated negotiation loop, does NOT continue iterating, and explicitly asks the human user to make the tie-breaker decision about whether to create a skill or a tool. The response presents the two options clearly.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "The agent invoked the circuit breaker (halted the loop after >3 iterations)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The agent explicitly asked the user for a decision rather than continuing the loop",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The two options (skill vs. tool) were presented clearly to the user",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "We discovered that the payment module in this codebase uses a custom XOR-based obfuscation with a hardcoded 16-byte key (0xDEADBEEF...). Document this finding for future sessions, but keep it internal to this project — it's proprietary.",
+      "expected_output": "The finding is written to docs/knowledge/ or context/ as a project-specific file. It is NOT written into any general tool or pushed to the upstream deagentic repository. The knowledge is marked or organized so it's clearly project-scoped.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Finding was saved to docs/knowledge/ or context/ (project-scoped location)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "No attempt was made to push the proprietary finding to the upstream deagentic repository",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The hardcoded key value was documented (not redacted or omitted) since this is the archaeological finding",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

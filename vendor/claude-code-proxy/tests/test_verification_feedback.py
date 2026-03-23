@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from llm.stream_quality import _build_verification_feedback
+from llm.transformers.quality_refinement import _build_verification_feedback
 
 
 @pytest.fixture

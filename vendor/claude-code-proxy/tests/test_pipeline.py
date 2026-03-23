@@ -76,6 +76,16 @@ class TestTransformContext:
             "analysis_phase", "analysis_read_count",
             "tools", "session_id",
             "extracted_tool_calls", "xml_tool_buffer",
+            # Grounding fields
+            "evidence_links", "citation_map", "grounding_score",
+            "grounding_issues", "evidence_graph", "code_snippet_cache",
+            # P3 — confidence scoring
+            "intent_confidence", "secondary_intent",
+            # P2 — adaptive routing
+            "adaptive_routing_enabled", "adaptive_routing_used",
+            "adaptive_routing_reason", "model_quality_history",
+            # P1 — stream buffering
+            "stream_finish_reason", "stream_input_tokens", "stream_output_tokens",
         }
         assert names == expected
 

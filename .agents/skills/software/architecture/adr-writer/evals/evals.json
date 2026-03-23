@@ -1,0 +1,61 @@
+{
+  "skill_name": "adr-writer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "We just decided to use SQLite instead of PostgreSQL for our embedded device data store. The device has 512MB RAM and no network. Write the ADR.",
+      "expected_output": "A complete MADR-format ADR at docs/adr/ADR-NNNN-use-sqlite-for-embedded-data-store.md. Should include: title, date, status (Accepted), context (embedded device, 512MB RAM, no network, no PostgreSQL server available), decision drivers (zero dependencies, serverless, single-file DB), considered options (SQLite, PostgreSQL, flat files, LevelDB), decision outcome (SQLite chosen), positive consequences (no server process, ACID transactions, well-supported Python driver), negative consequences (no multi-process concurrent writes without WAL mode). docs/adr/index.md updated.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "ADR file created at docs/adr/ with correct MADR format",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Contains all required sections: context, considered options, decision outcome, consequences",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "At least 2 alternatives to SQLite are listed and evaluated",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "docs/adr/index.md was updated to include the new ADR entry",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Status is set to 'Accepted'",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Write an ADR for the decision to use RS-485 over USB for our sensor network. We evaluated both options.",
+      "expected_output": "MADR ADR covering: context (industrial sensor network, distances >10m, electrically noisy environment), decision drivers (noise immunity, multi-drop capability, distance), considered options (USB — max 5m, point-to-point vs RS-485 — 1200m, multi-drop, differential signaling), decision (RS-485), positive consequences (noise immunity, 32-device bus, long cable runs), negative consequences (requires USB-to-RS485 adapter, half-duplex coordination needed, slower than USB 2.0).",
+      "files": [],
+      "assertions": [
+        {
+          "text": "ADR clearly states the context including distance and noise requirements",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Both USB and RS-485 options are evaluated with trade-offs",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Negative consequences for RS-485 are honestly listed (not just positives)",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

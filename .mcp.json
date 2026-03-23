@@ -16,10 +16,10 @@
       "env": {
         "CONFLUENCE_URL": "https://deacero.atlassian.net/wiki",
         "CONFLUENCE_USERNAME": "jeguzman@deacero.com",
-        "CONFLUENCE_API_TOKEN": "REDACTED_TOKENmf3dWEnGvaI1-YcPapn-82EfnZyXjniGebnPZ5NZQ1IaeOm95UnQi_KspigOV08CtmgLv_H_pPE7ACBC-mprqCj4hXS1KrYfjXSsxdPnvCVv2GNKlzqp_biQAHdSGj0RXjsV28Mdlf78cURpGRRPBWN_M9cWQ46jJN5NFOJzYEk=E70A4068",
+        "CONFLUENCE_API_TOKEN": "$ATLASSIAN_CONFLUENCE_TOKEN",
         "JIRA_URL": "https://deacero.atlassian.net",
         "JIRA_USERNAME": "jeguzman@deacero.com",
-        "JIRA_API_TOKEN": "REDACTED_TOKENmf3dWEnGvaI1-YcPapn-82EfnZyXjniGebnPZ5NZQ1IaeOm95UnQi_KspigOV08CtmgLv_H_pPE7ACBC-mprqCj4hXS1KrYfjXSsxdPnvCVv2GNKlzqp_biQAHdSGj0RXjsV28Mdlf78cURpGRRPBWN_M9cWQ46jJN5NFOJzYEk=E70A4068"
+        "JIRA_API_TOKEN": "$ATLASSIAN_JIRA_API_TOKEN"
       }
     },
     "squit": {
@@ -44,7 +44,7 @@
       "command": "npx",
       "args": ["-y", "serper-search-scrape-mcp-server"],
       "env": {
-        "SERPER_API_KEY": "[REDACTED]"
+        "SERPER_API_KEY": "$SERPER_API_KEY"
       }
     },
     "playwright": {
@@ -55,7 +55,14 @@
         "PLAYWRIGHT_BROWSERS": "chromium"
       }
     },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    },
     "_comment": "Apple Silicon fix: PLAYWRIGHT_BROWSERS=chromium (no soporta WebKit/Safari en mac13-arm64)"
-    }
   }
 }

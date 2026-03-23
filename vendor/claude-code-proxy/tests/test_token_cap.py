@@ -45,14 +45,14 @@ class TestTokenCapTransformer:
         t = TokenCapTransformer(_policy(), base_url=None)
         ctx = TransformContext(raw_body=b"x" * 600)
         await t.transform(SimpleNamespace(), ctx)
-        assert ctx.approx_tokens == 100  # 600 / 6
+        assert ctx.approx_tokens == 200  # 600 / 3
 
     @pytest.mark.asyncio
     async def test_empty_body(self):
         t = TokenCapTransformer(_policy(), base_url=None)
         ctx = TransformContext(raw_body=b"")
         await t.transform(SimpleNamespace(), ctx)
-        assert ctx.approx_tokens == 1  # max(1, 0//6)
+        assert ctx.approx_tokens == 1  # max(1, 0//3)
 
     @pytest.mark.asyncio
     async def test_provider_cap_raises_when_hard_block(self):
@@ -88,7 +88,7 @@ class TestTokenCapTransformer:
 
     @pytest.mark.asyncio
     async def test_under_all_caps(self):
-        body = b"x" * (100 * 6)  # approx_tokens = 100
+        body = b"x" * (100 * 3)  # approx_tokens = 100
         t = TokenCapTransformer(
             _policy(max_input=1000, hard_block=True),
             base_url="https://api.groq.com/v1",

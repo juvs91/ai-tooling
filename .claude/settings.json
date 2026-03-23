@@ -86,6 +86,45 @@
       "mcp": "05-mcp/"
     }
   },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx block-no-verify@1.1.2"
+          }
+        ],
+        "description": "Block git --no-verify flag to protect pre-commit hooks"
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/config-protection.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Block edits to linter/formatter config files"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/quality-gate.sh",
+            "async": true,
+            "timeout": 30
+          }
+        ],
+        "description": "Run ruff linter on modified Python files"
+      }
+    ]
+  },
   "connections": {
     "alloydb": {
       "type": "mcp",

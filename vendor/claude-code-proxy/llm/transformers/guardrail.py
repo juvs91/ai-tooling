@@ -59,22 +59,13 @@ _ANALYSIS_REASONING_PROMPT = (
     "Quality threshold: Every claim MUST be verifiable by reading the cited file:line."
 )
 
-_SYNTHESIS_PROMPT = (
-    "[synthesis-guard] You have gathered all data via tools. Produce final report.\n\n"
-    "REQUIRED STRUCTURE:\n"
-    "1. OVERVIEW: System architecture (3-5 sentences, with file references)\n"
-    "2. COMPONENTS: Each module with:\n"
-    "   - File path (server.py, router/llm_router.py, etc.)\n"
-    "   - Purpose (1 line)\n"
-    "   - Key classes/functions (signatures + line ranges)\n"
-    "   - Interactions (calls X, receives from Y)\n"
-    "3. FINDINGS: For each bug/pattern:\n"
-    "   - Claim: What IS the issue?\n"
-    "   - Evidence: Exact code snippet (file:line)\n"
-    "   - Verification: How did you confirm it's real?\n"
-    "4. RECOMMENDATIONS: Prioritized by impact (CRITICAL > HIGH > LOW)\n\n"
-    "NO TOOL CALLS — Use only data you already read.\n"
-    "CITATION FORMAT: [filename.py:line] for all factual claims."
+_SYNTHESIS_PROMPT_WITH_TOOLS = (
+    "[synthesis-guide] You have read significant data. Begin synthesizing your findings into a "
+    "comprehensive written analysis.\n\n"
+    "PRIORITY: Write your synthesis now. Reference (file:line) for every factual claim.\n"
+    "If you need to verify a specific fact before citing it, you may use tools — but minimize tool calls.\n"
+    "Structure: OVERVIEW → COMPONENTS → FINDINGS → RECOMMENDATIONS\n"
+    "Do not speculate about code you have not read."
 )
 
 
@@ -172,16 +163,11 @@ class GuardrailTransformer(Transformer):
             logger.info("[analysis-guard] Injected reasoning enforcement prompt")
 
         elif ctx.analysis_phase == "SYNTHESIZING":
-            # Strip tools: synthesis should produce text, not tool calls.
-            # Tool definitions consume ~30K tokens (47% of DeepSeek-R1's 64K window).
-            if getattr(request, "tools", None):
-                tool_count = len(request.tools)
-                request.tools = None
-                request.tool_choice = None
-                logger.info("[analysis-guard] SYNTHESIZING: stripped %d tools", tool_count)
-            # Synthesis prompt: produce report from context
-            ensure_system_note(request, _SYNTHESIS_PROMPT)
-            logger.info("[analysis-guard] Injected synthesis prompt")
+            # Do NOT strip tools — model may still need to verify specific claims.
+            # Tool stripping creates a permanent halt with no recovery path.
+            # Override F in intent_classifier.py handles phase reset if agent calls a tool.
+            ensure_system_note(request, _SYNTHESIS_PROMPT_WITH_TOOLS)
+            logger.info("[analysis-guard] Injected synthesis prompt (tools kept)")
 
         # Loop guard: detect and warn about duplicate file reads
         loop_warning = _detect_duplicate_reads(getattr(request, "messages", []))
@@ -207,3 +193,49 @@ class GuardrailTransformer(Transformer):
                     logger.warning("[loop-guard] SOFT: %d dup files (no tools)", dup_file_count)
             else:
                 logger.warning("[loop-guard] SOFT: Injected warning (%d dup files)", dup_file_count)
+
+        # Inject grounding context from previous turns (Phase 3 enhancement)
+        # Only inject for analysis phases where previous verifications are relevant
+        if ctx.analysis_phase in ("ANALYZING", "READ") and ctx.session_id:
+            await inject_grounding_context(request, ctx.session_id)
+
+
+async def inject_grounding_context(request: Any, session_id: str) -> None:
+    """Inject verified claims from previous turns into system prompt.
+
+    This adds grounding state from previous turns to help the model avoid
+    redundant verifications and leverage previously validated evidence.
+
+    Args:
+        request: The request object to inject into
+        session_id: Session ID for retrieving grounding state
+    """
+    from llm.compressor import get_grounding_state
+
+    if not session_id:
+        return
+
+    state = await get_grounding_state(session_id)
+    if not state["verified_claims"]:
+        return
+
+    # Build context from grounding graph
+    verified_entities = []
+    for entity, data in state["grounding_graph"].items():
+        if data.get("citations"):
+            verified_entities.append(
+                f"- {entity}: verified in {data.get('file', 'unknown')} "
+                f"({len(data.get('citations', []))} citations)"
+            )
+
+    if not verified_entities:
+        return
+
+    grounding_note = (
+        "\n\nPREVIOUSLY VERIFIED CLAIMS:\n"
+        "The following entities and claims were verified in previous turns:\n"
+        + "\n".join(verified_entities[:10]) +  # Limit to 10 most recent
+        "\n\nUse this verified context to avoid redundant verifications."
+    )
+
+    ensure_system_note(request, grounding_note)

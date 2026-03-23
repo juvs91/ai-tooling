@@ -6,6 +6,9 @@ import json
 import uuid
 from threading import Lock
 from typing import Any, Optional, Set, Tuple
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # ── Unified Accessors ────────────────────────────────────────────────
@@ -89,7 +92,83 @@ def parse_allowlist(raw: str) -> Set[str]:
 
 def approx_tokens_from_bytes(b: bytes) -> int:
     # heurística rápida (6 bytes ~ 1 token aprox)
-    return max(1, len(b) // 6)
+    return max(1, len(b) // 3)
+
+
+# ── Central Token Counting (toksum integration) ────────────────────────
+# Single source of truth for all token counting across the codebase.
+
+def count_tokens_accurate(
+    messages: list[dict] | str | None,
+    model: str = "",
+    allow_approximation: bool = True
+) -> int:
+    """
+    Central token counting function with toksum integration.
+
+    Priority:
+    1. toksum (accurate for 300+ models including GLM-4.7)
+    2. LiteLLM token_counter (if toksum fails)
+    3. Character heuristics (last resort, if allow_approximation=True)
+
+    Args:
+        messages: Message list, string, or None
+        model: Model name for tokenizer selection
+        allow_approximation: If True, fall back to char heuristics
+
+    Returns:
+        Token count (never None, always >= 0)
+    """
+    # Handle None/empty input
+    if not messages:
+        return 0
+
+    # Handle string input (e.g., for compression prompts)
+    if isinstance(messages, str):
+        return _count_tokens_for_string(messages, model, allow_approximation)
+
+    # Handle message list input
+    try:
+        # Try toksum first (supports GLM-4.7 and 300+ other models)
+        from toksum import count_tokens as toksum_count_tokens
+        return toksum_count_tokens(messages, model=model)
+    except Exception as e:
+        logger.debug(f"toksum failed: {e}, trying LiteLLM fallback")
+
+        try:
+            # Fallback to LiteLLM (token_counter is synchronous)
+            import litellm
+            return litellm.token_counter(model=model, messages=messages)
+        except Exception as e2:
+            logger.warning(f"LiteLLM fallback failed: {e2}")
+
+            if allow_approximation:
+                # Last resort: character-based approximation
+                logger.debug("Using character-based approximation")
+                return _count_tokens_approximate(messages)
+            else:
+                # Don't allow approximation - re-raise
+                raise e2 from e
+
+
+def _count_tokens_for_string(
+    text: str,
+    model: str = "",
+    allow_approximation: bool = True
+) -> int:
+    """Count tokens for plain text (not message list)."""
+    # toksum doesn't directly support string input, so we wrap in message
+    return _count_tokens_approximate([{"role": "user", "content": text}])
+
+
+def _count_tokens_approximate(messages: list[dict]) -> int:
+    """Fallback: character-based approximation (last resort)."""
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "") or ""
+        # chars/3 is reasonable for English text
+        total += len(content) // 3
+    return max(1, total)
 
 _CLAUDE_ASSUMED_CONTEXT = 200_000
 

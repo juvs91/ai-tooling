@@ -13,9 +13,11 @@ from llm.transformers.intent_enforcement import IntentEnforcementTransformer
 from llm.transformers.deferred_tools import DeferredToolsTransformer
 from llm.transformers.reasoning_handling import ReasoningHandlingTransformer
 from llm.transformers.model_feedback import ModelFeedbackTransformer
-from llm.transformers.quality_refinement import QualityRefinementTransformer
 from llm.transformers.stream_event import StreamEventTransformer
 from llm.transformers.universal_tool_extraction import UniversalToolExtractionTransformer
+from llm.transformers.grounding_validator import GroundingValidatorTransformer
+from llm.transformers.adaptive_context import AdaptiveContextTransformer
+from llm.transformers.quality_recorder import QualityRecorderTransformer
 
 __all__ = [
     "Pipeline",
@@ -33,7 +35,9 @@ __all__ = [
     "DeferredToolsTransformer",
     "ReasoningHandlingTransformer",
     "ModelFeedbackTransformer",
-    "QualityRefinementTransformer",
     "StreamEventTransformer",
     "UniversalToolExtractionTransformer",
+    "GroundingValidatorTransformer",
+    "AdaptiveContextTransformer",
+    "QualityRecorderTransformer",
 ]

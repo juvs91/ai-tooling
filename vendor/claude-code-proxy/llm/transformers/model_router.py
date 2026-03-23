@@ -44,10 +44,12 @@ class ModelRouterTransformer(Transformer):
         routing_cfg: ModelRouting,
         credentials_cfg: ProviderCredentials,
         analysis_cfg: AnalysisConfig | None = None,
+        adaptive_cfg: Any = None,
     ) -> None:
         self._routing = routing_cfg
         self._creds = credentials_cfg
         self._analysis = analysis_cfg
+        self._adaptive = adaptive_cfg
 
     async def transform(self, request: Any, ctx: TransformContext) -> None:
         # Preserve original model for logging (MUST happen before any mutation)
@@ -143,6 +145,44 @@ class ModelRouterTransformer(Transformer):
         elif not ctx.effective_context_window:
             ctx.effective_context_window = self._routing.model_context_window
 
+        # P3: Confidence-aware routing — low confidence → upgrade to big_model
+        if (getattr(ctx, "intent_confidence", 1.0) < self._routing.low_confidence_threshold
+                and ctx.intent in ("READ", "CHAT", "VERIFY")
+                and self._routing.big_model != self._routing.small_model
+                and not is_ollama_base(self._creds.openai_base_url)):
+            pref = _provider_prefix(self._routing.preferred_provider)
+            request.model = f"{pref}{self._routing.big_model}"
+            logger.info(
+                "[router] Low confidence (%.2f) on %s → upgrading to big_model",
+                ctx.intent_confidence, ctx.intent,
+            )
+        elif (getattr(ctx, "secondary_intent", "") == "BUILD"
+                and ctx.intent == "READ"
+                and getattr(ctx, "intent_confidence", 1.0) < 0.75
+                and not is_ollama_base(self._creds.openai_base_url)):
+            ctx.phase = "PLAN"
+            pref = _provider_prefix(self._routing.preferred_provider)
+            request.model = f"{pref}{self._routing.big_model}"
+            logger.info(
+                "[router] Multi-intent READ+BUILD (conf=%.2f) → PLAN routing",
+                ctx.intent_confidence,
+            )
+
+        # P2: Adaptive routing — upgrade if model quality history is poor
+        if (self._adaptive is not None
+                and self._adaptive.enabled
+                and getattr(ctx, "adaptive_routing_enabled", False)
+                and ctx.model_quality_history
+                and not is_ollama_base(self._creds.openai_base_url)):
+            adjusted = self._adaptive_adjust(request.model, ctx)
+            if adjusted != request.model:
+                logger.warning(
+                    "[adaptive-routing] %s → %s | reason: %s",
+                    request.model, adjusted, getattr(ctx, "adaptive_routing_reason", ""),
+                )
+                request.model = adjusted
+                ctx.adaptive_routing_used = True
+
         logger.info(
             "[route] approx_tokens=%d intent=%s phase=%s provider=%s is_ollama=%s "
             "analysis_phase=%s model_in=%s model_out=%s tools_in=%d dropped=%s "
@@ -154,3 +194,46 @@ class ModelRouterTransformer(Transformer):
             len(getattr(request, "tools", []) or []), ctx.dropped_tools,
             bool(ctx.route_override), ctx.effective_context_window,
         )
+
+    def _adaptive_adjust(self, chosen_model: str, ctx: TransformContext) -> str:
+        """Adjust model if quality history is below threshold. Returns adjusted model name."""
+        if self._adaptive is None:
+            return chosen_model
+        model_key = chosen_model.rsplit("/", 1)[-1]
+        stats = ctx.model_quality_history.get(model_key, {})
+        avg = stats.get("avg_quality")
+        sample = stats.get("sample_size", 0)
+        trend = stats.get("trend", "stable")
+
+        if avg is None or sample < self._adaptive.min_sample_size:
+            return chosen_model
+
+        threshold = self._adaptive.quality_fallback_threshold
+        badly_below = avg < threshold - 0.15
+        below_degrading = avg < threshold and trend == "degrading"
+
+        if not (badly_below or below_degrading):
+            return chosen_model
+
+        big = self._routing.big_model
+        pref = _provider_prefix(self._routing.preferred_provider)
+        big_key = big.rsplit("/", 1)[-1]
+        big_stats = ctx.model_quality_history.get(big_key, {})
+        big_avg = big_stats.get("avg_quality")  # None = no data = assume good
+
+        # Upgrade to big_model if small is underperforming on analysis
+        if (model_key == self._routing.small_model
+                and ctx.is_analysis
+                and (big_avg is None or big_avg >= threshold)):
+            ctx.adaptive_routing_reason = f"small_model avg={avg:.2f} trend={trend}"
+            return f"{pref}{big}"
+
+        # Upgrade to big_model if building_model is underperforming on BUILD
+        if (model_key == self._routing.building_model
+                and ctx.intent == "BUILD"
+                and (big_avg is None
+                     or big_avg > avg + self._adaptive.min_quality_advantage)):
+            ctx.adaptive_routing_reason = f"building_model avg={avg:.2f} trend={trend}"
+            return f"{pref}{big}"
+
+        return chosen_model

@@ -8,6 +8,7 @@ from llm.transformers.stream_event import (
     # Public entry points
     handle_streaming,
     passthrough_xml_tool_extraction,
+    _run_post_stream_validation,
     # Classes
     _ReasoningStripper,
     _StreamCtx,
@@ -44,6 +45,7 @@ from utils.tool_utils import (
 __all__ = [
     "handle_streaming",
     "passthrough_xml_tool_extraction",
+    "_run_post_stream_validation",
     "_ReasoningStripper",
     "_StreamCtx",
     "_strip_think_tags",

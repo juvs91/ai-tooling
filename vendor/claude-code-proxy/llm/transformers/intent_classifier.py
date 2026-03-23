@@ -69,6 +69,29 @@ def _detect_phase(messages: list) -> tuple[str | None, list[str]]:
     return "READS_ONLY", recent_tools
 
 
+def _get_last_assistant_tools(messages: list) -> list[str]:
+    """Return tool names from the most recent assistant message's tool_use blocks.
+
+    Single-message lookahead (not _detect_phase's 5-message window) — used by
+    Override F to determine which tool the agent just called in SYNTHESIZING mode.
+    """
+    for msg in reversed(messages or []):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role != "assistant":
+            continue
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+        if not isinstance(content, list):
+            break
+        names = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = block.get("name")
+                if name:
+                    names.append(name)
+        return names  # Return on first assistant message found (even if empty)
+    return []
+
+
 def _detect_analysis_from_history(messages: list) -> bool:
     """Check if any recent user message in the conversation requested analysis.
 
@@ -306,7 +329,7 @@ class IntentClassifierTransformer(Transformer):
 
         # Step 3: Text classification with enriched context (LLM or regex)
         if self._cls.model and self._models_differ:
-            ctx.intent = await classify_intent(
+            _intent, _confidence, _secondary = await classify_intent(
                 last_text,
                 model=self._cls.model,
                 api_key=self._cls.api_key,
@@ -314,6 +337,9 @@ class IntentClassifierTransformer(Transformer):
                 timeout_s=self._cls.timeout,
                 tool_context=tool_context,
             )
+            ctx.intent = _intent
+            ctx.intent_confidence = _confidence
+            ctx.secondary_intent = _secondary or ""
             # Compare LLM vs regex for accuracy validation (doesn't change routing)
             regex_intent = _regex_fallback_intent(last_text)
             # Compare directly without normalization - new intents are distinct
@@ -421,6 +447,29 @@ class IntentClassifierTransformer(Transformer):
             ctx.is_analysis = True
             ctx.analysis_read_count = consecutive_reads
             ctx.phase = "PLAN"
+
+        # Override F: Agent escaped SYNTHESIZING by calling domain tools on previous turn.
+        # If the last assistant message contains READ or WRITE tools, the agent is still
+        # actively working — reset to the appropriate phase instead of staying stuck.
+        # Workflow tools (TodoWrite, EnterPlanMode, etc.) are NOT in READ_TOOLS/WRITE_TOOLS
+        # and are therefore invisible to this override (no phase change).
+        if ctx.analysis_phase == "SYNTHESIZING":
+            last_tools = _get_last_assistant_tools(messages)
+            domain_tools = [t for t in last_tools if t in READ_TOOLS or t in WRITE_TOOLS]
+            if domain_tools:
+                if any(t in WRITE_TOOLS for t in domain_tools):
+                    logger.info(
+                        "[classify] OVERRIDE F: SYNTHESIZING → BUILD (tool=%s)", domain_tools
+                    )
+                    ctx.intent = "BUILD"
+                    ctx.analysis_phase = "NONE"
+                else:
+                    logger.info(
+                        "[classify] OVERRIDE F: SYNTHESIZING → READ (tool=%s)", domain_tools
+                    )
+                    ctx.intent = "READ"
+                    ctx.analysis_phase = "READ"
+                # Do NOT reset consecutive_reads — natural threshold still applies
 
         # Override D (safety net): Too many reads without SYNTHESIZING → force it
         if ctx.analysis_phase == "READ" and consecutive_reads >= self._synth_fallback:

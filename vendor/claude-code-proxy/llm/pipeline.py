@@ -63,6 +63,42 @@ class TransformContext:
     extracted_tool_calls: list = field(default_factory=list)
     xml_tool_buffer: Any = None
 
+    # Set by GroundingValidatorTransformer (response pipeline)
+    # Grounding state for multi-hop evidence tracking
+    evidence_links: dict[str, list[str]] = field(default_factory=dict)
+    # Maps claim → list of (file_path:line, code_snippet) tuples
+
+    citation_map: dict[str, str] = field(default_factory=dict)
+    # Maps citation → file_path (normalized)
+
+    grounding_score: float = 1.0
+    # 0.0-1.0: percentage of claims with verified evidence
+
+    grounding_issues: list[str] = field(default_factory=list)
+    # Specific grounding failures (e.g., "citation points to nonexistent file")
+
+    evidence_graph: dict[str, dict] = field(default_factory=dict)
+    # Multi-hop tracking: entity → {related_entities, citations, code_snippets}
+
+    code_snippet_cache: dict[str, str] = field(default_factory=dict)
+    # Cache of code snippets from tool results for verification
+    # Key: file_path → Value: relevant code snippet (first 500 chars)
+
+    # Set by IntentClassifierTransformer (P3 — confidence scoring)
+    intent_confidence: float = 1.0    # 1.0 = not evaluated (safe default)
+    secondary_intent: str = ""        # secondary intent for multi-task requests
+
+    # Set by AdaptiveContextTransformer (P2 — adaptive routing)
+    adaptive_routing_enabled: bool = False
+    adaptive_routing_used: bool = False
+    adaptive_routing_reason: str = ""
+    model_quality_history: dict = field(default_factory=dict)
+
+    # Set by handle_streaming / stream_response_pipeline (P1)
+    stream_finish_reason: str = "end_turn"
+    stream_input_tokens: int = 0
+    stream_output_tokens: int = 0
+
 
 class Transformer(ABC):
     """Single-responsibility request modifier.

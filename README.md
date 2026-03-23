@@ -31,8 +31,7 @@ Proveedor LLM (Z.AI, Groq, Gemini, DeepSeek, OpenAI, Ollama...)
 
 ```bash
 git clone <repo-url> && cd ai-tooling
-./install.sh        # crea symlinks en ~/.local/bin + scaffolds ai-notes/
-source ~/.zshrc     # agrega ~/.local/bin al PATH
+source ~/.zshrc     # asegura que ~/.local/bin este en el PATH
 ```
 
 ### 2. Configurar proveedor
@@ -83,18 +82,46 @@ ai-tooling/
 |       |-- model_mapper.py      # Claude alias -> modelo real del proveedor
 |       +-- llm_router.py        # Intent classifier (LLM o regex)
 |
+|-- .agents/skills/              # Sistema de skills para agentes (26 SKILL.md files)
+|   |-- skills.md                # Indice global de skills
+|   |-- core/                    # learning-protocol, tool-writer
+|   |-- infrastructure/          # database-expert, gitops-expert
+|   |-- integrations/            # claude-api, documentation-lookup, deep-research
+|   |-- security/                # security-expert, security-review
+|   |-- software/
+|   |   |-- api/                 # api-design, backend-patterns, mcp-server-patterns
+|   |   |-- architecture/        # architect, adr-writer, decision-logger
+|   |   |-- discovery/           # software-archeologist, retro-engineer, unknown-domain-protocol
+|   |   |-- language/go/         # golang-patterns, golang-testing
+|   |   +-- quality/             # bdd-writer, code-reviewer, tdd-workflow, coding-standards,
+|   |                            #   verification-loop, eval-harness
+|   +-- semantic-code-search.md  # Patron de busqueda semantica
+|
+|-- .claude/
+|   |-- hooks/
+|   |   |-- config-protection.sh # Bloquea ediciones a pyproject.toml, ruff.toml, etc.
+|   |   +-- quality-gate.sh      # Ruff check async post-edit en .py files
+|   +-- settings.json            # Claude Code settings (hooks, permissions)
+|
+|-- .mcp.json                    # Configuracion MCP activa (9 servidores)
+|-- .mcp.json.template           # Template para nuevos devs (sin credenciales reales)
+|
 |-- scripts/                     # CLI tools (symlinked a ~/.local/bin/)
 |-- profile-envs/                # Un .env por proveedor (API keys, modelos)
 |-- cloud-provider-ymls/         # Docker compose overrides por proveedor
 |-- profiles/                    # Perfiles JSON para Claude Code CLI
 |-- templates/                   # Plantillas para AI_CONTEXT, AI_PLAN, AI_LEARNING, GUARDRAILS
-|   +-- ralph/                  #   Ralph: autonomous agent framework boilerplate
+|   +-- ralph/                   #   Ralph: autonomous agent framework boilerplate
 |-- ai-notes/                    # Artefactos de sesion (scans, contextos, planes, learnings)
-|-- .env                         # Variables globales (policy defaults)
+|-- context/
+|   +-- run_context.md           # Hechos confirmados del proyecto (runtime, puertos, MCPs)
+|-- docs/
+|   |-- adr/                     # Architecture Decision Records (ADR-NNNN-*.md)
+|   +-- findings/                # Descubrimientos (ledger F-XXX)
+|-- .env                         # Variables globales (policy defaults + credenciales MCP)
 |-- docker-compose.yml           # Servicios Docker (proxy_local + proxy_cloud)
-|-- install.sh                   # Instalador de symlinks y scaffolding
-|-- CLAUDE.md                    # Instrucciones mandatorias para agentes Claude
-+-- CHECKLIST.md                 # Tracker de implementacion
+|-- AGENTS.md                    # Routing de skills para agentes (26 directivas)
++-- CLAUDE.md                    # Instrucciones mandatorias para agentes Claude
 ```
 
 ---
@@ -225,7 +252,7 @@ cc-health --port 8083
 
 ## Scripts (CLI)
 
-Todos los scripts se instalan como symlinks en `~/.local/bin/` via `install.sh`.
+Los scripts se usan directamente desde `scripts/` o instalados como symlinks en `~/.local/bin/`.
 
 ### cc-chat — Chat simple (tools OFF)
 
@@ -354,6 +381,57 @@ cc-ollama-up print-env --prefix cc-local
 
 ---
 
+## MCP Servers
+
+Los MCP servers se configuran en `.mcp.json` (activo) y `.mcp.json.template` (referencia para nuevos devs). Claude Code los carga automaticamente al iniciar sesion en el proyecto.
+
+### Servidores configurados
+
+| Server | Paquete | Auth | Proposito |
+|--------|---------|------|-----------|
+| `alloydb` | `postgres-mcp` (node) | `ALLOYDB_PASSWORD` | Queries a AlloyDB — pricing, cascade, debug |
+| `atlassian` | `uvx mcp-atlassian` | `ATLASSIAN_CONFLUENCE_TOKEN`, `ATLASSIAN_JIRA_API_TOKEN` | Jira issues, Confluence search |
+| `squit` | `npx mcp-remote` | `SQUIT_API_KEY` (header) | Busqueda de stored procedures legacy |
+| `cloudsql` | `bash scripts/cloudsql-mcp.sh` | `WPC_ENV` + per-env vars | CloudSQL (requiere SSH tunnel) |
+| `context7` | `npx @upstash/context7-mcp` | ninguna | Documentacion live de cualquier libreria/framework |
+| `serper` | `npx serper-search-scrape-mcp-server` | `SERPER_API_KEY` | Busqueda web Google via Serper API |
+| `playwright` | `npx @executeautomation/playwright-mcp-server` | ninguna | Automatizacion de browser (chromium) |
+| `sequential-thinking` | `npx @modelcontextprotocol/server-sequential-thinking` | ninguna | Razonamiento encadenado para tareas complejas |
+| `memory` | `npx @modelcontextprotocol/server-memory` | ninguna | Knowledge graph persistente entre sesiones |
+
+### Setup de credenciales
+
+Todas las credenciales se almacenan como variables de entorno en `.env` (nunca en `.mcp.json`):
+
+```bash
+# .env — credenciales MCP
+ALLOYDB_PASSWORD=...
+ATLASSIAN_CONFLUENCE_TOKEN=...
+ATLASSIAN_JIRA_API_TOKEN=...
+SERPER_API_KEY=...
+```
+
+Claude Code expande automaticamente `$VAR_NAME` en los bloques `env` de `.mcp.json`.
+
+### Setup para nuevos devs
+
+```bash
+# 1. Copiar el template
+cp .mcp.json.template .mcp.json
+
+# 2. Llenar las credenciales en .env (ver sección MCP Credentials en CLAUDE.md)
+
+# 3. Instalar dependencias de playwright (solo una vez)
+mkdir -p /tmp/pw157 && cd /tmp/pw157 && \
+  echo '{"name":"tmp","version":"1.0.0"}' > package.json && \
+  npm install playwright@1.57.0 --save-quiet && \
+  ./node_modules/.bin/playwright install chromium
+```
+
+> `alloydb` y `cloudsql` requieren SSH tunnel activo. Los 7 servidores restantes funcionan sin tunnel.
+
+---
+
 ## Guardrails
 
 ### Que son
@@ -394,14 +472,24 @@ El archivo `CLAUDE.md` en la raiz del proyecto contiene instrucciones mandatoria
 - ALL outputs van a ai-notes/
 ```
 
-### Nivel 4: Enforcement automatico (pendiente de implementar)
+### Nivel 4: Hooks de Claude Code (implementado)
 
-Ideas para reforzar mas:
+Configurados en `.claude/settings.json`. Se ejecutan automaticamente sin intervencion del agente:
 
-1. **Hook de pre-tool en Claude Code**: Usar Claude Code hooks para interceptar cada llamada a tool y validar contra el plan antes de ejecutar
-2. **Proxy-side tool gating**: El proxy podria rechazar tool_use blocks que no esten en un allowlist dinamico basado en el plan
-3. **Session-aware guardrails**: El proxy podria leer AI_PLAN.md al inicio y solo permitir acciones listadas en el plan
-4. **Sistema de permisos por archivo**: Solo modificar archivos listados explicitamente en AI_CONTEXT.md
+| Hook | Evento | Archivo | Comportamiento |
+|------|--------|---------|----------------|
+| `config-protection` | PreToolUse (Edit/Write) | `.claude/hooks/config-protection.sh` | Exit 2 si intenta editar `pyproject.toml`, `ruff.toml`, `.pre-commit-config.yaml`, `.eslintrc*`, `.prettierrc*` |
+| `quality-gate` | PostToolUse (Edit/Write) | `.claude/hooks/quality-gate.sh` | Corre `ruff check` async en cada `.py` editado — resultado visible en terminal |
+
+```bash
+# Ver hooks activos
+cat .claude/settings.json | jq .hooks
+```
+
+**Posibles mejoras futuras:**
+- Proxy-side tool gating basado en el plan
+- Session-aware guardrails (leer AI_PLAN.md al inicio)
+- Sistema de permisos por archivo (solo modificar lo listado en AI_CONTEXT.md)
 
 ---
 
@@ -415,7 +503,7 @@ Las plantillas son **inmutables** — nunca se modifican directamente. Se copian
 |----------|-----------|---------------|
 | `AI_CONTEXT.template.md` | Define scope, inputs, outputs permitidos, comandos | El humano lo llena al inicio de cada tarea |
 | `AI_PLAN.template.md` | Estructura del plan con pasos atomicos, riesgos, validacion | `cc-plan` lo usa como guia para generar el plan |
-| `AI_LEARNING.template.md` | Estructura para capturar patrones, errores, decisiones | Se scaffoldea en `ai-notes/` via `install.sh` |
+| `AI_LEARNING.template.md` | Estructura para capturar patrones, errores, decisiones | Se scaffoldea en `ai-notes/` via scaffolding manual |
 | `GUARDRAILS.template.md` | Reglas core de seguridad y feedback loop | Agentes lo leen al inicio de cada sesion |
 
 ### ai-notes/ (artefactos de sesion)
@@ -428,11 +516,11 @@ Las plantillas son **inmutables** — nunca se modifican directamente. Se copian
 | `AI_PLAN.md` | `cc-plan` (STATUS: DRAFT) | Humano revisa -> REVIEWED. `cc-agent-cloud` valida |
 | `AI_LEARNING.md` | Agentes + humanos al final de sesion | Todos los agentes al inicio de sesion |
 | `*.analysis.md` | `cc-scan` | Humano, `cc-plan` (referencia en AI_CONTEXT) |
-| `GUARDRAILS.md` | `install.sh` (copia de template) | Agentes al inicio de sesion |
+| `GUARDRAILS.md` | Copia manual de template | Agentes al inicio de sesion |
 
 ### Como pasar esto a Claude Code
 
-Para que Claude Code respete los guardrails y templates, hay **tres mecanismos**:
+Para que Claude Code respete los guardrails y templates, hay **cuatro mecanismos**:
 
 **1. CLAUDE.md (automatico)**
 
@@ -450,108 +538,169 @@ Los scripts (`cc-agent-cloud`, `cc-plan`, `cc-scan`) actuan como wrappers que:
 - Ponen el system prompt correcto
 - Redirigen output a `ai-notes/`
 
+**4. Hooks de Claude Code (`.claude/hooks/`)**
+
+Hooks de ciclo de vida configurados en `.claude/settings.json`. Se ejecutan automaticamente sin intervencion del agente — ver [Nivel 4: Hooks](#nivel-4-hooks-de-claude-code-implementado).
+
+---
+
+## Agent Skills
+
+El sistema de skills es un mecanismo de routing documentation-driven. No hay plugin registry ni codigo — Claude lee un archivo SKILL.md y adopta la persona/protocolo descrito.
+
+### Como funciona la cadena de carga
+
+```
+CLAUDE.md  (auto-cargado por Claude Code)
+    |
+    |-- "Read @AGENTS.md"
+    v
+AGENTS.md  (26 directivas de routing)
+    |
+    |-- "Si X, MUST read .agents/skills/categoria/skill/SKILL.md"
+    v
+SKILL.md   (frontmatter: name + description + body con persona y protocolo)
+```
+
+Claude Code carga `CLAUDE.md` automaticamente. `CLAUDE.md` referencia `AGENTS.md`. `AGENTS.md` mapea intenciones → archivos `SKILL.md`. Cuando Claude lee un `SKILL.md`, adopta la persona y sigue el protocolo definido en el body.
+
+### Skills instalados (26)
+
+| Categoria | Skill | Trigger en AGENTS.md |
+|-----------|-------|----------------------|
+| **Core** | `learning-protocol` | Nuevo concepto aprendido, patron reutilizable |
+| **Core** | `tool-writer` | Necesitas crear un nuevo tool o script |
+| **Architecture** | `architect` | Diseñar sistema, revisar componentes |
+| **Architecture** | `adr-writer` | Tomar o confirmar una decision arquitectural |
+| **Architecture** | `decision-logger` | Extraer decision embebida en codigo |
+| **Discovery** | `software-archeologist` | Reverse engineering, executions graph |
+| **Discovery** | `retro-engineer` | Backtrack comportamiento → entry point |
+| **Discovery** | `unknown-domain-protocol` | Dominio completamente desconocido |
+| **Quality** | `bdd-writer` | Specs Gherkin, feature files BDD |
+| **Quality** | `code-reviewer` | Review de PR, auditoria de diff |
+| **Quality** | `tdd-workflow` | Escribir features o bugs (test-first) |
+| **Quality** | `coding-standards` | Linting Python/JS/TS, gates de formato |
+| **Quality** | `verification-loop` | Verificar correctitud post-implementacion |
+| **Quality** | `eval-harness` | Harness de evals, scoring de outputs LLM |
+| **Infrastructure** | `database-expert` | AlloyDB, SQL, MCP data tools, schema |
+| **Infrastructure** | `gitops-expert` | Docker, CI/CD, GitHub Actions, infra |
+| **Integrations** | `claude-api` | Anthropic SDK, streaming, tool use, caching |
+| **Integrations** | `documentation-lookup` | Docs live via Context7 MCP |
+| **Integrations** | `deep-research` | Investigacion multi-fuente (serper + context7) |
+| **Security** | `security-expert` | Threat modeling, hardening, vulnerabilidades |
+| **Security** | `security-review` | Code review de seguridad en diffs y PRs |
+| **API** | `api-design` | Diseño REST, OpenAPI specs, versionado |
+| **API** | `backend-patterns` | Error handling, paginacion, rate limiting |
+| **API** | `mcp-server-patterns` | Construir MCP servers (stdio vs HTTP) |
+| **Go** | `golang-patterns` | Go idiomatico: interfaces, errors, concurrency |
+| **Go** | `golang-testing` | Tests Go, table-driven tests, benchmarks |
+
+Indice completo: `.agents/skills/skills.md`
+
+### ADR-First Mandate
+
+**HARD STOP** — antes de cambiar cualquier arquitectura del proxy o skill core, debes escribir un ADR:
+
+```
+1. Descubrir la decision de diseño necesaria
+2. Crear docs/adr/ADR-NNNN-<titulo>.md
+3. Commitear ADR + codigo juntos
+```
+
+### Hooks de ciclo de vida
+
+Configurados en `.claude/settings.json`, ejecutados automaticamente por Claude Code:
+
+| Hook | Evento | Que hace |
+|------|--------|----------|
+| `config-protection.sh` | PreToolUse (Edit/Write) | Bloquea ediciones a `pyproject.toml`, `ruff.toml`, `.pre-commit-config.yaml` |
+| `quality-gate.sh` | PostToolUse (Edit/Write) | Corre `ruff check` async en `.py` files editados |
+
 ---
 
 ## Ralph — Autonomous Agent Framework
 
-Ralph es un framework para ejecutar Claude Code en un loop automatizado con ejecucion por fases, auto-tracking de progreso, persistencia de conocimiento, y circuit breaker.
+Ralph es un framework para ejecutar Claude Code en un loop automatizado con rate limiting, ejecucion por fases, auto-tracking de progreso, circuit breaker, y session persistence.
 
-### Boilerplate
+Hay dos ubicaciones relevantes:
 
-El boilerplate esta en `templates/ralph/` con la siguiente estructura:
+| Ubicacion | Proposito |
+|-----------|-----------|
+| `vendor/ralph/` | **Implementacion real** — scripts ejecutables, lib/, setup |
+| `templates/ralph/` | **Boilerplate** — templates para nuevos proyectos |
+
+### Implementacion — `vendor/ralph/`
 
 ```
-templates/ralph/
-├── .ralphrc.template                    # Config raiz (calls/hour, timeout, tools)
-├── README.md                            # Guia de setup completa
-└── .ralph/
-    ├── claude-ralph.md                  # Identidad del agente (generico, usar as-is)
-    ├── AGENT.md.template                # Tipo de proyecto, comandos build/test
-    ├── PROMPT.md.template               # Objetivo principal y workflow
-    ├── fix_plan.md.template             # Checklist de tareas por fase [ ] / [x]
-    ├── specs/
-    │   ├── ai_learning.md.template      # Registro de conocimiento (Ralph lo llena)
-    │   └── schema_reference.md.template # Referencia de dominio (read-only)
-    ├── prompts/
-    │   └── fase-template.md             # Template generico para prompts por fase
-    ├── hooks/
-    │   └── validate-file-boundary.sh.template  # Hook PreToolUse (bloquea ediciones fuera de scope)
-    ├── status.json.template             # Estado de ejecucion inicial
-    └── progress.json.template           # Progreso general inicial
+vendor/ralph/
+├── ralph_loop.sh          # Loop principal con rate limiting y session management
+├── ralph_enable.sh        # Setup interactivo de Ralph en un proyecto
+├── ralph_enable_ci.sh     # Setup no-interactivo para CI
+├── ralph_import.sh        # Importa Ralph a un proyecto existente
+├── ralph_monitor.sh       # Monitor de estado en tiempo real
+├── setup.sh               # Instalacion de symlinks
+├── migrate_to_ralph_folder.sh  # Migracion desde estructura legacy
+├── claude-stdio           # Wrapper Claude Code stdio (streaming live output)
+├── lib/
+│   ├── circuit_breaker.sh # Detiene el loop si no hay progreso (3 fallos = STOP)
+│   ├── date_utils.sh      # Rate limiting — ventana de 1 hora
+│   ├── timeout_utils.sh   # Timeout por llamada a Claude
+│   ├── response_analyzer.sh  # Parsea ---RALPH_STATUS--- blocks
+│   ├── task_sources.sh    # Carga tareas desde fix_plan.md o PROMPT.md
+│   ├── wizard_utils.sh    # CLI interactivo para ralph_enable.sh
+│   └── enable_core.sh     # Core logic compartido entre enable/enable_ci
+└── templates/             # Boilerplate para nuevos proyectos (AGENT.md, PROMPT.md, fix_plan.md)
 ```
 
-### Quick Start — `ralph-init`
-
-La forma mas rapida de deployar Ralph en un proyecto:
+### Quick Start
 
 ```bash
-# Interactivo — te pregunta nombre, tipo, directorio de trabajo, etc.
+# 1. Instalar ralph (crea symlinks en ~/.local/bin/)
+cd vendor/ralph && ./setup.sh
+
+# 2. Inicializar Ralph en un proyecto
+ralph-enable --target /path/to/your/project       # interactivo
+ralph-enable-ci --target /path/to/your/project \  # non-interactivo (CI)
+  --name my-app --type python --workdir src/
+
+# 3. Configurar .ralph/PROMPT.md y .ralph/fix_plan.md
+
+# 4. Ejecutar el loop
+ralph-loop                                         # desde el directorio del proyecto
+```
+
+### `ralph-init` — desde scripts/
+
+Si usas `ralph-init` (en `scripts/`), scaffoldea un proyecto desde `templates/ralph/`:
+
+```bash
 ralph-init --target /path/to/your/project
-
-# Non-interactivo (CI/scripted)
-ralph-init --target /path/to/your/project \
-  --name my-app --type python --workdir src/ --desc "My app"
-
-# Forzar overwrite si ya existe .ralph/
-ralph-init --target . --force
+ralph-init --target . --force   # overwrite si ya existe .ralph/
 ```
 
-El script automaticamente:
-1. Copia todos los archivos de `templates/ralph/`
-2. Renombra los `.template` (quita el sufijo)
-3. Rellena los 5 placeholders de proyecto (`PROJECT_NAME`, `PROJECT_TYPE`, `PROJECT_ROOT`, `WORKING_DIRECTORY`, `PROJECT_DESCRIPTION`)
-4. Crea `.ralph/logs/`
-5. Configura el hook en `.claude/settings.json` (opcional)
-6. Imprime un resumen con los pasos restantes
+**Rellena automaticamente:** `PROJECT_NAME`, `PROJECT_TYPE`, `PROJECT_ROOT`, `WORKING_DIRECTORY`, `PROJECT_DESCRIPTION` en todos los templates.
 
-**Opciones:**
+### `ralph_loop.sh` — caracteristicas clave
 
-| Flag | Descripcion | Default |
-|------|-------------|---------|
-| `--target DIR` | Directorio destino | `pwd` |
-| `--name NAME` | Nombre del proyecto | `basename $TARGET` |
-| `--type TYPE` | Tipo: sql, python, typescript, rust | `python` |
-| `--root PATH` | Root absoluto para file boundary | `$TARGET` |
-| `--workdir DIR` | Directorio de trabajo (relativo) | `src/` |
-| `--desc TEXT` | Descripcion del proyecto | `$NAME project` |
-| `--force` | Overwrite sin confirmar | - |
-| `--no-hook` | No configurar `.claude/settings.json` | - |
+| Feature | Detalle |
+|---------|---------|
+| **Rate limiting** | `MAX_CALLS_PER_HOUR` (default 100). Espera si se alcanza el limite |
+| **Session persistence** | `--continue` entre loops para mantener contexto entre llamadas |
+| **Circuit breaker** | 3 loops sin progreso → STOP automatico (lib/circuit_breaker.sh) |
+| **Timeout por llamada** | `CLAUDE_TIMEOUT_MINUTES` (default 15) via lib/timeout_utils.sh |
+| **Live output** | `LIVE_OUTPUT=true` — streaming en tiempo real via SSE parser (`llm/sse.py`) |
+| **Status tracking** | `---RALPH_STATUS---` blocks machine-readable en cada respuesta |
+| **Tool profiles** | `CLAUDE_ALLOWED_TOOLS` configurable por proyecto |
 
-**Despues de `ralph-init`**, quedan los placeholders de tarea por llenar:
+### 3 Archivos Semanticos
 
-1. Editar `.ralph/AGENT.md` — comandos de build/test, checklist de validacion
-2. Editar `.ralph/PROMPT.md` — objetivo, descripcion, criterios de exito
-3. Editar `.ralph/fix_plan.md` — titulos de fases y descripciones de tareas
-4. Editar `.ralph/specs/schema_reference.md` — referencia de dominio
-5. Crear prompts por fase:
-   ```bash
-   cp .ralph/prompts/fase-template.md .ralph/prompts/fase-0.md
-   # Llenar tareas especificas de la fase
-   ```
+Ralph lee estos tres archivos **antes de cualquier accion**:
 
-**Ejecutar Ralph:**
-
-```bash
-# Una fase especifica
-claude --print --append-system-prompt "$(cat .ralph/claude-ralph.md)" \
-  --allowedTools "$(grep ALLOWED_TOOLS .ralphrc | cut -d'"' -f2)" \
-  -p "$(cat .ralph/prompts/fase-0.md)"
-
-# Prompt principal (todas las fases)
-claude --print --append-system-prompt "$(cat .ralph/claude-ralph.md)" \
-  --allowedTools "$(grep ALLOWED_TOOLS .ralphrc | cut -d'"' -f2)" \
-  -p "$(cat .ralph/PROMPT.md)"
-```
-
-### Conceptos clave
-
-| Concepto | Descripcion |
-|----------|-------------|
-| **3 Archivos Semanticos** | `fix_plan.md` (tareas), `ai_learning.md` (conocimiento), `schema_reference.md` (referencia). Ralph los lee ANTES de cualquier accion |
-| **Ejecucion por fases** | Tareas organizadas en fases secuenciales (0, 1, 2...) con pre-requisitos |
-| **Status Protocol** | Bloques `---RALPH_STATUS---` machine-readable al final de cada fase |
-| **Circuit Breaker** | 3 loops sin progreso o 3 errores identicos = STOP automatico |
-| **File Boundary** | Hook PreToolUse bloquea ediciones fuera del directorio permitido |
+| Archivo | Quien lo crea | Proposito |
+|---------|--------------|-----------|
+| `.ralph/fix_plan.md` | Humano | Checklist de tareas por fase `[ ]` / `[x]` |
+| `.ralph/specs/ai_learning.md` | Ralph (se auto-actualiza) | Conocimiento acumulado del dominio |
+| `.ralph/specs/schema_reference.md` | Humano (read-only) | Referencia del dominio (esquemas, APIs, reglas) |
 
 ### Perfiles de herramientas
 
@@ -560,8 +709,6 @@ claude --print --append-system-prompt "$(cat .ralph/claude-ralph.md)" \
 | Solo lectura | `Read,Glob,Grep` | Analisis/auditoria |
 | Modificacion | `Write,Read,Edit,Glob,Grep` | Default — modificar codigo |
 | Acceso completo | `Write,Read,Edit,Glob,Grep,Bash` | Build, test, deploy |
-
-Para documentacion completa ver [templates/ralph/README.md](templates/ralph/README.md).
 
 ---
 
@@ -675,7 +822,9 @@ vim vendor/claude-code-proxy/server.py
 docker logs -f ai-tooling-proxy_cloud-1
 ```
 
-### Arquitectura del proxy
+### Arquitectura del proxy — Transformer Pipeline
+
+El proxy usa un patrón de **pipeline de transformers** (refactor mayor desde la v1 monolítica). Cada transformer tiene una sola responsabilidad y escribe/lee de un `TransformContext` compartido.
 
 ```
 Request (Anthropic format)
@@ -683,35 +832,94 @@ Request (Anthropic format)
     v
 [server.py] POST /v1/messages
     |
-    |-- get_last_user_text() -> extrae texto del ultimo mensaje
-    |-- classify_intent() -> CHAT | PLANNING | BUILDING
+    v
+━━━ PHASE 1: Request Pipeline (Anthropic format) ━━━━━━━━━━━━━━━━
+    |
+    |-- IntentClassifierTransformer  → intent: CHAT|PLANNING|BUILDING
+    |                                  phase: EXPLORE|PLAN|EXECUTE
+    |-- IntentEnforcementTransformer → valida compliance con intent
+    |-- GuardrailTransformer         → inyecta policy note en system
+    |-- DeferredToolsTransformer     → inyecta <available-deferred-tools> (plan mode)
+    |-- TokenCapTransformer          → checa/aplica MAX_INPUT_TOKENS
+    |-- ToolAllowlistTransformer     → filtra tools segun TOOL_ALLOWLIST
+    |-- AdaptiveContextTransformer   → routing adaptivo basado en historial
+    |-- ModelRouterTransformer       → mapea modelo segun intent + config
     |
     v
-[proxy/proxy.py] apply_policy_and_routing()
-    |
-    |-- Valida TOOL_ALLOWLIST
-    |-- Checa MAX_INPUT_TOKENS
-    |-- Mapea modelo segun intent:
-    |     CHAT -> SMALL_MODEL
-    |     PLANNING -> BIG_MODEL
-    |     BUILDING -> BUILDING_MODEL
-    |-- Inyecta POLICY_NOTE si activo
+[convert_anthropic_to_litellm()]  → convierte al formato del proveedor
     |
     v
-[llm/converters.py] convert_anthropic_to_litellm()
+━━━ PHASE 2: LiteLLM Pipeline ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     |
-    |-- Strips thinking blocks (OpenAI no los soporta)
-    |-- Limpia schemas para Gemini (clean_gemini_schema)
-    |-- Convierte content blocks (text, tool_use, tool_result, image)
-    |
-    v
-[LiteLLM] -> Proveedor API
+    |-- CompressionTransformer       → comprime contexto si excede ventana
+    |-- ProviderQuirksTransformer    → fixes especificos por proveedor
+    |-- CredentialTransformer        → inyecta API key/base_url
     |
     v
-[llm/converters.py] convert_litellm_to_anthropic()
+         ┌──────────────────────────────────────────┐
+         │  4 EXECUTION PATHS (auto-detectados)     │
+         │                                          │
+         │  A. LiteLLM non-stream                   │
+         │  B. LiteLLM stream (SSE)                 │
+         │  C. Passthrough non-stream *             │
+         │  D. Passthrough stream (SSE) *           │
+         │                                          │
+         │  * Passthrough: Anthropic-compatible     │
+         │    endpoints (Z.AI) sin conversión,      │
+         │    enviado directamente via httpx         │
+         └──────────────────────────────────────────┘
     |
     v
-Response (Anthropic format) -> Claude Code CLI
+━━━ RESPONSE Pipeline (AGNOSTIC — todos los paths) ━━━━━━━━━━━━━━
+    |
+    |-- ReasoningHandlingTransformer    → limpia thinking blocks
+    |-- UniversalToolExtractionTransformer → extrae tool calls de XML
+    |-- GroundingValidatorTransformer   → valida evidencia de claims
+    |-- ModelFeedbackTransformer        → scoring y feedback al modelo
+    |-- QualityRecorderTransformer      → registra metricas de calidad
+    |
+    v
+Response (Anthropic format) → Claude Code CLI
+```
+
+#### Archivos clave del proxy
+
+```
+vendor/claude-code-proxy/
+|-- server.py                    # FastAPI — endpoints, pipeline bootstrap
+|-- config.py                    # ProxyConfig — toda la configuracion tipada
+|-- proxy/proxy.py               # build_request_pipeline, build_response_pipeline, run_messages
+|-- llm/
+|   |-- pipeline.py              # Transformer, Pipeline, TransformContext (ABC + dataclass)
+|   |-- converters.py            # convert_anthropic_to_litellm, convert_litellm_to_anthropic
+|   |-- passthrough.py           # PassthroughClient — httpx directo a Anthropic-compatible APIs
+|   |-- compressor.py            # Context compression + grounding hop tracking
+|   |-- streaming.py             # SSE streaming handler
+|   |-- sse.py                   # SSE parser para live output en ralph
+|   |-- schemas.py               # Pydantic models (MessagesRequest, content blocks)
+|   +-- transformers/
+|       |-- intent_classifier.py    # CHAT | PLANNING | BUILDING + EXPLORE|PLAN|EXECUTE
+|       |-- intent_enforcement.py   # Valida compliance con intent clasificado
+|       |-- guardrail.py            # Policy note injection en system prompt
+|       |-- deferred_tools.py       # Plan mode DX: inyecta available-deferred-tools
+|       |-- token_cap.py            # MAX_INPUT_TOKENS enforcement
+|       |-- tool_allowlist.py       # TOOL_ALLOWLIST filtering
+|       |-- adaptive_context.py     # Adaptive routing basado en model quality history
+|       |-- model_router.py         # Model selection segun intent + config
+|       |-- compression.py          # CompressionTransformer
+|       |-- provider_quirks.py      # Fixes por proveedor (Gemini schema, etc.)
+|       |-- credential.py           # API key/base_url injection
+|       |-- reasoning_handling.py   # Limpieza de thinking blocks
+|       |-- universal_tool_extraction.py  # Tool extraction de XML (model-agnostic)
+|       |-- grounding_validator.py  # Evidencia de claims, citation map
+|       |-- model_feedback.py       # Scoring y feedback
+|       +-- quality_recorder.py     # Metricas de calidad
+|-- router/
+|   |-- llm_router.py            # Intent classifier LLM (con regex fallback)
+|   +-- model_mapper.py          # Claude alias → modelo real del proveedor
++-- utils/
+    |-- metrics.py               # RequestLog, metricas por sesion
+    +-- utils.py                 # Token cache, scale_tokens
 ```
 
 ### Endpoints del proxy
@@ -721,6 +929,8 @@ Response (Anthropic format) -> Claude Code CLI
 | `/v1/messages` | POST | Endpoint principal. Recibe Anthropic format, rutea y responde |
 | `/v1/messages/count_tokens` | POST | Conteo de tokens (usa LiteLLM con fallback heuristico) |
 | `/health` | GET | Status, provider, modelos configurados |
+| `/api/logs` | GET | Ultimos N request logs (`?n=20`) |
+| `/api/stats` | GET | Metricas de sesion (tokens, intents, latencias) |
 
 ---
 
@@ -730,14 +940,15 @@ Response (Anthropic format) -> Claude Code CLI
 
 #### 1. Thinking Blocks (HTTP 422 Error)
 **Problema:** OpenAI/Gemini no soportan `thinking` blocks de Anthropic, causando HTTP 422.
-**Solución:** Agregados `ContentBlockThinking`, `ContentBlockRedactedThinking`, `ContentBlockServerToolUse`, `ContentBlockServerToolResult` a `schemas.py`. Thinking blocks son removidos en `converters.py` al convertir a OpenAI format.
+**Solución:** `ReasoningHandlingTransformer` (response pipeline) strip thinking blocks antes de devolver la respuesta. Schemas Pydantic actualizados en `schemas.py` para parsear todos los tipos de content blocks.
+- `vendor/claude-code-proxy/llm/transformers/reasoning_handling.py`
 - `vendor/claude-code-proxy/llm/schemas.py`
-- `vendor/claude-code-proxy/llm/converters.py`
 
 #### 2. Single-Quote Tool Calls (Tool Execution Fix)
 **Problema:** deepseek-reasoner outputs `<tool_call name='X'>` con SINGLE quotes + Python dict syntax `{'key': 'val'}`.
-**Solución:** Actualizados todos los regexes (`_TOOL_CALL_RE`, `_TOOL_CALL_FALLBACK_RE`, `_TOOL_CALL_BARE_RE`, `_PARTIAL_TOOL_RE`) para aceptar ambos estilos de quotes via `_NAME_ATTR` pattern. `json_repair` convierte Python dict → JSON.
-- `vendor/claude-code-proxy/llm/converters.py`
+**Solución:** `UniversalToolExtractionTransformer` maneja todos los formatos via `utils/tool_extraction_patterns.py`. `json_repair` convierte Python dict → JSON.
+- `vendor/claude-code-proxy/llm/transformers/universal_tool_extraction.py`
+- `vendor/claude-code-proxy/utils/tool_extraction_patterns.py`
 
 #### 3. Token Counting
 **Problema:** Heurística chars/4 no es precisa.

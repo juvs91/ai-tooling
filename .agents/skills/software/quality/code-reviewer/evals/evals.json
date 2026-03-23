@@ -1,0 +1,56 @@
+{
+  "skill_name": "code-reviewer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review this file:\n```python\nimport threading\n\nclass CardMonitor:\n    def __init__(self):\n        self.running = False\n        self._thread = None\n        self._last_uid = None\n    \n    def start(self):\n        self.running = True\n        self._thread = threading.Thread(target=self._poll)\n        self._thread.start()\n    \n    def _poll(self):\n        while self.running:\n            try:\n                uid = self._read_card()\n                if uid != self._last_uid:\n                    self._last_uid = uid\n                    self.on_card_detected(uid)\n            except Exception:\n                pass  # ignore errors\n    \n    def stop(self):\n        self.running = False\n```",
+      "expected_output": "Findings: (1) BUG/RACE — self.running is a plain bool accessed from two threads without a lock or threading.Event; (2) BUG — broad except Exception: pass swallows all errors including CardConnectionError — masked failures will look like card absence; (3) ROBUSTNESS — stop() sets running=False but doesn't join the thread — caller can't know when polling has stopped; (4) CORRECTNESS — self._last_uid is written from the poll thread and potentially read from the main thread (race condition); (5) MAINTAINABILITY — on_card_detected is never defined — undefined method call at runtime.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Identifies the threading race condition on self.running (not thread-safe)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Flags the broad except Exception: pass as exception swallowing",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Flags missing thread.join() in stop() as a correctness issue",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Identifies on_card_detected as undefined (will raise AttributeError at runtime)",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Review this commit: it adds 3 new public methods to the encryption module but has no ADR in the PR. The commit message is 'add AES-GCM support'.",
+      "expected_output": "Step 0 (ADR coverage check) triggers: new public API added to library without an ADR. Finding: ADR-MISSING | CRITICAL | encryption.py | 3 new public methods (AES-GCM API) added without ADR | Write ADR before merging. The review should flag this as a blocker. If the commit message contains [skip-adr], the reviewer verifies it's trivial — 3 new public API methods is not trivial, so the bypass is rejected.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Step 0 (ADR coverage check) runs first and catches the missing ADR",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Finding is marked as CRITICAL and as a merge blocker",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Recommends writing the ADR before merging (not just noting the gap)",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

@@ -20,8 +20,10 @@ streaming.py is now a thin re-export shim — all logic lives here.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -46,7 +48,119 @@ from llm.transformers.universal_tool_extraction import (
     strip_tool_call_xml,
 )
 
+# Import these via TYPE_CHECKING to avoid circular dependency
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from llm.transformers.quality_refinement import _validate_intent_outcome
+
 logger = logging.getLogger(__name__)
+
+
+# ── Post-Stream Grounding Validation ───────────────────────────────────────
+
+async def _run_post_stream_validation(
+    accumulated_text: str,
+    tool_names: list[str],
+    request: Any,
+    ctx: TransformContext,
+    cfg: Any,
+    session_id: str | None = None,
+) -> None:
+    """Run grounding validation on accumulated streaming response after completion.
+
+    This function is called AFTER the streaming response completes to validate
+    grounding for streaming requests. The validation runs asynchronously and
+    doesn't block the client response.
+
+    Args:
+        accumulated_text: Full accumulated text from the streaming response
+        tool_names: List of tool names used in the response
+        request: Original request object (for messages access)
+        ctx: TransformContext with intent/analysis state
+        cfg: ProxyConfig with grounding settings
+        session_id: Optional session ID for multi-hop tracking
+    """
+    # Import here to avoid circular dependency
+    from llm.transformers.grounding_validator import GroundingValidatorTransformer
+    from llm.compressor import _track_grounding_hop
+
+    # Skip if grounding validation is disabled or not in analysis mode
+    if not ctx.is_analysis:
+        return
+    if not getattr(cfg, "policy", None):
+        return
+    if not cfg.policy.grounding_validation_enabled:
+        return
+
+    # Skip if no text to validate
+    if not accumulated_text.strip():
+        logger.debug("[post-stream-grounding] No text to validate (text_len=%d)", len(accumulated_text))
+        return
+
+    # Skip if response was tool-only (no explanatory text)
+    # This is normal for PLAN mode where model outputs tool_use directly
+    if len(accumulated_text.strip()) < 100 and not tool_names:
+        logger.debug("[post-stream-grounding] Tool-only response, skipping grounding validation")
+        return
+
+    logger.info(
+        "[post-stream-grounding] Start: text_len=%d tools=%d is_analysis=%s grounding=%s multihop=%s",
+        len(accumulated_text), len(tool_names), ctx.is_analysis,
+        getattr(cfg, "policy", {}).get("grounding_validation_enabled", False) if hasattr(cfg, "policy") else False,
+        getattr(cfg, "policy", {}).get("multihop_grounding_enabled", False) if hasattr(cfg, "policy") else False
+    )
+
+    # Create a mock response object for GroundingValidator
+    from types import SimpleNamespace
+    mock_response = SimpleNamespace(
+        content=[{"type": "text", "text": accumulated_text}],
+        messages=getattr(request, "messages", []),
+    )
+
+    # Run grounding validation
+    grounding_validator = GroundingValidatorTransformer(enabled=True)
+
+    # Create a new context for validation (reuse key fields from ctx)
+    validation_ctx = TransformContext(
+        intent=ctx.intent,
+        is_analysis=ctx.is_analysis,
+        phase=ctx.phase,
+        analysis_phase=ctx.analysis_phase,
+        session_id=session_id,
+    )
+
+    await grounding_validator.transform(mock_response, validation_ctx)
+
+    # Log grounding results
+    logger.info(
+        "[post-stream-grounding] Complete: score=%.0f%% citations=%d issues=%d multihop=%s",
+        validation_ctx.grounding_score * 100,
+        len(validation_ctx.evidence_links),
+        len(validation_ctx.grounding_issues),
+        "YES" if (session_id and hasattr(cfg, "policy") and cfg.policy.multihop_grounding_enabled) else "NO"
+    )
+
+    # Track multi-hop relationships if enabled
+    if session_id and cfg.policy.multihop_grounding_enabled if hasattr(cfg, "policy") and hasattr(cfg.policy, "multihop_grounding_enabled") else False:
+
+        # Track grounding hops for multi-hop validation
+        # This is async but runs in background, doesn't block the response
+        for citation, evidence in validation_ctx.evidence_links.items():
+            file_path = evidence[0] if evidence else ""
+            if file_path:
+                # Extract entity from citation
+                entity_a = citation.split(":")[0].split("/")[-1].split(".")[0] if citation else ""
+                if entity_a and file_path:
+                    await _track_grounding_hop(
+                        session_id=session_id,
+                        entity_a=entity_a,
+                        entity_b=f"{entity_a}_verified",
+                        evidence=[citation],
+                        code_snippet=evidence[1] if len(evidence) > 1 else "",
+                    )
+
+
+# ── Constants ───────────────────────────────────────────────────────────────
 
 # Known Claude Code workflow tools injected via <available-deferred-tools> in system prompt.
 # These must never be filtered as "hallucinated" — models may legitimately call them even
@@ -1026,11 +1140,44 @@ async def passthrough_xml_tool_extraction(stream_gen: Any, request: Any):
                             yield ev
                         next_tool_index += 1
                     elif seg["type"] == "incomplete_tool_call":
-                        print(
-                            f"[passthrough-xml] incomplete tool call at stream end "
-                            f"({len(seg.get('text', ''))} chars): {seg.get('text', '')[:100]}",
-                            flush=True,
+                        partial_xml = seg.get("text", "")
+                        logger.warning(
+                            "[passthrough-xml] incomplete_tool_call at stream end (%d chars) — attempting recovery",
+                            len(partial_xml),
                         )
+                        # Attempt 3-level recovery (deterministic → LLM → strip)
+                        _recovery_model = os.environ.get("CLASSIFIER_MODEL", "openai/deepseek-chat")
+                        _recovery_key = (
+                            os.environ.get("CLASSIFIER_API_KEY")
+                            or os.environ.get("ANTHROPIC_API_KEY", "")
+                        )
+                        recovered = await recover_incomplete_tool_call(
+                            partial_xml=partial_xml,
+                            tools=raw_tools,
+                            model=_recovery_model,
+                            api_key=_recovery_key,
+                        )
+                        if recovered:
+                            if not text_block_closed:
+                                yield sse.content_block_stop(text_block_index)
+                                text_block_closed = True
+                            for tc in recovered:
+                                for ev in _emit_tool_use_block(tc["name"], tc["input"], next_tool_index):
+                                    yield ev
+                                next_tool_index += 1
+                            logger.info(
+                                "[passthrough-xml] recovered %d tool(s) from incomplete XML",
+                                len(recovered),
+                            )
+                        else:
+                            # Final fallback: emit clean text so model sees what it produced
+                            clean = strip_tool_call_xml(partial_xml)
+                            if clean and not text_block_closed:
+                                yield sse.text_delta(text_block_index, clean)
+                            logger.warning(
+                                "[passthrough-xml] recovery failed — emitting %d chars as text",
+                                len(clean) if clean else 0,
+                            )
 
                 if text_block_closed:
                     # We already emitted our own content_block_stop — suppress upstream's
@@ -1087,11 +1234,39 @@ async def accumulate_stream(
             if evt_type == "content_block_delta":
                 delta = data.get("delta", {})
                 if delta.get("type") == "text_delta":
-                    text_parts.append(delta.get("text", ""))
+                    text = delta.get("text", "")
+                    text_parts.append(text)
+                    # Detect XML tool calls from GLM-4.7 / Z.AI passthrough.
+                    # Path A (handle_streaming + XmlToolBuffer) already converts these
+                    # to native SSE for CC. This path only needs accurate counts for
+                    # quality heuristics so scores don't falsely hit 0.00.
+                    if "<invoke name=" in text or "<tool_call" in text or "\uff5cDSML\uff5c" in text:
+                        for m in re.finditer(
+                            r'<invoke\s+name=["\']([^"\']+)["\']'
+                            r'|<tool_call\s+name=["\']([^"\']+)["\']'
+                            r'|\uff5cDSML\uff5cinvoke\s+name=["\']([^"\']+)["\']',
+                            text,
+                        ):
+                            tool_names.append(m.group(1) or m.group(2) or m.group(3))
             elif evt_type == "content_block_start":
                 block = data.get("content_block", {})
                 if block.get("type") == "tool_use":
                     tool_names.append(block.get("name", "unknown"))
+
+    # Strip XML tool blocks from accumulated text so quality heuristics score prose only.
+    # H7/H17 penalize XML as "unverified claims" — removing it prevents false 0.00 scores.
+    # IMPORTANT: join first, then strip — XML blocks span multiple SSE chunks so per-chunk
+    # regex would never match the full <invoke>...</invoke> pattern.
+    if tool_names:
+        full_text = "".join(text_parts)
+        full_text = re.sub(r"<function_calls>.*?</function_calls>", "", full_text, flags=re.DOTALL)
+        full_text = re.sub(r"<tool_call[^>]*>.*?</tool_call>", "", full_text, flags=re.DOTALL)
+        full_text = re.sub(r"<invoke[^>]*>.*?</invoke>", "", full_text, flags=re.DOTALL)
+        # Also strip DSML format: <｜DSML｜invoke ...>...</｜DSML｜invoke>
+        full_text = re.sub(r"\uff5cDSML\uff5cinvoke[^>]*>.*?\uff5cDSML\uff5c/invoke>", "", full_text, flags=re.DOTALL)
+        text_parts.clear()
+        if full_text.strip():
+            text_parts.append(full_text)
 
     return "".join(text_parts), chunks, tool_names
 
@@ -1108,7 +1283,7 @@ async def tracked_stream(
     then updates the most recent streaming RequestLog with quality score and
     output tokens after the stream completes.
     """
-    from llm.transformers.quality_refinement import _validate_intent_outcome
+    
 
     text_parts: list[str] = []
     tool_names: list[str] = []
@@ -1159,7 +1334,16 @@ async def tracked_stream(
     ctx.quality_score = q_score
     ctx.quality_issues = q_issues
 
+    # P2: Record quality in adaptive routing window
+    metrics.update_model_quality(
+        model=request.model,
+        quality_score=q_score,
+        grounding_score=ctx.grounding_score,
+        intent=ctx.intent,
+    )
+
     # Post-stream: classifier outcome validation
+    from llm.transformers.quality_refinement import _validate_intent_outcome
     outcome_correct = _validate_intent_outcome(ctx.intent, text, tool_calls, output_tokens)
     if outcome_correct:
         metrics.increment_intent_outcome_correct()
@@ -1196,6 +1380,22 @@ async def tracked_stream(
             "[stream-quality] score=%.2f issues=%s model=%s intent=%s input_tokens=%d",
             q_score, q_issues, request.model, ctx.intent, input_tokens,
         )
+
+    # Post-stream: run grounding validation for analysis responses
+    # This validates citations against tool results AFTER streaming completes
+    # session_id is in ctx (set in server.py), NOT in the request object
+    session_id = getattr(ctx, "session_id", None)
+    if ctx.is_analysis and session_id and text.strip():
+        # Run grounding validation asynchronously (non-blocking)
+        # This validates citations, extracts code snippets, and tracks multi-hop relationships
+        asyncio.create_task(_run_post_stream_validation(
+            accumulated_text=text,
+            tool_names=tool_names,
+            request=request,
+            ctx=ctx,
+            cfg=cfg_obj,
+            session_id=session_id,
+        ))
 
 
 # ── StreamEventTransformer ───────────────────────────────────────────

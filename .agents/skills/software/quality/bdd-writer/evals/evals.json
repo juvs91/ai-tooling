@@ -1,0 +1,56 @@
+{
+  "skill_name": "bdd-writer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Write a Gherkin feature file for this function:\n```python\ndef authenticate_user(username: str, password: str, card_uid: bytes) -> bool:\n    user = db.get_user(username)\n    if user is None:\n        return False\n    if not bcrypt.checkpw(password.encode(), user.password_hash):\n        return False\n    if user.card_uid != card_uid:\n        return False\n    return True\n```",
+      "expected_output": "A feature file with: Feature description (two-factor authentication), Background (given a user exists in the database), and at least 4 scenarios: (1) successful auth with correct password and card; (2) fail with wrong password; (3) fail with correct password but wrong card UID; (4) fail with unknown username. Each scenario should have Given/When/Then steps. The feature file should be executable (step definitions stubs or pytest-bdd compatible).",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Feature file has valid Gherkin syntax (Feature, Scenario, Given/When/Then)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Covers at least 4 scenarios including all failure paths",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The scenarios accurately reflect the function's logic (3 separate failure conditions)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Pytest-bdd stub functions are provided or the steps are clearly structured for step definition",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Backtrack this SQL procedure to BDD feature files:\n```sql\nCREATE PROCEDURE usp_GetBestPrice @ProductID INT AS\nBEGIN\n  SELECT TOP 1 Price FROM PriceHistory\n  WHERE ProductID = @ProductID\n  AND EffectiveDate <= GETDATE()\n  ORDER BY EffectiveDate DESC\nEND\n```",
+      "expected_output": "Feature file for price retrieval with scenarios: (1) product has historical prices — returns most recent price effective before today; (2) product has no prices — returns NULL or empty result set; (3) product has future-dated prices — those are excluded (EffectiveDate > GETDATE()); (4) multiple prices on same date (edge case). Background: Given a product exists with ID @ProductID.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Correctly captures the 'effective date <= today' business rule as a scenario",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Includes a scenario for future-dated prices being excluded",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Includes an empty/no-results scenario",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

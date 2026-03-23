@@ -1,0 +1,56 @@
+{
+  "skill_name": "security-expert",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review this authentication code:\n```python\nimport hashlib\n\ndef verify_password(stored_hash: str, attempt: str) -> bool:\n    attempt_hash = hashlib.md5(attempt.encode()).hexdigest()\n    return attempt_hash == stored_hash\n```",
+      "expected_output": "Critical findings: (1) CRITICAL — MD5 is a cryptographic hash, not a password hash. MD5 has no work factor and can be brute-forced at ~10 billion hashes/second on modern GPUs; use bcrypt, scrypt, or Argon2 instead; (2) CRITICAL — timing attack: == comparison is not constant-time; use hmac.compare_digest(); (3) No salt — identical passwords produce identical hashes, enabling rainbow table attacks. Fix: use passlib or bcrypt.hashpw with bcrypt.checkpw, which handles salting and constant-time comparison automatically.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Identifies MD5 as inappropriate for password hashing (no work factor)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Identifies the timing attack via non-constant-time == comparison",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Recommends a proper password hashing library (bcrypt, argon2, scrypt)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Mentions the missing salt and rainbow table vulnerability",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "We're storing AES-256 encrypted files. The encryption key is derived from the user's password using: `key = hashlib.sha256(password.encode()).digest()`. Is this secure?",
+      "expected_output": "No — SHA-256 is fast by design, making brute-force trivial. A single SHA-256 hash can be computed in nanoseconds. Password-based key derivation requires a slow KDF: PBKDF2-HMAC-SHA256 (minimum 600,000 iterations per NIST 2023), bcrypt, scrypt, or Argon2id. Also: (1) No salt — same password always produces same key, enabling precomputed dictionary attacks; (2) Key length is correct (32 bytes = 256 bits for AES-256). Fix: use `hashlib.scrypt(password, salt=os.urandom(16), n=2**14, r=8, p=1)` or `Argon2id`.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Identifies SHA-256 as inappropriate for key derivation (no work factor)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Recommends a proper KDF: PBKDF2, scrypt, bcrypt, or Argon2",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Flags the missing salt as enabling dictionary/precomputed attacks",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

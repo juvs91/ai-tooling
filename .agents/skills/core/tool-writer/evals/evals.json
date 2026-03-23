@@ -1,0 +1,79 @@
+{
+  "skill_name": "tool-writer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "We keep having to manually walk Python ASTs to find all database calls across large codebases. Every time an agent needs to audit DB usage it does it by hand. We need a reusable tool for this.",
+      "expected_output": "A fully-typed Python script saved to tools/software/discovery/ that accepts a target directory and outputs JSON to stdout listing all database API calls (SQLAlchemy, psycopg2, sqlite3, etc.) with file and line number. Logging goes to stderr. The tool is parameterized (accepts extensions, patterns). docs/tools/index.md is updated.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "The tool outputs strict JSON to stdout (not mixed with human-readable text)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The tool accepts CLI arguments rather than hardcoded paths",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Python type hints are present on all functions",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "docs/tools/index.md was updated to register the new tool",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "No project-specific logic is hardcoded (database names, table names, schema assumptions)",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Can you write me a quick script to count lines of code in a directory?",
+      "expected_output": "This is a trivial one-off task that does NOT require the full tool-writer protocol. A simple script or even a one-liner is appropriate. The agent should NOT initiate the full deduplication check, docs/tools/index.md update, or upstream commit process for a utility this simple.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "The response provides a working solution without unnecessary ceremony (no docs/tools/index.md update for a one-liner)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The agent correctly identifies this does not require the full tool-writer workflow",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "The sql_procedure_analyzer.py tool crashes on stored procedures that contain nested BEGIN/END blocks. I've identified the bug — it's in the tokenizer. Fix and improve the tool.",
+      "expected_output": "The existing sql_procedure_analyzer.py is modified (not a new tool created). The fix handles nested BEGIN/END correctly. The tool's JSON output contract is preserved. docs/tools/index.md entry is updated if behavior changes. The agent checks if sql_procedure_analyzer.py exists before proposing changes.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Existing tool was modified rather than a new duplicate created",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The JSON output contract (stdout format) remains backward compatible",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The fix specifically handles nested BEGIN/END token depth",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}

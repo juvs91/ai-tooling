@@ -72,6 +72,12 @@ from utils.tool_extraction_patterns import (
     _PARTIAL_TOOL_RE,
     _PARTIAL_ARGKV_RE,
     _PARTIAL_XML_TAGS_RE,
+    _DSML_INVOKE_RE,
+    _DSML_PARAM_RE,
+    _DSML_INVOKE_OPEN,
+    _DSML_FCALLS_OPEN,
+    _DSML_INVOKE_CLOSE,
+    _DSML_FCALLS_CLOSE,
 )
 from utils.tool_utils import (
     build_valid_tool_names as _build_valid_tool_names,
@@ -123,6 +129,41 @@ def _get_block_text(block: Any) -> str:
 # Core extraction functions
 # ---------------------------------------------------------------------------
 
+def _extract_dsml_tool_calls(text: str, tools: list | None = None) -> list[dict]:
+    """Extract tool calls from DeepSeek-R1 native <｜DSML｜invoke> format.
+
+    DeepSeek-R1 (deepseek-reasoner) ignores injected <tool_call> XML instructions
+    and outputs its own DSML token format instead. This function parses that format
+    and converts it to standard Anthropic tool_use blocks.
+
+    Format example:
+        <｜DSML｜function_calls>
+          <｜DSML｜invoke name="Glob">
+            <｜DSML｜parameter name="pattern" string="true">**/*.md</｜DSML｜parameter>
+          </｜DSML｜invoke>
+        </｜DSML｜function_calls>
+    """
+    tool_blocks: list[dict] = []
+    for m in _DSML_INVOKE_RE.finditer(text):
+        name = _normalize_tool_name(m.group(1).strip())
+        body = m.group(2)
+        params: dict = {}
+        for p in _DSML_PARAM_RE.finditer(body):
+            val = p.group(2).strip()
+            try:
+                params[p.group(1)] = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                params[p.group(1)] = val
+        parsed_input = params if params else _safe_parse_tool_input("", name, tools=tools)
+        tool_blocks.append({
+            "type": "tool_use",
+            "id": make_tool_id(),
+            "name": name,
+            "input": parsed_input,
+        })
+    return tool_blocks
+
+
 def extract_tool_calls_from_text(
     text: str,
     valid_tool_names: set[str] | None = None,
@@ -145,6 +186,21 @@ def extract_tool_calls_from_text(
     """
     if not text:
         return [], ""
+
+    # Fast path: DeepSeek-R1 native DSML format — check first (unambiguous marker)
+    # Use \uff5c (fullwidth pipe) as guard — avoids false positives on text containing "DSML" literally
+    if "\uff5cDSML\uff5c" in text:
+        dsml_blocks = _extract_dsml_tool_calls(text, tools=tools)
+        if dsml_blocks:
+            # Strip all DSML content from remaining text
+            remaining = _DSML_INVOKE_RE.sub("", text)
+            # Also strip outer function_calls wrapper if present
+            remaining = re.sub(
+                r'<[|\uff5c]DSML[|\uff5c]function_calls>[\s\S]*?</[|\uff5c]DSML[|\uff5c]function_calls>',
+                "", remaining, flags=re.DOTALL,
+            ).strip()
+            print(f"[no-tools] DSML: extracted {len(dsml_blocks)} tool call(s) from DeepSeek-R1 format")
+            return dsml_blocks, remaining
 
     tool_blocks: list[dict] = []
     used_re = _TOOL_CALL_RE
@@ -548,6 +604,9 @@ class XmlToolBuffer:
     def _has_plausible_tool_call(self) -> bool:
         """Check if buffer contains a plausible tool call, not just documentation mentioning <tool_call>."""
         buf = self.buffer
+        # Fast check: DeepSeek-R1 DSML format (｜DSML｜invoke is unambiguous)
+        if _DSML_INVOKE_OPEN in buf or _DSML_FCALLS_OPEN in buf:
+            return True
         idx = buf.find("<tool_call")
         if idx == -1:
             return False
@@ -575,12 +634,37 @@ class XmlToolBuffer:
         Returns: "text", "tool_call", or "incomplete_tool_call" segments.
 
         Recovery order:
+          0. DeepSeek-R1 DSML format (｜DSML｜invoke) — checked before standard path.
           1. Try _TOOL_CALL_ARGKV_LOOSE_RE — extracts argkv tool even without </tool_call>.
              Only activates when ALL present arg pairs have complete </arg_key>/</arg_value> tags.
           2. Warn + return incomplete_tool_call (existing behaviour).
         """
         if not self.buffer:
             return []
+
+        # Recovery path 0: DeepSeek-R1 DSML format
+        if _DSML_INVOKE_OPEN in self.buffer or _DSML_FCALLS_OPEN in self.buffer:
+            dsml_blocks = _extract_dsml_tool_calls(self.buffer, tools=self.tools if hasattr(self, 'tools') else None)
+            if dsml_blocks:
+                segments: list[dict] = []
+                # Emit any text before the first DSML marker as text
+                first_m = next(_DSML_INVOKE_RE.finditer(self.buffer), None)
+                fc_idx = self.buffer.find(_DSML_FCALLS_OPEN)
+                start_idx = min(
+                    first_m.start() if first_m else len(self.buffer),
+                    fc_idx if fc_idx >= 0 else len(self.buffer),
+                )
+                if start_idx > 0:
+                    prefix = self.buffer[:start_idx].strip()
+                    if prefix:
+                        segments.append({"type": "text", "text": prefix})
+                print(f"[xml-buffer] flush: extracted {len(dsml_blocks)} DSML tool call(s) (DeepSeek-R1 format)")
+                self.buffer = ""
+                self.in_tool = False
+                for b in dsml_blocks:
+                    segments.append({"type": "tool_call", "name": b["name"], "input": b["input"]})
+                return segments
+
         if "<tool_call" in self.buffer and self._has_plausible_tool_call():
             segments: list[dict] = []
             idx = self.buffer.find("<tool_call")
@@ -636,10 +720,30 @@ class XmlToolBuffer:
         return segments
 
     def _try_extract_text(self) -> dict | None:
-        """Try to extract text before a <tool_call> tag, or return None if need more data."""
+        """Try to extract text before a <tool_call> or DSML tag, or return None if need more data."""
         search_start = 0
         while True:
             idx = self.buffer.find(_TOOL_CALL_OPEN, search_start)
+
+            # Also check for DSML format (DeepSeek-R1 native tool calls)
+            dsml_invoke_idx = self.buffer.find(_DSML_INVOKE_OPEN, search_start)
+            dsml_fcalls_idx = self.buffer.find(_DSML_FCALLS_OPEN, search_start)
+            dsml_idx = min(
+                dsml_invoke_idx if dsml_invoke_idx >= 0 else len(self.buffer),
+                dsml_fcalls_idx if dsml_fcalls_idx >= 0 else len(self.buffer),
+            )
+            if dsml_idx == len(self.buffer):
+                dsml_idx = -1
+
+            # If DSML comes before (or instead of) <tool_call, switch to DSML extraction
+            if dsml_idx >= 0 and (idx == -1 or dsml_idx < idx):
+                if dsml_idx > 0:
+                    text = self.buffer[:dsml_idx]
+                    self.buffer = self.buffer[dsml_idx:]
+                    return {"type": "text", "text": text}
+                self.in_tool = True
+                return self._try_extract_dsml_tool()
+
             if idx == -1:
                 safe_end = self._safe_text_end()
                 if safe_end == 0:
@@ -711,6 +815,46 @@ class XmlToolBuffer:
             return self._try_extract_tool()
 
     _MAX_TOOL_BUFFER = 16_000  # Real tool calls shouldn't exceed this
+
+    def _try_extract_dsml_tool(self) -> dict | None:
+        """Try to extract a complete DeepSeek-R1 DSML tool block from buffer start.
+
+        Handles both:
+          <｜DSML｜invoke name="X">...</｜DSML｜invoke>
+          <｜DSML｜function_calls><｜DSML｜invoke name="X">...</｜DSML｜invoke></｜DSML｜function_calls>
+        """
+        # Find end of the first complete invoke block
+        end_invoke = self.buffer.find(_DSML_INVOKE_CLOSE)
+        if end_invoke == -1:
+            # Incomplete — need more data
+            if len(self.buffer) > self._MAX_TOOL_BUFFER:
+                print(f"[xml-buffer] DSML buffer overflow ({len(self.buffer)} chars) — emitting as text")
+                text = self.buffer
+                self.buffer = ""
+                self.in_tool = False
+                return {"type": "text", "text": text}
+            return None
+
+        end_pos = end_invoke + len(_DSML_INVOKE_CLOSE)
+
+        # Also consume outer function_calls close tag if directly following
+        tail = self.buffer[end_pos:].lstrip()
+        if tail.startswith(_DSML_FCALLS_CLOSE):
+            skip = self.buffer[end_pos:].find(_DSML_FCALLS_CLOSE)
+            end_pos += skip + len(_DSML_FCALLS_CLOSE)
+
+        block = self.buffer[:end_pos]
+        blocks = _extract_dsml_tool_calls(block, tools=self.tools if hasattr(self, 'tools') else None)
+        self.buffer = self.buffer[end_pos:]
+        self.in_tool = False
+
+        if blocks:
+            b = blocks[0]
+            print(f"[xml-buffer] DSML: extracted tool '{b['name']}' keys={list(b['input'].keys())}")
+            return {"type": "tool_call", "name": b["name"], "input": b["input"]}
+
+        # Block parsed but no tool found — emit as text
+        return {"type": "text", "text": block}
 
     def _try_extract_tool(self) -> dict | None:
         """Try to extract a complete </tool_call> block, or return None if incomplete.
@@ -938,10 +1082,15 @@ class XmlToolBuffer:
         return {"type": "text", "text": clean or ""}
 
     def _safe_text_end(self) -> int:
-        """Find safe end position, avoiding partial '<tool_call' matches at buffer end."""
+        """Find safe end position, avoiding partial '<tool_call' or DSML matches at buffer end."""
         for i in range(1, min(len(_TOOL_CALL_OPEN), len(self.buffer)) + 1):
             if _TOOL_CALL_OPEN.startswith(self.buffer[-i:]):
                 return len(self.buffer) - i
+        # Also protect partial DSML open markers: <｜DSML｜invoke  and  <｜DSML｜function_calls
+        for marker in (_DSML_INVOKE_OPEN, _DSML_FCALLS_OPEN):
+            for i in range(1, min(len(marker), len(self.buffer)) + 1):
+                if marker.startswith(self.buffer[-i:]):
+                    return len(self.buffer) - i
         return len(self.buffer)
 
 

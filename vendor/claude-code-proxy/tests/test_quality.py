@@ -10,11 +10,11 @@ from unittest.mock import AsyncMock, patch, MagicMock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import after path setup
-from llm.stream_quality import (
+from llm.transformers.quality_refinement import (
     score_anthropic_response,
-    accumulate_stream,
     analysis_quality_stream,
 )
+from llm.transformers.stream_event import accumulate_stream
 from utils.quality import score_response
 
 
@@ -272,6 +272,8 @@ class TestAnalysisQualityStream:
             analysis=SimpleNamespace(
                 max_refinements=max_refinements,
                 quality_threshold=threshold,
+                score_certainty_floor=0.50,
+                llm_score_gate=False,
             ),
             routing=SimpleNamespace(model_context_window=200000),
             classifier=SimpleNamespace(model="", api_key="", base_url=None),
