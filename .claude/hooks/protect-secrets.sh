@@ -1,10 +1,11 @@
 #!/bin/bash
-# protect-secrets.sh — PreToolUse hook para Edit/Write
-# Bloquea escritura/edición de archivos .env con secrets reales
+# protect-secrets.sh — PreToolUse hook para Edit/Write/MultiEdit
+# Bloquea escritura de secrets en archivos trackeados por git.
 #
 # Claude Code pasa JSON por stdin:
 #   Edit:  { "tool_name": "Edit",  "tool_input": { "file_path": "...", "new_string": "..." } }
 #   Write: { "tool_name": "Write", "tool_input": { "file_path": "...", "content": "..." } }
+# Exit 0 = permitir, Exit 2 = bloquear (stderr = razón)
 
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
@@ -12,20 +13,23 @@ FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 # Si no hay file_path, permitir
 [ -z "$FILE_PATH" ] && exit 0
 
-# ── Reglas de bloqueo ──────────────────────────────────────────────
+# ── Reglas ─────────────────────────────────────────────────────────────────
 
-# 1. Proteger archivos .env en profile-envs/ (contienen API keys reales)
-if echo "$FILE_PATH" | grep -qE 'profile-envs/.*\.env$'; then
-  # Revisar si el contenido nuevo tiene API keys reales (no placeholders)
+# 1. Proteger archivos trackeados por git (no gitignored)
+#    git check-ignore -q retorna 0 si el archivo ES ignorado, 1 si NO lo es
+FILE_DIR=$(dirname "$FILE_PATH")
+FILE_BASE=$(basename "$FILE_PATH")
+if ! git -C "$FILE_DIR" check-ignore -q "$FILE_BASE" 2>/dev/null; then
+  # El archivo NO está gitignored → verificar si el contenido tiene secrets
   CONTENT=$(echo "$INPUT" | jq -r '.tool_input.content // .tool_input.new_string // empty')
-  if echo "$CONTENT" | grep -qE '(API_KEY|SECRET|TOKEN)=.{20,}' && ! echo "$CONTENT" | grep -qE 'PLACEHOLDER'; then
-    echo "WARNING: Modificando .env con posible API key real. Verifica que no se commitee." >&2
-    # Solo warn (exit 0), no bloquear — el usuario puede necesitar esto
-    exit 0
+  if echo "$CONTENT" | grep -qE '(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY)=[^$\{][^[:space:]]{8,}'; then
+    echo "BLOCKED: Intentando escribir un secret en un archivo trackeado por git: $FILE_PATH" >&2
+    echo "   Guarda las credentials en un archivo en .gitignore (ej: .env, profile-envs/)." >&2
+    exit 2
   fi
 fi
 
-# 2. Bloquear escritura directa a ~/.claude/settings.json (evitar override accidental)
+# 2. Warn en edits directos a .claude/settings.json compartido (evitar override accidental)
 if echo "$FILE_PATH" | grep -qE '\.claude/settings\.json$' && ! echo "$FILE_PATH" | grep -q 'settings.local'; then
   echo "WARNING: Modificando .claude/settings.json compartido. Considera usar settings.local.json." >&2
   exit 0

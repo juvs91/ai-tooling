@@ -169,6 +169,25 @@ def validate_tool_name(name: str, valid_names: set[str]) -> bool:
     return name.strip() in valid_names
 
 
+def validate_tool_name_with_deferred_bypass(name: str, valid_names: set[str]) -> bool:
+    """Validate tool name, but always allow known CC workflow tools.
+
+    CC workflow tools are proxy-injected from the <available-deferred-tools>
+    block in the system prompt. They may not be in request.tools at validation
+    time (e.g. stripped by ToolAllowlistTransformer), but are always legitimate.
+
+    Parity function: used by both streaming (stream_event.py) and non-streaming
+    (converters.py) so validation semantics are identical in both paths.
+    """
+    if not valid_names:
+        return True
+    if not name or not isinstance(name, str):
+        return False
+    if name.strip() in _CC_WORKFLOW_TOOL_NAMES:
+        return True
+    return name.strip() in valid_names
+
+
 def get_tool_schema(tool_name: str, tools: List[Dict]) -> Dict | None:
     """Get input schema for a tool by name."""
     if not tools:

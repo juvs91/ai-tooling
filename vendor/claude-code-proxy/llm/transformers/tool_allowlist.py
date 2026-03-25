@@ -11,6 +11,7 @@ from utils.utils import (
     filter_tools_allowlist,
     normalize_tool_choice,
 )
+from utils.tool_utils import _CC_WORKFLOW_TOOL_NAMES
 from config import PolicyConfig
 
 
@@ -27,18 +28,21 @@ class ToolAllowlistTransformer(Transformer):
     async def transform(self, request: Any, ctx: TransformContext) -> None:
         allow = parse_allowlist(self._policy.tool_allowlist_raw)
 
+        all_tools = getattr(request, "tools", None) or []
+        # Separate proxy-injected CC workflow tools from user-facing tools.
+        # CC workflow tools must survive the allowlist filter — they are injected
+        # by DeferredToolsTransformer for plan-mode interactions and must reach
+        # the model regardless of the configured tool allowlist.
+        cc_tools = [t for t in all_tools if get_tool_name(t) in _CC_WORKFLOW_TOOL_NAMES]
+        user_tools = [t for t in all_tools if get_tool_name(t) not in _CC_WORKFLOW_TOOL_NAMES]
+
         if not allow:
-            ctx.dropped_tools = [
-                get_tool_name(t)
-                for t in (getattr(request, "tools", None) or [])
-                if get_tool_name(t)
-            ]
-            request.tools = None
+            ctx.dropped_tools = [get_tool_name(t) for t in user_tools if get_tool_name(t)]
+            request.tools = cc_tools or None
             request.tool_choice = None
         else:
-            request.tools, ctx.dropped_tools = filter_tools_allowlist(
-                getattr(request, "tools", None), allow
-            )
+            filtered_tools, ctx.dropped_tools = filter_tools_allowlist(user_tools, allow)
+            request.tools = (filtered_tools or []) + cc_tools or None
             request.tool_choice = normalize_tool_choice(
                 getattr(request, "tool_choice", None),
                 getattr(request, "tools", None),

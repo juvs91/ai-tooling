@@ -38,6 +38,7 @@ from utils.tool_utils import (
     is_no_tools_model,
     build_valid_tool_names as _build_valid_tool_names,
     validate_tool_name,
+    validate_tool_name_with_deferred_bypass,
 )
 import llm.sse as sse
 from llm.pipeline import Transformer, TransformContext
@@ -162,16 +163,8 @@ async def _run_post_stream_validation(
 
 # ── Constants ───────────────────────────────────────────────────────────────
 
-# Known Claude Code workflow tools injected via <available-deferred-tools> in system prompt.
-# These must never be filtered as "hallucinated" — models may legitimately call them even
-# when the current request's system prompt omits the deferred-tools block (e.g. BUILD turns
-# that follow a PLAN turn where the model already saw ExitPlanMode in conversation history).
-_CC_WORKFLOW_TOOLS: frozenset[str] = frozenset({
-    "EnterPlanMode", "ExitPlanMode", "TodoWrite",
-    "AskUserQuestion", "CronCreate", "CronDelete", "CronList",
-    "EnterWorktree", "ExitWorktree", "TaskOutput", "TaskStop",
-    "NotebookEdit", "WebFetch", "WebSearch",
-})
+# CC workflow tool bypass is now handled by validate_tool_name_with_deferred_bypass()
+# in utils/tool_utils.py — authoritative set is _CC_WORKFLOW_TOOL_NAMES there.
 
 
 # ── Event type constants (AGNOSTIC - same for ALL models) ────────────
@@ -850,10 +843,9 @@ async def handle_streaming(
                                 continue
 
                             # Validate tool name against request tools (detect hallucinated names).
-                            # CC workflow tools (_CC_WORKFLOW_TOOLS) are always allowed — they may
-                            # appear in conversation context even when absent from this request's
-                            # system prompt (e.g. ExitPlanMode called during a BUILD turn).
-                            if ctx.valid_names and name not in _CC_WORKFLOW_TOOLS and not validate_tool_name(name, ctx.valid_names):
+                            # CC workflow tools are always allowed via deferred_bypass — they may
+                            # appear in conversation context even when absent from request.tools.
+                            if ctx.valid_names and not validate_tool_name_with_deferred_bypass(name, ctx.valid_names):
                                 metrics.increment_tool_counter("hallucinated")
                                 if ctx.model_id:
                                     metrics.record_model_event(ctx.model_id, "tool_hallucination")

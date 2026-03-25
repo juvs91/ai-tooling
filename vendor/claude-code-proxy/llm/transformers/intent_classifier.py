@@ -18,6 +18,7 @@ from router.llm_router import (
 )
 from config import ClassifierConfig, PolicyConfig
 from utils.metrics import metrics
+from utils.utils import bget
 
 
 WRITE_TOOLS = frozenset({"Write", "Edit", "NotebookEdit"})
@@ -47,32 +48,14 @@ def _detect_phase(messages: list) -> tuple[str | None, list[str]]:
     """
     recent_tools: list[str] = []  # First 5 tools for tool_context display
     for msg in reversed(messages or []):
-        role = (
-            getattr(msg, "role", None)
-            if not isinstance(msg, dict)
-            else msg.get("role")
-        )
-        if role != "assistant":
+        if bget(msg, "role") != "assistant":
             continue
-        content = (
-            getattr(msg, "content", None)
-            if not isinstance(msg, dict)
-            else msg.get("content")
-        )
+        content = bget(msg, "content")
         if not isinstance(content, list):
             continue
         for block in content:
-            block_type = (
-                getattr(block, "type", None)
-                if not isinstance(block, dict)
-                else block.get("type")
-            )
-            if block_type == "tool_use":
-                name = (
-                    getattr(block, "name", None)
-                    if not isinstance(block, dict)
-                    else block.get("name")
-                )
+            if bget(block, "type") == "tool_use":
+                name = bget(block, "name")
                 if name:
                     if len(recent_tools) < 5:
                         recent_tools.append(name)
@@ -91,16 +74,15 @@ def _get_last_assistant_tools(messages: list) -> list[str]:
     Override F to determine which tool the agent just called in SYNTHESIZING mode.
     """
     for msg in reversed(messages or []):
-        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
-        if role != "assistant":
+        if bget(msg, "role") != "assistant":
             continue
-        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+        content = bget(msg, "content")
         if not isinstance(content, list):
             break
         names = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                name = block.get("name")
+            if bget(block, "type") == "tool_use":
+                name = bget(block, "name")
                 if name:
                     names.append(name)
         return names  # Return on first assistant message found (even if empty)
@@ -116,15 +98,14 @@ def _get_recent_all_tools(messages: list, window: int = 20) -> list[str]:
     """
     all_tools: list[str] = []
     for msg in reversed(messages or []):
-        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
-        if role != "assistant":
+        if bget(msg, "role") != "assistant":
             continue
-        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+        content = bget(msg, "content")
         if not isinstance(content, list):
             continue
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                name = block.get("name")
+            if bget(block, "type") == "tool_use":
+                name = bget(block, "name")
                 if name:
                     all_tools.append(name)
         if len(all_tools) >= window:
@@ -206,18 +187,9 @@ def _detect_analysis_from_history(messages: list) -> bool:
     """
     checked = 0
     for msg in reversed(messages or []):
-        role = (
-            getattr(msg, "role", None)
-            if not isinstance(msg, dict)
-            else msg.get("role")
-        )
-        if role != "user":
+        if bget(msg, "role") != "user":
             continue
-        content = (
-            getattr(msg, "content", None)
-            if not isinstance(msg, dict)
-            else msg.get("content")
-        )
+        content = bget(msg, "content")
         text = content_to_rough_text(content) if not isinstance(content, str) else content
         if is_analysis_request(text):
             return True
@@ -237,41 +209,19 @@ def _count_unique_reads(messages: list) -> tuple[int, int]:
     total_reads = 0
     seen_files: set[str] = set()
     for msg in reversed(messages or []):
-        role = (
-            getattr(msg, "role", None)
-            if not isinstance(msg, dict)
-            else msg.get("role")
-        )
-        if role != "assistant":
+        if bget(msg, "role") != "assistant":
             continue
-        content = (
-            getattr(msg, "content", None)
-            if not isinstance(msg, dict)
-            else msg.get("content")
-        )
+        content = bget(msg, "content")
         if not isinstance(content, list):
             continue
         for block in content:
-            block_type = (
-                getattr(block, "type", None)
-                if not isinstance(block, dict)
-                else block.get("type")
-            )
-            if block_type != "tool_use":
+            if bget(block, "type") != "tool_use":
                 continue
-            name = (
-                getattr(block, "name", None)
-                if not isinstance(block, dict)
-                else block.get("name")
-            )
+            name = bget(block, "name")
             if name not in ("Read", "Grep", "Glob"):
                 continue
             total_reads += 1
-            inp = (
-                getattr(block, "input", None)
-                if not isinstance(block, dict)
-                else block.get("input")
-            )
+            inp = bget(block, "input")
             if isinstance(inp, dict):
                 file_path = inp.get("file_path") or inp.get("path") or inp.get("pattern") or ""
                 if file_path:
@@ -288,35 +238,17 @@ def _count_consecutive_reads(messages: list) -> int:
     """
     count = 0
     for msg in reversed(messages or []):
-        role = (
-            getattr(msg, "role", None)
-            if not isinstance(msg, dict)
-            else msg.get("role")
-        )
-        if role != "assistant":
+        if bget(msg, "role") != "assistant":
             continue
-        content = (
-            getattr(msg, "content", None)
-            if not isinstance(msg, dict)
-            else msg.get("content")
-        )
+        content = bget(msg, "content")
         if not isinstance(content, list):
             continue
         has_tool = False
         has_write = False
         for block in content:
-            block_type = (
-                getattr(block, "type", None)
-                if not isinstance(block, dict)
-                else block.get("type")
-            )
-            if block_type == "tool_use":
+            if bget(block, "type") == "tool_use":
                 has_tool = True
-                name = (
-                    getattr(block, "name", None)
-                    if not isinstance(block, dict)
-                    else block.get("name")
-                )
+                name = bget(block, "name")
                 if name in WRITE_TOOLS:
                     has_write = True
                     break
@@ -372,14 +304,10 @@ class IntentClassifierTransformer(Transformer):
         # - short ambiguous text ("continue", "yes") → inherits session phase
         # - text message with real intent → classifier evaluates by content
         last_msg = next(
-            (m for m in reversed(messages or [])
-             if (getattr(m, "role", None) if not isinstance(m, dict) else m.get("role")) == "user"),
+            (m for m in reversed(messages or []) if bget(m, "role") == "user"),
             None,
         )
-        last_content = (
-            getattr(last_msg, "content", None) if last_msg and not isinstance(last_msg, dict)
-            else (last_msg.get("content") if last_msg else None)
-        )
+        last_content = bget(last_msg, "content") if last_msg else None
         # Pure tool_result: no user text at all → always a continuation
         _is_tool_result_only = _is_pure_tool_result(last_content)
         # Short ambiguous text: "continue", "yes", "sí", "go on" — carries no intent.
