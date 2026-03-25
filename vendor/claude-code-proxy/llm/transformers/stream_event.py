@@ -947,6 +947,12 @@ async def handle_streaming(
                           f"tool_index={ctx.tool_index} has_xml={ctx.has_xml_tool_calls} "
                           f"no_tools={no_tools_mode} output_tokens={ctx.output_tokens} "
                           f"thinking_chars={ctx.thinking_chars}", flush=True)
+                    if ctx.output_tokens == 0 and not ctx.has_xml_tool_calls and ctx.tool_index is None:
+                        logger.warning(
+                            "[streaming] ZERO-TOKEN response: model=%s — likely upstream returned empty body "
+                            "or fallback failure (ConnectTimeout → litellm empty stream)",
+                            getattr(original_request, "model", "unknown"),
+                        )
                     for ev in _emit_stream_end(ctx, stop_reason, model_context_window):
                         yield ev
                     return

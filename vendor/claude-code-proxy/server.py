@@ -271,7 +271,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 stream_gen = out
                 if getattr(request, "tools", None):
                     stream_gen = passthrough_xml_tool_extraction(stream_gen, request)
-                if ctx.intent != "CHAT" and cfg.analysis.stream_buffer_quality:
+                if ctx.is_analysis and cfg.analysis.stream_buffer_quality:
                     stream_gen = stream_response_pipeline(stream_gen, request, ctx, cfg, _response_pipeline)
                 stream_gen = tracked_stream(stream_gen, request, ctx, cfg)
                 metrics.record(RequestLog(
@@ -340,7 +340,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 classifier_base_url=cfg.classifier.base_url,
                 strip_reasoning=cfg.policy.strip_reasoning,
             )
-            if ctx.intent != "CHAT" and cfg.analysis.stream_buffer_quality:
+            if ctx.is_analysis and cfg.analysis.stream_buffer_quality:
                 stream_gen = stream_response_pipeline(stream_gen, request, ctx, cfg, _response_pipeline)
 
             # Wrap stream to capture post-stream metrics (tokens, quality, cost)
@@ -383,6 +383,12 @@ async def create_message(request: MessagesRequest, raw_request: Request):
             out, request, model_context_window=ctx.effective_context_window or cfg.routing.model_context_window,
             strip_reasoning=cfg.policy.strip_reasoning,
         )
+
+        # Normalize model field to CC-facing alias so plan tab activates.
+        # LiteLLM returns the upstream model name (e.g. "glm-4.7"); CC needs
+        # the original Claude alias to recognize a planning response.
+        if original_model:
+            anthropic_response.model = original_model
 
         await _run_response_pipeline(anthropic_response, ctx, cfg)
 

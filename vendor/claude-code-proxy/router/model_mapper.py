@@ -12,14 +12,18 @@ def strip_provider_prefix(model: str) -> str:
             return model[len(p):]
     return model
 
-def _provider_prefix(preferred_provider: str) -> str:
-    """Map preferred_provider name to LiteLLM prefix: openai/ | anthropic/ | gemini/"""
-    p = (preferred_provider or "openai").lower()
-    if p == "google":
-        return "gemini/"
-    if p == "anthropic":
-        return "anthropic/"
-    return "openai/"
+
+def build_model_name(provider: str, model: str) -> str:
+    """Return 'provider/bare_model', stripping any embedded prefix from model.
+
+    provider: PREFERRED_PROVIDER name ('anthropic', 'openai', 'google') or a
+              route provider ('gemini'), or an already-prefixed string ('anthropic/').
+              'google' is normalised to 'gemini' for LiteLLM compatibility.
+    model: bare or prefixed model name — any existing prefix is stripped first.
+    """
+    p = provider.rstrip("/").lower()
+    normalized = "gemini" if p == "google" else p
+    return f"{normalized}/{strip_provider_prefix(model)}"
 
 
 def map_claude_alias_to_target(
@@ -40,7 +44,7 @@ def map_claude_alias_to_target(
     Cross-provider routing is handled by RouteOverride in ModelRouterTransformer.
     """
     if not model:
-        return _provider_prefix(preferred_provider) + small_model
+        return build_model_name(preferred_provider, small_model)
 
     # Already has a provider prefix — keep as-is
     if has_provider_prefix(model):
@@ -48,15 +52,15 @@ def map_claude_alias_to_target(
 
     clean = strip_provider_prefix(model)
     low = clean.lower()
-    pref = _provider_prefix(preferred_provider)
 
     # Claude aliases → big/small buckets
     if "haiku" in low:
-        return pref + small_model
+        return build_model_name(preferred_provider, small_model)
     if "sonnet" in low:
-        return pref + big_model
+        return build_model_name(preferred_provider, big_model)
     if "opus" in low:
-        return pref + big_model
+        return build_model_name(preferred_provider, big_model)
 
     # Not a Claude alias, no prefix: route to preferred provider as-is
-    return pref + clean
+    # clean is already bare so strip_provider_prefix inside build_model_name is a no-op
+    return build_model_name(preferred_provider, clean)

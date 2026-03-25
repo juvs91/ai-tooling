@@ -3,21 +3,21 @@ import pytest
 
 
 def test_toksum_glm_simple():
-    """Test GLM-4.7 tokenization via toksum."""
-    from toksum import count_tokens
+    """Test GLM-4.7 tokenization via count_tokens_accurate."""
+    from utils.utils import count_tokens_accurate
 
     messages = [{"role": "user", "content": "Hello GLM"}]
-    tokens = count_tokens(messages, model="glm-4.7")
+    tokens = count_tokens_accurate(messages, model="glm-4.7")
     assert tokens > 0
     print(f"✓ GLM-4.7 tokenization works: {tokens} tokens")
 
 
 def test_toksum_gpt4_simple():
-    """Test GPT-4 tokenization via toksum."""
-    from toksum import count_tokens
+    """Test GPT-4 tokenization via count_tokens_accurate."""
+    from utils.utils import count_tokens_accurate
 
     messages = [{"role": "user", "content": "Hello, world!"}]
-    tokens = count_tokens(messages, model="gpt-4")
+    tokens = count_tokens_accurate(messages, model="gpt-4")
     assert tokens > 0
     print(f"✓ GPT-4 tokenization works: {tokens} tokens")
 
@@ -70,12 +70,9 @@ def test_validate_tool_references_simple():
 def test_count_tokens_accurate_simple():
     """Test count_tokens_accurate with toksum."""
     from utils.utils import count_tokens_accurate
-    import asyncio
 
     messages = [{"role": "user", "content": "Hello GLM"}]
-
-    # Use asyncio.run to call async function
-    tokens = asyncio.run(count_tokens_accurate(messages, model="glm-4.7"))
+    tokens = count_tokens_accurate(messages, model="glm-4.7")
     assert tokens > 0
     print(f"✓ count_tokens_accurate works: {tokens} tokens")
 
