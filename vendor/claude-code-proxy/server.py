@@ -203,15 +203,15 @@ def _classify_llm_error(e: Exception) -> tuple[int, str]:
 @app.post("/v1/messages")
 async def create_message(request: MessagesRequest, raw_request: Request):
     try:
-        # Turn limit safety net: prevent runaway sessions
-        if cfg.max_turns > 0 and metrics.total_requests >= cfg.max_turns:
+        # Turn limit safety net: prevent runaway conversations (stateless — derived from request body)
+        if cfg.max_turns > 0 and len(request.messages) > cfg.max_turns:
             logger.error(
-                "[safety] Turn limit reached: %d >= %d. Rejecting request.",
-                metrics.total_requests, cfg.max_turns,
+                "[safety] Conversation depth limit: %d messages > %d. Conversation too long.",
+                len(request.messages), cfg.max_turns,
             )
             raise HTTPException(
                 status_code=429,
-                detail=f"Session turn limit reached ({cfg.max_turns} requests). Restart the proxy to reset.",
+                detail=f"Conversation too long ({len(request.messages)} messages > {cfg.max_turns} limit). Start a new conversation.",
             )
 
         # Cost warning: log when approaching or exceeding budget
