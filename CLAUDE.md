@@ -75,6 +75,35 @@ All MCP credentials are stored as environment variables (see `.env`):
 | **CloudSQL** | `WPC_ENV` + `PROD/QA/DEV_*` | Per-environment DB credentials |
 | **Serper** | `SERPER_API_KEY` | Web search API key |
 
+## Hooks de Seguridad (`.claude/hooks/`)
+
+Claude Code ejecuta estos scripts automáticamente. **Contrato de input: JSON via stdin** (NO variables de entorno).
+
+| Script | Evento | Matcher | Comportamiento |
+|--------|--------|---------|----------------|
+| `block-dangerous.sh` | PreToolUse | Bash | Bloquea: `rm -rf /~`, `git push --force`, `git reset --hard`, `git clean -f` |
+| `config-protection.sh` | PreToolUse | Edit\|Write\|MultiEdit | Bloquea editar: `pyproject.toml`, `.eslintrc*`, `.prettierrc*`, `ruff.toml`, `.pre-commit-config.yaml` |
+| `protect-secrets.sh` | PreToolUse | Edit\|Write\|MultiEdit | Bloquea escribir secrets en archivos trackeados por git |
+| `quality-gate.sh` | PostToolUse (async) | Edit\|Write\|MultiEdit | Corre `ruff check` en `.py` modificados (solo avisa) |
+
+También activo vía `settings.json`: `npx block-no-verify@1.1.2` (PreToolUse/Bash) — bloquea `git --no-verify`.
+
+### Patrón de input para futuros hooks
+```bash
+INPUT=$(cat)                                                          # leer JSON de stdin
+FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')       # Edit/Write
+CMD=$(echo "$INPUT"  | jq -r '.tool_input.command   // empty')       # Bash
+[ -z "$FILE" ] && exit 0                                             # guard
+# exit 0 = permitir, exit 2 = bloquear (razón en stderr)
+```
+
+### Test manual
+```bash
+echo '{"tool_name":"Edit","tool_input":{"file_path":"/path/pyproject.toml","old_string":"x","new_string":"y"}}' \
+  | .claude/hooks/config-protection.sh; echo "exit: $?"
+# Esperado: exit 2 + mensaje en stderr
+```
+
 ## Utility Scripts
 
 | Script | Function |

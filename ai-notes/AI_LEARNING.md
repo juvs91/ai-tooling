@@ -34,7 +34,7 @@ Configurado y validado 7 servidores MCP en `.mcp.json`:
 ### Fixes Aplicados
 1. **CloudSQL script** - `scripts/cloudsql-mcp.sh` actualizado para usar path correcto de postgres-mcp (`~/.nvm/versions/node/v20.20.0/lib/node_modules/postgres-mcp/dist/index.js`) en lugar del binary global corrupto
 2. **Playwright** - Configurado con `PLAYWRIGHT_BROWSERS=chromium` para Apple Silicon (WebKit/Safari no soportado)
-3. **Environment variables** - DB_MAIN_* variables ya presentes en `.env` para AlloyDB
+3. **Environment variables** - Credentials en `.env`: `ALLOYDB_PASSWORD`, `SQUIT_API_KEY`, `ATLASSIAN_*_TOKEN/KEY` — deben estar definidas con valores reales para que los MCPs funcionen
 
 ### Patrones Aprendidos
 - **postgres-mcp global binary corrupto** - Usar path directo al package instalado en lugar de `npx postgres-mcp` cuando el binary global falla

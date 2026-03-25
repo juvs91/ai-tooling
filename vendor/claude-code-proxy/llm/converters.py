@@ -25,6 +25,7 @@ from utils.tool_utils import (
     is_no_tools_model,
     build_valid_tool_names as _build_valid_tool_names,
     validate_tool_name,
+    validate_tool_name_with_deferred_bypass,
 )
 
 
@@ -465,7 +466,7 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
             request_tools = getattr(original_request, "tools", None)
             if request_tools:
                 valid_names = _build_valid_tool_names(request_tools)
-                if valid_names and not validate_tool_name(name, valid_names):
+                if valid_names and not validate_tool_name_with_deferred_bypass(name, valid_names):
                     metrics.increment_tool_counter("hallucinated")
                     metrics.record_model_event(
                         getattr(original_request, "model", "unknown"), "tool_hallucination",
@@ -541,7 +542,7 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], o
             )
             if recovered:
                 if valid_names:
-                    recovered = [tc for tc in recovered if validate_tool_name(tc.get("name", ""), valid_names)]
+                    recovered = [tc for tc in recovered if validate_tool_name_with_deferred_bypass(tc.get("name", ""), valid_names)]
                 if recovered:
                     content = []
                     clean = strip_tool_call_xml(search_text)

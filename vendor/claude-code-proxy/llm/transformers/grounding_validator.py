@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from llm.pipeline import Transformer, TransformContext
+from utils.utils import bget
 
 logger = logging.getLogger(__name__)
 
@@ -149,17 +150,17 @@ class GroundingValidatorTransformer(Transformer):
         evidence = {}
 
         for msg in messages:
-            if msg.get("role") != "assistant":
+            if bget(msg, "role") != "assistant":
                 continue
-            content = msg.get("content", [])
+            content = bget(msg, "content") or []
 
             for block in content:
-                if block.get("type") != "tool_use":
+                if bget(block, "type") != "tool_use":
                     continue
-                if block.get("name") != "Read":
+                if bget(block, "name") != "Read":
                     continue
 
-                tool_input = block.get("input", {})
+                tool_input = bget(block, "input") or {}
                 file_path = tool_input.get("file_path", "")
                 if not file_path:
                     continue
@@ -180,22 +181,22 @@ class GroundingValidatorTransformer(Transformer):
         snippets = {}
 
         for msg in messages:
-            if msg.get("role") != "user":
+            if bget(msg, "role") != "user":
                 continue
-            content = msg.get("content", [])
+            content = bget(msg, "content") or []
 
             for block in content:
-                if block.get("type") != "tool_result":
+                if bget(block, "type") != "tool_result":
                     continue
 
                 # Find the corresponding tool_use to get file path
-                tool_use_id = block.get("tool_use_id", "")
+                tool_use_id = bget(block, "tool_use_id") or ""
                 file_path = self._find_file_path_for_tool_id(messages, tool_use_id)
                 if not file_path:
                     continue
 
                 # Extract code snippet from tool_result content
-                result_content = block.get("content", "")
+                result_content = bget(block, "content") or ""
                 if isinstance(result_content, dict):
                     result_content = result_content.get("text", str(result_content))
                 elif isinstance(result_content, list):
@@ -211,19 +212,19 @@ class GroundingValidatorTransformer(Transformer):
     def _find_file_path_for_tool_id(self, messages: list, tool_use_id: str) -> str | None:
         """Find file path for a given tool_use_id."""
         for msg in messages:
-            if msg.get("role") != "assistant":
+            if bget(msg, "role") != "assistant":
                 continue
-            content = msg.get("content", [])
+            content = bget(msg, "content") or []
 
             for block in content:
-                if block.get("type") != "tool_use":
+                if bget(block, "type") != "tool_use":
                     continue
-                if block.get("id") != tool_use_id:
+                if bget(block, "id") != tool_use_id:
                     continue
-                if block.get("name") != "Read":
+                if bget(block, "name") != "Read":
                     continue
 
-                tool_input = block.get("input", {})
+                tool_input = bget(block, "input") or {}
                 return tool_input.get("file_path", "")
         return None
 

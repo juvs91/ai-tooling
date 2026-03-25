@@ -2,7 +2,9 @@
 # Runs ruff linter on modified Python files after edits.
 # Async — does not block Claude, just surfaces warnings.
 
-FILE="${CLAUDE_TOOL_INPUT_FILE_PATH:-}"
+# Claude Code passes tool input as JSON via stdin
+INPUT=$(cat)
+FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 
 if [ -z "$FILE" ]; then
   exit 0

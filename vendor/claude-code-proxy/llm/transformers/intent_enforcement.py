@@ -13,7 +13,7 @@ import os
 import time
 
 from llm.pipeline import Transformer, TransformContext
-from utils.utils import ensure_system_note
+from utils.utils import ensure_system_note, bget
 
 
 def _plan_mode_active_from_history(messages: list) -> bool:
@@ -28,12 +28,13 @@ def _plan_mode_active_from_history(messages: list) -> bool:
     recent = messages[-20:] if len(messages) > 20 else messages
     found_enter = False
     for msg in recent:
-        if msg.get("role") != "assistant":
+        if bget(msg, "role") != "assistant":
             continue
-        for block in msg.get("content") or []:
-            if not isinstance(block, dict) or block.get("type") != "tool_use":
+        content = bget(msg, "content")
+        for block in content or []:
+            if bget(block, "type") != "tool_use":
                 continue
-            name = block.get("name", "")
+            name = bget(block, "name", "")
             if name == "EnterPlanMode":
                 found_enter = True
             elif name == "ExitPlanMode":

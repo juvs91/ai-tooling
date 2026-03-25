@@ -39,6 +39,86 @@ from utils.tool_utils import extract_deferred_tool_names
 
 logger = logging.getLogger(__name__)
 
+# Verified input schemas for CC workflow tools that require non-empty input.
+# Source of truth: universal_tool_extraction.py _FEW_SHOT_EXAMPLES + test fixtures.
+# Tools not listed here (EnterPlanMode, ExitPlanMode, Cron*, Worktree*, Task*)
+# use the empty stub — they either take no input or have no verified schema in proxy.
+_CC_TOOL_SCHEMAS: dict[str, dict] = {
+    "AskUserQuestion": {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "description": "Questions to present to the user",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question":    {"type": "string"},
+                        "header":      {"type": "string"},
+                        "options": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label":       {"type": "string"},
+                                    "description": {"type": "string"},
+                                },
+                            },
+                        },
+                        "multiSelect": {"type": "boolean"},
+                    },
+                    "required": ["question"],
+                },
+            },
+        },
+        "required": ["questions"],
+    },
+    "TodoWrite": {
+        "type": "object",
+        "properties": {
+            "todos": {
+                "type": "array",
+                "description": "Array of todo items",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "content":    {"type": "string"},
+                        "status":     {"type": "string"},
+                        "activeForm": {"type": "string"},
+                    },
+                    "required": ["content", "status", "activeForm"],
+                },
+            },
+        },
+        "required": ["todos"],
+    },
+    "WebSearch": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query"},
+        },
+        "required": ["query"],
+    },
+    "WebFetch": {
+        "type": "object",
+        "properties": {
+            "url":    {"type": "string", "description": "URL to fetch"},
+            "prompt": {"type": "string", "description": "What to extract from the page"},
+        },
+        "required": ["url", "prompt"],
+    },
+    "NotebookEdit": {
+        "type": "object",
+        "properties": {
+            "notebook_path": {"type": "string"},
+            "new_source":    {"type": "string"},
+            "cell_type":     {"type": "string"},
+            "edit_mode":     {"type": "string"},
+        },
+        "required": ["notebook_path", "new_source"],
+    },
+}
+
 # Tools that should only be injected during PLAN phase.
 # Injecting these outside PLAN phase is safe (they're passive), but filtering
 # them in non-PLAN turns makes it structurally impossible to accidentally
@@ -110,8 +190,8 @@ class DeferredToolsTransformer(Transformer):
             {
                 "name": name,
                 "description": f"Claude Code built-in workflow tool: {name}. "
-                               f"Call with empty input {{}} when appropriate.",
-                "input_schema": {"type": "object", "properties": {}},
+                               f"Use the input schema.",
+                "input_schema": _CC_TOOL_SCHEMAS.get(name, {"type": "object", "properties": {}}),
             }
             for name in deferred
             if name not in existing_names
