@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import AsyncIterator
 
@@ -73,7 +74,8 @@ class PassthroughClient:
     def __init__(self, base_url: str, api_key: str, timeout: float = 120.0):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
-        self._timeout = httpx.Timeout(timeout, connect=10.0)
+        _connect_timeout = float(os.environ.get("PASSTHROUGH_CONNECT_TIMEOUT_S", "30"))
+        self._timeout = httpx.Timeout(timeout, connect=_connect_timeout)
         self._headers = {
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",

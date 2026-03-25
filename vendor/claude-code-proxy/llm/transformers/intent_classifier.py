@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +24,28 @@ WRITE_TOOLS = frozenset({"Write", "Edit", "NotebookEdit"})
 READ_TOOLS = frozenset({"Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch"})
 
 
+class _IntentOverride(NamedTuple):
+    """Result returned by _resolve_primary_overrides when an override fires."""
+    name: str             # Label for logging (e.g. "A", "G", "C1")
+    intent: str           # New intent value
+    phase: str            # New phase value
+    analysis_phase: str   # New analysis_phase value
+    is_analysis: bool     # New is_analysis flag
+    analysis_read_count: int  # Pass consecutive_reads through; 0 for non-analysis overrides
+
+
 def _detect_phase(messages: list) -> tuple[str | None, list[str]]:
-    """Detect coding agent phase from recent tool usage in conversation history.
+    """Detect coding agent phase from tool usage in conversation history.
+
+    Scans ALL assistant messages and returns HAS_WRITES immediately when a Write
+    tool is found — no tool-count window. A Write at any point in the conversation
+    is evidence of an implementation context regardless of how many reads followed.
+
+    Collects the first 5 tools encountered for tool_context display only.
 
     Returns ("HAS_WRITES" | "READS_ONLY" | None, [tool_names]).
     """
-    recent_tools: list[str] = []
+    recent_tools: list[str] = []  # First 5 tools for tool_context display
     for msg in reversed(messages or []):
         role = (
             getattr(msg, "role", None)
@@ -58,14 +74,13 @@ def _detect_phase(messages: list) -> tuple[str | None, list[str]]:
                     else block.get("name")
                 )
                 if name:
-                    recent_tools.append(name)
-        if len(recent_tools) >= 5:
-            break
+                    if len(recent_tools) < 5:
+                        recent_tools.append(name)
+                    if name in WRITE_TOOLS:
+                        return "HAS_WRITES", recent_tools  # early exit
 
     if not recent_tools:
         return None, []
-    if any(t in WRITE_TOOLS for t in recent_tools):
-        return "HAS_WRITES", recent_tools
     return "READS_ONLY", recent_tools
 
 
@@ -90,6 +105,92 @@ def _get_last_assistant_tools(messages: list) -> list[str]:
                     names.append(name)
         return names  # Return on first assistant message found (even if empty)
     return []
+
+
+def _get_recent_all_tools(messages: list, window: int = 20) -> list[str]:
+    """Collect all tool names (incl. workflow tools) from recent assistant messages.
+
+    Unlike _detect_phase, this includes workflow tools like ExitPlanMode, EnterPlanMode
+    that are not in WRITE_TOOLS or READ_TOOLS. Used by Override G to detect plan
+    boundaries.
+    """
+    all_tools: list[str] = []
+    for msg in reversed(messages or []):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role != "assistant":
+            continue
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = block.get("name")
+                if name:
+                    all_tools.append(name)
+        if len(all_tools) >= window:
+            break
+    return all_tools
+
+
+def _resolve_primary_overrides(
+    ctx_intent: str,
+    history_phase: str | None,
+    _is_explicit_analysis: bool,
+    analysis_detected: bool,
+    _is_gather_continuation: bool,
+    tool_names: list[str],
+    consecutive_reads: int,
+    messages: list,
+) -> _IntentOverride | None:
+    """Resolve primary intent overrides in explicit priority order.
+
+    Evaluates each override condition in sequence; returns on FIRST match.
+    Priority is defined by position — P1 is highest, P5 is lowest.
+    Returns None if no override fires (keep classifier result).
+
+    Replaces the fragile A/B elif and C1/C2 elif chains. Adding a new override
+    means inserting a new block at the correct priority position — no elif chain
+    to break.
+
+    F, D, E (state machine transitions on analysis_phase) are handled separately
+    by the caller and are not part of this function.
+    """
+    # P1: Explicit analysis request — user intent unambiguous.
+    # Overrides HAS_WRITES and ExitPlanMode. Allows build→analysis pivot.
+    if _is_explicit_analysis and ctx_intent not in ("READ", "SYNTHESIZING"):
+        return _IntentOverride("C1", "READ", "PLAN", "READ", True, consecutive_reads)
+
+    # P2: ExitPlanMode in recent history — hard planning boundary.
+    # Model exited plan mode → next turn MUST be implementation.
+    # Window=20 survives GLM-4.7's multi-read implementation preamble.
+    if not _is_explicit_analysis and ctx_intent != "BUILD":
+        _recent_all = _get_recent_all_tools(messages, window=20)
+        if "ExitPlanMode" in _recent_all:
+            return _IntentOverride("G", "BUILD", "EXECUTE", "NONE", False, 0)
+
+    # P3: Write tools anywhere in history — implementation is in progress.
+    # Any Write at any point in the conversation is evidence of implementation context.
+    if history_phase == "HAS_WRITES" and ctx_intent != "BUILD" and not _is_explicit_analysis:
+        return _IntentOverride("A", "BUILD", "EXECUTE", "NONE", False, 0)
+
+    # P4: Gather continuation — analysis mid-stream (tool_result turns only).
+    # CC Gather-Act-Verify: continue reading when analysis session is active and
+    # the last message is tool_results with no new user text.
+    if (analysis_detected
+            and ctx_intent not in ("READ", "SYNTHESIZING")
+            and history_phase != "HAS_WRITES"
+            and _is_gather_continuation):
+        return _IntentOverride("C2", "READ", "PLAN", "READ", True, consecutive_reads)
+
+    # P5: CHAT + read activity without analysis — heuristic BUILD detection.
+    # Model is using tools but classifier returned CHAT → ongoing coding session.
+    if (ctx_intent == "CHAT"
+            and history_phase == "READS_ONLY"
+            and len(tool_names) >= 3
+            and not analysis_detected):
+        return _IntentOverride("B", "BUILD", "EXECUTE", "NONE", False, 0)
+
+    return None
 
 
 def _detect_analysis_from_history(messages: list) -> bool:
@@ -389,64 +490,25 @@ class IntentClassifierTransformer(Transformer):
                 "SYNTHESIZING": "PLAN",
             }.get(ctx.intent, "EXECUTE")
 
-        # Step 5: Post-classification overrides
-
-        # Override A: HAS_WRITES + NOT pure analysis pivot → force BUILDING
-        # Does NOT fire for explicit analysis requests — allows build→analysis pivot.
-        # FIX: Don't set analysis_phase=DONE when intent changes to BUILD - causes contradictory state
-        if history_phase == "HAS_WRITES" and ctx.intent != "BUILD" and not _is_explicit_analysis:
+        # Step 5: Post-classification overrides (P1 highest priority, P5 lowest)
+        # _resolve_primary_overrides() evaluates all conditions in explicit order
+        # and returns on first match — no hidden elif coupling.
+        _override = _resolve_primary_overrides(
+            ctx.intent, history_phase, _is_explicit_analysis,
+            analysis_detected, _is_gather_continuation, tool_names,
+            consecutive_reads, messages,
+        )
+        if _override:
             logger.info(
-                "[classify] OVERRIDE A: %s → BUILD (has_writes, no explicit analysis, tools=%d)",
-                ctx.intent, len(tool_names),
+                "[classify] OVERRIDE %s: %s → %s (phase=%s, analysis_phase=%s)",
+                _override.name, ctx.intent, _override.intent,
+                _override.phase, _override.analysis_phase,
             )
-            ctx.intent = "BUILD"
-            ctx.phase = "EXECUTE"
-            ctx.analysis_phase = "NONE"
-            ctx.is_analysis = False
-
-        # Override B: CHAT + reads + NO active analysis session → BUILD
-        # Guard added: if analysis_detected, let Override C handle it
-        elif ctx.intent == "CHAT" and history_phase == "READS_ONLY" and len(tool_names) >= 3 and not analysis_detected:
-            logger.info(
-                "[classify] OVERRIDE B: CHAT → BUILD (reads_only, tools=%d)",
-                len(tool_names),
-            )
-            ctx.intent = "BUILD"
-            ctx.phase = "EXECUTE"
-
-        # Override C1: Pure analysis request → READ (bypasses HAS_WRITES)
-        # "Lee exhaustivamente todos los archivos" + HAS_WRITES → READ (user pivoting)
-        if _is_explicit_analysis and ctx.intent not in ("READ", "SYNTHESIZING"):
-            logger.info(
-                "[classify] OVERRIDE C1: %s → READ (explicit analysis pivot, history=%s)",
-                ctx.intent, history_phase or "none",
-            )
-            ctx.intent = "READ"
-            ctx.analysis_phase = "READ"
-            ctx.is_analysis = True
-            ctx.analysis_read_count = consecutive_reads
-            ctx.phase = "PLAN"
-
-        # Override C2: Gather continuation — ONLY for pure tool_result messages.
-        # CC Gather-Act-Verify: when the last message is tool_results (no new user text),
-        # the agent is still in Gather phase (reading files). Force READ to continue.
-        # If the message has new text, the classifier already evaluated it by content —
-        # respect that decision to allow CC phase transitions (Gather→Act/Verify).
-        elif (
-            analysis_detected
-            and ctx.intent not in ("READ", "SYNTHESIZING")
-            and history_phase != "HAS_WRITES"
-            and _is_gather_continuation  # Only for tool_result continuations
-        ):
-            logger.info(
-                "[classify] OVERRIDE C2: %s → READ (gather continuation, reads=%d)",
-                ctx.intent, consecutive_reads,
-            )
-            ctx.intent = "READ"
-            ctx.analysis_phase = "READ"
-            ctx.is_analysis = True
-            ctx.analysis_read_count = consecutive_reads
-            ctx.phase = "PLAN"
+            ctx.intent = _override.intent
+            ctx.phase = _override.phase
+            ctx.analysis_phase = _override.analysis_phase
+            ctx.is_analysis = _override.is_analysis
+            ctx.analysis_read_count = _override.analysis_read_count
 
         # Override F: Agent escaped SYNTHESIZING by calling domain tools on previous turn.
         # If the last assistant message contains READ or WRITE tools, the agent is still

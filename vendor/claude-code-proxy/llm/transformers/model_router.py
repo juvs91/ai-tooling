@@ -7,7 +7,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 from llm.pipeline import Transformer, TransformContext
-from router.model_mapper import map_claude_alias_to_target, _provider_prefix
+from router.model_mapper import map_claude_alias_to_target, build_model_name, strip_provider_prefix
 from router.llm_router import choose_local_model
 from config import ModelRouting, ProviderCredentials, AnalysisConfig
 
@@ -90,7 +90,7 @@ class ModelRouterTransformer(Transformer):
                 building_model=self._routing.building_model,
                 intent=ctx.intent,
             )
-            request.model = f"openai/{chosen}"
+            request.model = build_model_name("openai", chosen)
         else:
             current = request.model
             prefix = current.rsplit("/", 1)[0] if "/" in current else "openai"
@@ -98,10 +98,10 @@ class ModelRouterTransformer(Transformer):
                 route = self._routing.small_route
                 if route:
                     # Cross-provider: use route's provider prefix + credentials
-                    request.model = f"{route.provider}/{self._routing.small_model}"
+                    request.model = build_model_name(route.provider, self._routing.small_model)
                     ctx.route_override = route
                 else:
-                    request.model = f"{prefix}/{self._routing.small_model}"
+                    request.model = build_model_name(prefix, self._routing.small_model)
             elif ctx.phase == "EXECUTE" and self._routing.building_model != self._routing.big_model:
                 tools_in = len(getattr(request, "tools", []) or [])
                 if tools_in == 0:
@@ -110,8 +110,7 @@ class ModelRouterTransformer(Transformer):
                     # Wrap-up turns (CC asking model to conclude after bash execution) and
                     # other tools_in=0 EXECUTE requests must go to big_model for a text response.
                     # No route_override → uses primary provider credentials (big_model is primary).
-                    pref = _provider_prefix(self._routing.preferred_provider)
-                    request.model = f"{pref}{self._routing.big_model}"
+                    request.model = build_model_name(self._routing.preferred_provider, self._routing.big_model)
                     logger.info(
                         "[route] EXECUTE tools_in=0: building_model bypassed → big_model=%s",
                         request.model,
@@ -119,16 +118,15 @@ class ModelRouterTransformer(Transformer):
                 else:
                     route = self._routing.building_route
                     if route:
-                        request.model = f"{route.provider}/{self._routing.building_model}"
+                        request.model = build_model_name(route.provider, self._routing.building_model)
                         ctx.route_override = route
                     else:
-                        request.model = f"{prefix}/{self._routing.building_model}"
+                        request.model = build_model_name(prefix, self._routing.building_model)
             else:
                 # PLAN phase: always force big_model using the configured provider prefix from env.
                 # map_claude_alias_to_target maps haiku → small_model (wrong for PLAN).
                 # prefix is derived from the (incorrect) mapped model, so use preferred_provider directly.
-                pref = _provider_prefix(self._routing.preferred_provider)
-                request.model = f"{pref}{self._routing.big_model}"
+                request.model = build_model_name(self._routing.preferred_provider, self._routing.big_model)
 
         # PLAN intent: enable deep reasoning for planning
         if ctx.intent == "PLAN" and self._routing.reasoning_max_tokens > 0:
@@ -150,8 +148,7 @@ class ModelRouterTransformer(Transformer):
                 and ctx.intent in ("READ", "CHAT", "VERIFY")
                 and self._routing.big_model != self._routing.small_model
                 and not is_ollama_base(self._creds.openai_base_url)):
-            pref = _provider_prefix(self._routing.preferred_provider)
-            request.model = f"{pref}{self._routing.big_model}"
+            request.model = build_model_name(self._routing.preferred_provider, self._routing.big_model)
             logger.info(
                 "[router] Low confidence (%.2f) on %s → upgrading to big_model",
                 ctx.intent_confidence, ctx.intent,
@@ -161,8 +158,7 @@ class ModelRouterTransformer(Transformer):
                 and getattr(ctx, "intent_confidence", 1.0) < 0.75
                 and not is_ollama_base(self._creds.openai_base_url)):
             ctx.phase = "PLAN"
-            pref = _provider_prefix(self._routing.preferred_provider)
-            request.model = f"{pref}{self._routing.big_model}"
+            request.model = build_model_name(self._routing.preferred_provider, self._routing.big_model)
             logger.info(
                 "[router] Multi-intent READ+BUILD (conf=%.2f) → PLAN routing",
                 ctx.intent_confidence,
@@ -215,10 +211,8 @@ class ModelRouterTransformer(Transformer):
         if not (badly_below or below_degrading):
             return chosen_model
 
-        big = self._routing.big_model
-        pref = _provider_prefix(self._routing.preferred_provider)
-        big_key = big.rsplit("/", 1)[-1]
-        big_stats = ctx.model_quality_history.get(big_key, {})
+        big = strip_provider_prefix(self._routing.big_model)
+        big_stats = ctx.model_quality_history.get(big, {})
         big_avg = big_stats.get("avg_quality")  # None = no data = assume good
 
         # Upgrade to big_model if small is underperforming on analysis
@@ -226,7 +220,7 @@ class ModelRouterTransformer(Transformer):
                 and ctx.is_analysis
                 and (big_avg is None or big_avg >= threshold)):
             ctx.adaptive_routing_reason = f"small_model avg={avg:.2f} trend={trend}"
-            return f"{pref}{big}"
+            return build_model_name(self._routing.preferred_provider, big)
 
         # Upgrade to big_model if building_model is underperforming on BUILD
         if (model_key == self._routing.building_model
@@ -234,6 +228,6 @@ class ModelRouterTransformer(Transformer):
                 and (big_avg is None
                      or big_avg > avg + self._adaptive.min_quality_advantage)):
             ctx.adaptive_routing_reason = f"building_model avg={avg:.2f} trend={trend}"
-            return f"{pref}{big}"
+            return build_model_name(self._routing.preferred_provider, big)
 
         return chosen_model

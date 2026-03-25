@@ -196,6 +196,32 @@ curl -X POST http://127.0.0.1:8083/v1/messages \
 
 ---
 
+---
+
+## Session 2026-03-05 → 2026-03-10: Proxy Pipeline Hardening
+
+### What was built
+- `universal_tool_extraction.py` — migrated + consolidated from `tool_prompting.py`
+- Response pipeline: quality gate + grounding validator + stream buffering
+- `STREAM_BUFFER_QUALITY=true` path: `accumulate_stream` → quality score → optional re-request
+- `DeferredToolsTransformer` — injects CC workflow tools (`EnterPlanMode`, `ExitPlanMode`) from `<available-deferred-tools>` system prompt block into `request.tools`
+- `_CC_WORKFLOW_TOOLS` frozenset bypass in stream quality pipeline (prevents refinement on plan mode tool calls)
+
+### Key learnings
+- `accumulate_stream` must have try/except — upstream timeout returns partial chunks. Without it: clean client disconnect, user sees truncated response mid-plan
+- `STREAM_BUFFER_QUALITY` should only apply to `ctx.is_analysis` (ANALYZING/SYNTHESIZING), not PLANNING — full buffering causes silent wait + timeout risk for long plans. Fix: change `ctx.intent != "CHAT"` → `ctx.is_analysis` in server.py lines 274+343
+- `docker restart` does NOT re-read env files — use `docker compose --force-recreate` to pick up env var changes
+- `PASSTHROUGH_TIMEOUT=120` is too short for GLM-4.7 on large contexts; use 300s across all profile-envs
+- `anthropic/` prefix required in `BIG_MODEL`/`SMALL_MODEL`/`BUILDING_MODEL` for passthrough path when `PASSTHROUGH_REQUIRE_PREFIX=1` — bare model names (`glm-4.7`) fall through to LiteLLM and plan tab won't activate in VSCode
+
+### Plan mode enforcement for non-Claude models
+- Non-Claude models (GLM-4.7) skip `EnterPlanMode`/`ExitPlanMode` — they see these as regular tools, no training to treat them as workflow signals
+- Root cause of "model executes during plan mode": ALL tools (incl. Edit/Write) are forwarded to model in `request.tools` with no phase check — `proxy.py:312` has no `ctx.phase` guard
+- Intent enforcement prompt must name SPECIFIC forbidden tools by exact name — GLM-4.7 ignores vague "don't write code"
+- Write/Edit to plan files (`.claude/plans/*.md`) IS allowed during plan mode — the model needs to write the plan file itself; only source code edits are forbidden
+
+---
+
 ## Notas de sesiones anteriores
 
 > Backups disponibles en:

@@ -28,7 +28,14 @@ class ProviderConfig:
             model = building
         else:
             model = self.big_model
-        return f"{self.provider_prefix}/{model}"
+        # Strip only if model already starts with THIS provider's prefix to avoid double-prefix.
+        # e.g. FALLBACK_1_BIG_MODEL=anthropic/glm-4.7 with provider_prefix=anthropic → anthropic/glm-4.7
+        # Preserves multi-segment models like google/gemini-3-flash-preview for openrouter.
+        if model.startswith(f"{self.provider_prefix}/"):
+            bare_model = model[len(self.provider_prefix) + 1:]
+        else:
+            bare_model = model
+        return f"{self.provider_prefix}/{bare_model}"
 
 # ---------- Anthropic-style content blocks ----------
 class ContentBlockText(BaseModel):

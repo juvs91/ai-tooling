@@ -11,7 +11,7 @@ from llm.pipeline import Transformer, TransformContext
 from llm.compressor import compress_messages_if_needed, estimate_tools_tokens
 from utils.tool_utils import is_no_tools_model
 from config import CompressorConfig, ModelRouting
-
+from router.model_mapper import build_model_name
 
 class CompressionTransformer(Transformer):
     """Compress context if approaching window limit, recalculate max tokens."""
@@ -43,9 +43,8 @@ class CompressionTransformer(Transformer):
                     break
 
         if _is_compact:
-            from router.model_mapper import _provider_prefix
-            _pref = _provider_prefix(self._routing.preferred_provider)
-            _target = f"{_pref}{self._routing.big_model}"
+            
+            _target = build_model_name(self._routing.preferred_provider, self._routing.big_model)
             logger.info(
                 "[compress] COMPACT: CC compaction request — skip compression, force model=%s",
                 _target,

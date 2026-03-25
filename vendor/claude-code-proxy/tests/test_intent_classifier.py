@@ -10,6 +10,7 @@ from llm.transformers.intent_classifier import (
     _detect_phase,
     _detect_analysis_from_history,
     _count_consecutive_reads,
+    _resolve_primary_overrides,
 )
 from config import ClassifierConfig, PolicyConfig
 
@@ -148,10 +149,15 @@ class TestDetectPhase:
         assert phase is None
         assert tools == []
 
-    def test_caps_at_5_tools(self):
-        """Only inspects up to 5 recent tools from assistant messages."""
+    def test_finds_write_beyond_5_tools(self):
+        """Scans ALL messages — Write anywhere in history returns HAS_WRITES.
+
+        Old behavior capped at 5 tools, causing the Write from planning to scroll
+        out of the window during GLM-4.7's multi-read implementation preamble.
+        New behavior: return immediately on the first Write found (no window cap).
+        """
         msgs = [
-            # Older message with Write — should NOT be reached (reversed() starts from end)
+            # Older message with Write — MUST be reached even after 5+ recent reads
             SimpleNamespace(role="assistant", content=[
                 SimpleNamespace(type="tool_use", name="Write"),
             ]),
@@ -165,8 +171,9 @@ class TestDetectPhase:
             ]),
         ]
         phase, tools = _detect_phase(msgs)
-        assert phase == "READS_ONLY"
-        assert len(tools) == 5
+        assert phase == "HAS_WRITES"
+        # tool_context list is capped at 5 for display, but detection found Write
+        assert len(tools) <= 5
 
 
 class TestPhaseInTransform:
@@ -1407,4 +1414,215 @@ class TestCCPhaseAwareClassification:
         assert ctx.intent == "BUILD"
         assert ctx.phase == "EXECUTE"
         assert ctx.is_analysis is False
+
+
+class TestResolvePrimaryOverrides:
+    """Unit tests for _resolve_primary_overrides() — pure function, explicit priority."""
+
+    def _msgs_with_tool(self, name: str):
+        # Use dict format — matches production (CC messages come as JSON)
+        # _get_recent_all_tools only handles dict blocks (unlike _detect_phase which handles both)
+        return [{"role": "assistant", "content": [{"type": "tool_use", "name": name}]}]
+
+    def test_no_override_returns_none(self):
+        """Returns None when no override condition matches."""
+        result = _resolve_primary_overrides(
+            ctx_intent="BUILD",
+            history_phase="READS_ONLY",
+            _is_explicit_analysis=False,
+            analysis_detected=False,
+            _is_gather_continuation=False,
+            tool_names=[],
+            consecutive_reads=0,
+            messages=[],
+        )
+        assert result is None
+
+    def test_p1_explicit_analysis_fires(self):
+        """P1: explicit analysis → READ (highest priority)."""
+        result = _resolve_primary_overrides(
+            ctx_intent="READ",  # already READ — should NOT fire (guard: not in READ/SYNTH)
+            history_phase="HAS_WRITES",
+            _is_explicit_analysis=True,
+            analysis_detected=True,
+            _is_gather_continuation=False,
+            tool_names=[],
+            consecutive_reads=3,
+            messages=[],
+        )
+        assert result is None  # intent already READ → guard blocks it
+
+        result = _resolve_primary_overrides(
+            ctx_intent="BUILD",
+            history_phase="HAS_WRITES",
+            _is_explicit_analysis=True,
+            analysis_detected=True,
+            _is_gather_continuation=False,
+            tool_names=[],
+            consecutive_reads=3,
+            messages=[],
+        )
+        assert result is not None
+        assert result.name == "C1"
+        assert result.intent == "READ"
+        assert result.analysis_read_count == 3
+
+    def test_p1_beats_exit_plan_mode(self):
+        """P1 fires before P2 — explicit analysis overrides ExitPlanMode."""
+        msgs = self._msgs_with_tool("ExitPlanMode")
+        result = _resolve_primary_overrides(
+            ctx_intent="BUILD",
+            history_phase="HAS_WRITES",
+            _is_explicit_analysis=True,
+            analysis_detected=True,
+            _is_gather_continuation=False,
+            tool_names=[],
+            consecutive_reads=2,
+            messages=msgs,
+        )
+        assert result is not None
+        assert result.name == "C1"  # P1 won, not G
+
+    def test_p2_exit_plan_mode_fires(self):
+        """P2: ExitPlanMode in history → BUILD."""
+        msgs = self._msgs_with_tool("ExitPlanMode")
+        result = _resolve_primary_overrides(
+            ctx_intent="READ",
+            history_phase="READS_ONLY",
+            _is_explicit_analysis=False,
+            analysis_detected=False,
+            _is_gather_continuation=False,
+            tool_names=[],
+            consecutive_reads=0,
+            messages=msgs,
+        )
+        assert result is not None
+        assert result.name == "G"
+        assert result.intent == "BUILD"
+        assert result.is_analysis is False
+
+    def test_p2_skipped_if_intent_already_build(self):
+        """P2 guard: ctx_intent == BUILD → G does not fire."""
+        msgs = self._msgs_with_tool("ExitPlanMode")
+        result = _resolve_primary_overrides(
+            ctx_intent="BUILD",
+            history_phase="READS_ONLY",
+            _is_explicit_analysis=False,
+            analysis_detected=False,
+            _is_gather_continuation=False,
+            tool_names=[],
+            consecutive_reads=0,
+            messages=msgs,
+        )
+        assert result is None
+
+    def test_p3_has_writes_fires(self):
+        """P3: HAS_WRITES → BUILD (Override A equivalent)."""
+        result = _resolve_primary_overrides(
+            ctx_intent="READ",
+            history_phase="HAS_WRITES",
+            _is_explicit_analysis=False,
+            analysis_detected=False,
+            _is_gather_continuation=False,
+            tool_names=["Read"],
+            consecutive_reads=1,
+            messages=[],
+        )
+        assert result is not None
+        assert result.name == "A"
+        assert result.intent == "BUILD"
+
+    def test_p4_gather_continuation_fires(self):
+        """P4: gather continuation → READ (Override C2 equivalent)."""
+        result = _resolve_primary_overrides(
+            ctx_intent="BUILD",
+            history_phase="READS_ONLY",
+            _is_explicit_analysis=False,
+            analysis_detected=True,
+            _is_gather_continuation=True,
+            tool_names=["Read", "Grep"],
+            consecutive_reads=4,
+            messages=[],
+        )
+        assert result is not None
+        assert result.name == "C2"
+        assert result.intent == "READ"
+        assert result.analysis_read_count == 4
+
+    def test_p4_blocked_by_has_writes(self):
+        """P4 guard: HAS_WRITES → C2 does NOT fire (prevents stall)."""
+        result = _resolve_primary_overrides(
+            ctx_intent="BUILD",
+            history_phase="HAS_WRITES",
+            _is_explicit_analysis=False,
+            analysis_detected=True,
+            _is_gather_continuation=True,
+            tool_names=["Read"],
+            consecutive_reads=6,
+            messages=[],
+        )
+        # P3 would fire before P4 (HAS_WRITES + not BUILD) — but intent is already BUILD
+        # so P3 guard fails. P4 guard (HAS_WRITES) also blocks C2. Result: None.
+        assert result is None
+
+    def test_p5_chat_with_reads_fires(self):
+        """P5: CHAT + READS_ONLY + 3 tools → BUILD (Override B equivalent)."""
+        result = _resolve_primary_overrides(
+            ctx_intent="CHAT",
+            history_phase="READS_ONLY",
+            _is_explicit_analysis=False,
+            analysis_detected=False,
+            _is_gather_continuation=False,
+            tool_names=["Read", "Grep", "Glob"],
+            consecutive_reads=0,
+            messages=[],
+        )
+        assert result is not None
+        assert result.name == "B"
+        assert result.intent == "BUILD"
+
+    def test_p5_requires_3_tools(self):
+        """P5: fewer than 3 tools → does NOT fire."""
+        result = _resolve_primary_overrides(
+            ctx_intent="CHAT",
+            history_phase="READS_ONLY",
+            _is_explicit_analysis=False,
+            analysis_detected=False,
+            _is_gather_continuation=False,
+            tool_names=["Read", "Grep"],
+            consecutive_reads=0,
+            messages=[],
+        )
+        assert result is None
+
+    def test_priority_p1_beats_p3(self):
+        """P1 (explicit analysis) fires before P3 (HAS_WRITES) even with writes in history."""
+        result = _resolve_primary_overrides(
+            ctx_intent="BUILD",
+            history_phase="HAS_WRITES",
+            _is_explicit_analysis=True,
+            analysis_detected=True,
+            _is_gather_continuation=False,
+            tool_names=[],
+            consecutive_reads=2,
+            messages=[],
+        )
+        assert result is not None
+        assert result.name == "C1"  # P1, not A
+
+    def test_priority_p2_beats_p3(self):
+        """P2 (ExitPlanMode) fires before P3 (HAS_WRITES)."""
+        msgs = self._msgs_with_tool("ExitPlanMode")
+        result = _resolve_primary_overrides(
+            ctx_intent="READ",
+            history_phase="HAS_WRITES",
+            _is_explicit_analysis=False,
+            analysis_detected=False,
+            _is_gather_continuation=False,
+            tool_names=[],
+            consecutive_reads=0,
+            messages=msgs,
+        )
+        assert result is not None
+        assert result.name == "G"  # P2 won, not A
 

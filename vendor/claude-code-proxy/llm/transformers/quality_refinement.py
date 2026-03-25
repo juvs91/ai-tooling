@@ -161,7 +161,7 @@ async def _should_refine(
 
     if score >= quality_threshold:
         return False
-    if score < certainty_floor:
+    if score <= certainty_floor:
         return True
     # Ambiguous zone: use LLM gate if enabled
     if cfg_obj.analysis.llm_score_gate:
@@ -690,14 +690,21 @@ async def stream_response_pipeline(
     # In this phase the model produces brief planning thoughts ("I'll examine X next")
     # between tool-calling turns — those are NOT final analyses and score poorly by design.
     # Quality gate only makes sense on SYNTHESIZING (final write-up) or non-analysis intents.
+    # EXCEPTION: never skip for empty responses (text == "") — those are upstream failures
+    # (e.g. ConnectTimeout → LiteLLM fallback returning 0 tokens) and must be recovered.
     if ctx.is_analysis and ctx.analysis_phase in ("READ", "ANALYZING"):
-        logger.info(
-            "[stream-pipeline] SKIP: analysis_phase=%s — mid-analysis text, quality gate reserved for SYNTHESIZING",
+        if text.strip():
+            logger.info(
+                "[stream-pipeline] SKIP: analysis_phase=%s — mid-analysis text, quality gate reserved for SYNTHESIZING",
+                ctx.analysis_phase,
+            )
+            for chunk in chunks:
+                yield chunk
+            return
+        logger.warning(
+            "[stream-pipeline] EMPTY response in %s phase — bypassing READ skip to trigger re-request",
             ctx.analysis_phase,
         )
-        for chunk in chunks:
-            yield chunk
-        return
 
     # STEP 2: Parse token counts from buffered SSE events
     input_tokens, output_tokens, stop_reason = _parse_stream_tokens(chunks)
