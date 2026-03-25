@@ -8,8 +8,53 @@ the model toward proper intent fulfillment.
 """
 from __future__ import annotations
 
+import glob as _glob
+import os
+import time
+
 from llm.pipeline import Transformer, TransformContext
 from utils.utils import ensure_system_note
+
+
+def _plan_mode_active_from_history(messages: list) -> bool:
+    """
+    Detect plan mode from conversation history when CC's 'Plan mode is active'
+    system reminder is absent.
+
+    Returns True if EnterPlanMode was called in the recent window WITHOUT a
+    subsequent ExitPlanMode. This handles the case where CC failed to inject
+    its system reminder on the current turn.
+    """
+    recent = messages[-20:] if len(messages) > 20 else messages
+    found_enter = False
+    for msg in recent:
+        if msg.get("role") != "assistant":
+            continue
+        for block in msg.get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name", "")
+            if name == "EnterPlanMode":
+                found_enter = True
+            elif name == "ExitPlanMode":
+                found_enter = False  # plan mode ended
+    return found_enter
+
+
+def _recent_plan_file_exists(max_age_seconds: int = 3600) -> bool:
+    """
+    Return True if a plan file was written recently in ~/.claude/plans/.
+    Used as a last-resort signal: if a plan file exists on disk, a planning
+    session is (or was recently) active, even if system state was lost.
+    """
+    plans_dir = os.path.expanduser("~/.claude/plans/")
+    if not os.path.isdir(plans_dir):
+        return False
+    now = time.time()
+    return any(
+        now - os.path.getmtime(p) < max_age_seconds
+        for p in _glob.glob(os.path.join(plans_dir, "*.md"))
+    )
 
 
 class IntentEnforcementTransformer(Transformer):
@@ -49,16 +94,16 @@ class IntentEnforcementTransformer(Transformer):
             return
 
         # Inject intent-specific prompt into request.system
-        prompt = self._get_enforcement_prompt(intent, ctx)
+        prompt = self._get_enforcement_prompt(intent, ctx, request=request)
         if prompt:
             ensure_system_note(request, prompt)
 
-    def _get_enforcement_prompt(self, intent: str, ctx: TransformContext) -> str:
+    def _get_enforcement_prompt(self, intent: str, ctx: TransformContext, request=None) -> str:
         """Get intent-specific enforcement prompt."""
         if intent == "READ" or intent == "ANALYZING" or ctx.analysis_phase in ("ANALYZING", "READ"):
             return self._get_read_prompt()
         elif intent == "PLAN":
-            return self._get_plan_prompt()
+            return self._get_plan_prompt(request=request)
         elif intent == "SYNTHESIZING":
             return self._get_synthesizing_prompt()
         elif intent == "BUILDING" or intent == "BUILD":
@@ -86,18 +131,33 @@ class IntentEnforcementTransformer(Transformer):
             '```python\nif token.expiry < now:\n    raise InvalidTokenError\n```'
         )
 
-    def _get_plan_prompt(self) -> str:
+    def _get_plan_prompt(self, request=None) -> str:
         """PLAN intent: Grounding requirements for implementation planning."""
-        return (
-            "[INTENT-ENFORCEMENT] PLAN mode:\n"
-            # ── Turn 1: plan mode not yet active ──────────────────────────────
-            "CHECK YOUR CONTEXT FIRST:\n"
-            "If the system/context does NOT yet indicate 'Plan mode is active':\n"
-            "  ACTION REQUIRED: Call EnterPlanMode with empty input {} as your "
-            "FIRST and ONLY tool call in this response. Do nothing else yet.\n"
-            "  (Claude Code will activate the Plans tab and send the next turn.)\n"
-            # ── Turn 2+: plan mode already active ─────────────────────────────
-            "If the system/context DOES indicate 'Plan mode is active':\n"
+        messages = list(getattr(request, "messages", None) or []) if request else []
+        system_text = getattr(request, "system", "") or "" if request else ""
+
+        # Evaluate all three plan-mode-active signals from the proxy side.
+        # The model will also check its own context, but these proxy-side signals
+        # handle the case where CC's 'Plan mode is active' reminder is missing.
+        signal_cc = "Plan mode is active" in system_text
+        signal_history = _plan_mode_active_from_history(messages)
+        signal_disk = _recent_plan_file_exists()
+        plan_mode_active = signal_cc or signal_history or signal_disk
+
+        # Build proxy note so the model knows what the proxy detected
+        proxy_signals: list[str] = []
+        if signal_cc:
+            proxy_signals.append("SIGNAL 1 (system prompt): TRUE")
+        if signal_history:
+            proxy_signals.append("SIGNAL 2 (conversation history): EnterPlanMode found without ExitPlanMode → TRUE")
+        if signal_disk:
+            proxy_signals.append("SIGNAL 3 (disk): recent plan file found in ~/.claude/plans/ → TRUE")
+        if not proxy_signals:
+            proxy_signals.append("SIGNAL 1/2/3: all FALSE — plan mode not yet active")
+
+        proxy_note = "  [PROXY DETECTION]: " + " | ".join(proxy_signals)
+
+        plan_active_rules = (
             "  ABSOLUTE RULE: Only write/edit the plan file "
             "(.md file under .claude/plans/). "
             "DO NOT call Edit or Write on ANY other file — not source code, "
@@ -118,6 +178,34 @@ class IntentEnforcementTransformer(Transformer):
             "GROUNDING RULE: Every plan section must cite (file.py:line) from files "
             "you have read. Unverified plans will be rejected."
         )
+
+        if plan_mode_active:
+            return (
+                "[INTENT-ENFORCEMENT] PLAN mode:\n"
+                "CHECK YOUR CONTEXT — verify these signals (in order):\n"
+                "  SIGNAL 1: Does the system/context say 'Plan mode is active'?\n"
+                "  SIGNAL 2: Is EnterPlanMode in recent assistant messages without ExitPlanMode?\n"
+                "  SIGNAL 3: Has a plan file path (~/.claude/plans/*.md) been mentioned?\n"
+                f"{proxy_note}\n"
+                "CONCLUSION: Plan mode is ACTIVE. Follow the rules below.\n\n"
+                + plan_active_rules
+            )
+        else:
+            return (
+                "[INTENT-ENFORCEMENT] PLAN mode:\n"
+                "CHECK YOUR CONTEXT — verify these signals (in order):\n"
+                "  SIGNAL 1: Does the system/context say 'Plan mode is active'?\n"
+                "  SIGNAL 2: Is EnterPlanMode in recent assistant messages without ExitPlanMode?\n"
+                "  SIGNAL 3: Has a plan file path (~/.claude/plans/*.md) been mentioned?\n"
+                f"{proxy_note}\n"
+                "If ANY signal is TRUE → plan mode is active, follow the rules below.\n"
+                "If ALL signals are FALSE:\n"
+                "  ACTION REQUIRED: Call EnterPlanMode with empty input {} as your "
+                "FIRST and ONLY tool call. Do nothing else yet.\n"
+                "  (Claude Code will activate the Plans tab and send the next turn.)\n\n"
+                "WHEN PLAN MODE IS ACTIVE:\n"
+                + plan_active_rules
+            )
 
     def _get_synthesizing_prompt(self) -> str:
         """SYNTHESIZING intent: Grounding requirements for synthesis with code verification."""

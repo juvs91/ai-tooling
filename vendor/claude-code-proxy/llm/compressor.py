@@ -73,6 +73,10 @@ class _CompressionCache:
     citation_history: list[tuple[str, str]] = field(default_factory=list)
     # List of (turn_id, citation) tuples for multi-hop tracking
 
+    # Deferred tools cache — persists CC's <available-deferred-tools> list
+    # across turns so injection never depends on CC re-sending the block.
+    deferred_tool_names: list[str] = field(default_factory=list)
+
 _session_cache: Dict[str, _CompressionCache] = {}  # Multi-session support: session_id -> cache entry
 _SESSION_TTL = 604800.0          # 7 days — matches typical dev session rhythm (survive weekend gaps)
 _CACHE_MSG_TOLERANCE = 100   # Reuse if ≤100 new old messages since last compression
@@ -102,6 +106,7 @@ def _save_session_cache_to_disk() -> None:
                 "grounding_graph": c.grounding_graph,
                 "verified_claims": list(c.verified_claims),
                 "citation_history": c.citation_history,
+                "deferred_tool_names": c.deferred_tool_names,
             }
             for sid, c in _session_cache.items()
         }
@@ -141,6 +146,7 @@ def _load_session_cache_from_disk() -> None:
                 grounding_graph=entry.get("grounding_graph", {}),
                 verified_claims=set(entry.get("verified_claims", [])),
                 citation_history=entry.get("citation_history", []),
+                deferred_tool_names=entry.get("deferred_tool_names", []),
             )
             loaded += 1
         if loaded:
@@ -860,11 +866,13 @@ async def update_session(session_id: str, summary: str, old_count: int) -> None:
     """
     now = time.time()
     async with _state_lock:
+        existing = _session_cache.get(session_id)
         _session_cache[session_id] = _CompressionCache(
             session_id=session_id,
             summary=summary,
             old_msg_count=old_count,
-            timestamp=now
+            timestamp=now,
+            deferred_tool_names=existing.deferred_tool_names if existing else [],
         )
         print(f"[session] Session updated: session_id={session_id[:8]}... old_count={old_count} summary_len={len(summary)}")
         _save_session_cache_to_disk()
@@ -893,6 +901,30 @@ async def cleanup_expired_sessions() -> None:
                 _save_session_cache_to_disk()
         else:
             pass
+
+
+async def get_session_deferred_tools(session_id: str) -> list[str]:
+    """Return cached deferred tool names for a session, or [] if not found/expired."""
+    async with _state_lock:
+        session = _session_cache.get(session_id)
+        if session is not None and time.time() - session.timestamp < _SESSION_TTL:
+            return list(session.deferred_tool_names)
+    return []
+
+
+async def save_session_deferred_tools(session_id: str, tool_names: list[str]) -> None:
+    """Persist deferred tool names into the session cache for this session."""
+    async with _state_lock:
+        session = _session_cache.get(session_id)
+        if session is not None:
+            session.deferred_tool_names = list(tool_names)
+        else:
+            _session_cache[session_id] = _CompressionCache(
+                session_id=session_id,
+                timestamp=time.time(),
+                deferred_tool_names=list(tool_names),
+            )
+        _save_session_cache_to_disk()
 
 
 # =============================================================================
