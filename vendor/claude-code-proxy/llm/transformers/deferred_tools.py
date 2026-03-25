@@ -33,10 +33,17 @@ from __future__ import annotations
 
 import logging
 
+from llm.compressor import get_session_deferred_tools, save_session_deferred_tools
 from llm.pipeline import Transformer, TransformContext
 from utils.tool_utils import extract_deferred_tool_names
 
 logger = logging.getLogger(__name__)
+
+# Tools that should only be injected during PLAN phase.
+# Injecting these outside PLAN phase is safe (they're passive), but filtering
+# them in non-PLAN turns makes it structurally impossible to accidentally
+# trigger the Plans tab from a cached tool list.
+_PLAN_ONLY_TOOLS: frozenset[str] = frozenset({"EnterPlanMode", "ExitPlanMode"})
 
 
 class DeferredToolsTransformer(Transformer):
@@ -54,7 +61,42 @@ class DeferredToolsTransformer(Transformer):
     async def transform(self, request: object, ctx: TransformContext) -> None:
         system = getattr(request, "system", None)
         messages = getattr(request, "messages", None)
+
+        # ── Step 1: Extract from CC's system prompt (primary source) ──────────
         deferred = extract_deferred_tool_names(system, messages=messages)
+
+        # ── Step 2: Persist to session cache if CC sent the list ──────────────
+        if deferred and ctx.session_id:
+            await save_session_deferred_tools(ctx.session_id, deferred)
+
+        # ── Step 3: Fall back to session cache if system prompt has no list ───
+        if not deferred and ctx.session_id:
+            cached = await get_session_deferred_tools(ctx.session_id)
+            if cached:
+                # Plan-mode tools are only restored during PLAN phase.
+                # Other phases get the full cached list minus plan-only tools.
+                if ctx.phase != "PLAN":
+                    cached = [n for n in cached if n not in _PLAN_ONLY_TOOLS]
+                if cached:
+                    deferred = cached
+                    logger.debug(
+                        "[deferred-tools] restored %d tool(s) from session cache",
+                        len(deferred),
+                    )
+
+        # ── Step 4: PLAN phase guarantee ──────────────────────────────────────
+        # Even if session cache is empty (brand-new session, first turn),
+        # always ensure plan-mode tools are available during PLAN phase so
+        # EnterPlanMode can never be silently dropped by stream validation.
+        if ctx.phase == "PLAN":
+            deferred_set = set(deferred)
+            extras = [n for n in _PLAN_ONLY_TOOLS if n not in deferred_set]
+            if extras:
+                deferred = list(deferred) + extras
+                logger.debug(
+                    "[deferred-tools] PLAN phase guarantee: added %s", extras
+                )
+
         if not deferred:
             return
 
