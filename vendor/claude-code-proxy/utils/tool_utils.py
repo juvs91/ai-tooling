@@ -20,29 +20,91 @@ _DEFERRED_TOOLS_RE = re.compile(
     re.DOTALL,
 )
 
+# Fallback: Claude Code ALSO injects deferred tool names via a <system-reminder>
+# in user messages using the ToolSearch format (native Claude mechanism).
+# This handles cases where the <available-deferred-tools> block is absent from
+# the system prompt (e.g. different CC versions or configurations).
+_TOOLSEARCH_DEFERRED_RE = re.compile(
+    r'The following deferred tools are now available via ToolSearch:\s*\n((?:[ \t]*\w+[ \t]*\n?)+)',
+    re.DOTALL,
+)
 
-def extract_deferred_tool_names(system: str | list | None) -> list[str]:
-    """Parse <available-deferred-tools> block from Claude Code system prompt.
+# Known CC workflow tools — used as a safety filter when extracting from messages
+# to prevent injecting arbitrary tool names from untrusted content.
+_CC_WORKFLOW_TOOL_NAMES: frozenset[str] = frozenset({
+    "EnterPlanMode", "ExitPlanMode", "TodoWrite",
+    "AskUserQuestion", "CronCreate", "CronDelete", "CronList",
+    "EnterWorktree", "ExitWorktree", "TaskOutput", "TaskStop",
+    "NotebookEdit", "WebFetch", "WebSearch", "ToolSearch",
+})
+
+
+def _content_to_text(content: Any) -> str:
+    """Convert message content (str or list of blocks) to plain text."""
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(block.get("text", ""))
+            elif hasattr(block, "text"):
+                parts.append(block.text or "")
+        return "\n".join(parts)
+    return str(content)
+
+
+def extract_deferred_tool_names(
+    system: str | list | None,
+    messages: list | None = None,
+) -> list[str]:
+    """Parse deferred tool names from Claude Code's request.
 
     Claude Code injects special tools (EnterPlanMode, ExitPlanMode, TodoWrite,
-    AskUserQuestion, etc.) as a text block in the system prompt rather than as
-    formal tool definitions in request.tools.  This function extracts those names
-    so the proxy can inject minimal definitions and include them in valid_names.
+    AskUserQuestion, etc.) in one of two ways:
+
+    1. Primary: <available-deferred-tools> block in the system prompt field.
+       Standard format when CC sends requests to a proxy endpoint.
+
+    2. Fallback: <system-reminder>The following deferred tools are now available
+       via ToolSearch: ...</system-reminder> in user messages. CC's native
+       ToolSearch mechanism — used alongside or instead of (1) in some versions.
+
+    The fallback only activates when (1) finds nothing. Results from messages
+    are filtered against known CC workflow tools to prevent injection of
+    arbitrary names from untrusted message content.
 
     Returns a list of tool names (one per non-empty line).
     """
-    if not system:
-        return []
-    if isinstance(system, str):
-        text = system
-    else:
-        text = " ".join(
-            b.get("text", "") if isinstance(b, dict) else str(b) for b in system
-        )
-    m = _DEFERRED_TOOLS_RE.search(text)
-    if not m:
-        return []
-    return [name.strip() for name in m.group(1).splitlines() if name.strip()]
+    # ── Primary: system prompt <available-deferred-tools> ───────────────────
+    if system:
+        if isinstance(system, str):
+            text = system
+        else:
+            text = " ".join(
+                b.get("text", "") if isinstance(b, dict) else str(b) for b in system
+            )
+        m = _DEFERRED_TOOLS_RE.search(text)
+        if m:
+            return [name.strip() for name in m.group(1).splitlines() if name.strip()]
+
+    # ── Fallback: last user message ToolSearch system-reminder ──────────────
+    if messages:
+        for msg in reversed(messages):
+            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+            if role != "user":
+                continue
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+            text = _content_to_text(content)
+            m = _TOOLSEARCH_DEFERRED_RE.search(text)
+            if m:
+                names = [n.strip() for n in m.group(1).splitlines() if n.strip()]
+                # Filter to known CC workflow tools only for safety
+                return [n for n in names if n in _CC_WORKFLOW_TOOL_NAMES]
+
+    return []
 
 
 # ---------------------------------------------------------------------------

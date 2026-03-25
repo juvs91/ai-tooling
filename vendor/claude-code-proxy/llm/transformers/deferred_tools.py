@@ -53,7 +53,8 @@ class DeferredToolsTransformer(Transformer):
 
     async def transform(self, request: object, ctx: TransformContext) -> None:
         system = getattr(request, "system", None)
-        deferred = extract_deferred_tool_names(system)
+        messages = getattr(request, "messages", None)
+        deferred = extract_deferred_tool_names(system, messages=messages)
         if not deferred:
             return
 

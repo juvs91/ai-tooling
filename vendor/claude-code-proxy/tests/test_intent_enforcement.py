@@ -57,6 +57,7 @@ class TestIntentEnforcementTransformer:
         assert "[INTENT-ENFORCEMENT]" in req.system
         assert "PLAN mode" in req.system
         assert "structured implementation plan" in req.system
+        assert "DO NOT call Edit or Write on ANY other file" in req.system
 
     @pytest.mark.asyncio
     async def test_synthesizing_intent_injects_system_note(self):
