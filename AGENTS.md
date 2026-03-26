@@ -27,6 +27,7 @@ Depending on your platform (Claude Code, Cursor, Gemini), either use the `/activ
 14. **Live Library/Framework Docs**: If looking up current API docs for Python, FastAPI, Docker, uvicorn, or any library, read `.agents/skills/integrations/documentation-lookup/SKILL.md` (uses Context7 MCP).
 15. **Go Code / Go Project**: If working with Go code, idiomatic patterns, or Go tests, read `.agents/skills/software/language/go/golang-patterns/SKILL.md`.
 16. **Code Review**: If reviewing a PR, checking code quality, or auditing a diff, read `.agents/skills/software/quality/code-reviewer/SKILL.md`.
+16b. **Bitbucket PR Code Review**: If asked to do a code review, review a PR, "revisar PR", "hacer code review", or `/code-review`, you MUST read `.agents/skills/software/quality/code-review/SKILL.md`.
 17. **Security Code Review**: If code changes touch auth, crypto, inputs, or secrets, read `.agents/skills/security/security-review/SKILL.md`.
 18. **Deep Multi-Source Research**: If a task requires searching across multiple sources (web, docs, repos), read `.agents/skills/integrations/deep-research/SKILL.md`.
 19. **REST API Design**: If designing or reviewing API endpoints, request/response shapes, or OpenAPI specs, read `.agents/skills/software/api/api-design/SKILL.md`.
