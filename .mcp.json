@@ -51,7 +51,7 @@
       "command": "npx",
       "args": ["-y", "@executeautomation/playwright-mcp-server"],
       "env": {
-        "PLAYWRIGHT_BROWSERS_PATH": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome for Testing.app",
+        "PLAYWRIGHT_BROWSERS_PATH": "/Users/jeguzman/Library/Caches/ms-playwright",
         "PLAYWRIGHT_BROWSERS": "chromium"
       }
     },
@@ -62,7 +62,6 @@
     "memory": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-memory"]
-    },
-    "_comment": "Apple Silicon fix: PLAYWRIGHT_BROWSERS=chromium (no soporta WebKit/Safari en mac13-arm64)"
+    }  
   }
 }
