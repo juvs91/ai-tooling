@@ -22,7 +22,8 @@ FILE_BASE=$(basename "$FILE_PATH")
 if ! git -C "$FILE_DIR" check-ignore -q "$FILE_BASE" 2>/dev/null; then
   # El archivo NO está gitignored → verificar si el contenido tiene secrets
   CONTENT=$(echo "$INPUT" | jq -r '.tool_input.content // .tool_input.new_string // empty')
-  if echo "$CONTENT" | grep -qE '(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY)=[^$\{][^[:space:]]{8,}'; then
+  # Matches literal secrets: alphanumeric/symbol values 20+ chars, NOT variable refs ($VAR, "${VAR}")
+  if echo "$CONTENT" | grep -qE '(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY)=[A-Za-z0-9.+/_\-]{20,}'; then
     echo "BLOCKED: Intentando escribir un secret en un archivo trackeado por git: $FILE_PATH" >&2
     echo "   Guarda las credentials en un archivo en .gitignore (ej: .env, profile-envs/)." >&2
     exit 2

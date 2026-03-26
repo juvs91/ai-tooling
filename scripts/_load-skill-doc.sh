@@ -21,6 +21,7 @@ fi
 
 # Buscar documentación en múltiples rutas
 DOCS_PATHS=(
+  "$PROJECT_DIR/.claude/commands/$SKILL_NAME.md"
   "$PROJECT_DIR/docs/$SKILL_NAME"
   "$PROJECT_DIR/docs/$SKILL_NAME/usage.md"
   "$PROJECT_DIR/docs/$SKILL_NAME.md"
