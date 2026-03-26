@@ -1,13 +1,8 @@
 {
   "mcpServers": {
     "alloydb": {
-      "command": "node",
-      "args": [
-        "/Users/jeguzman/.nvm/versions/node/v20.20.0/lib/node_modules/postgres-mcp/dist/index.js"
-      ],
-      "env": {
-        "DB_MAIN_URL": "postgresql://ods:%7BoC%3F%7BLGAeRqLba.9@localhost:5435/ods"
-      }
+      "command": "bash",
+      "args": ["./mcp-scripts/alloydb-mcp.sh"]
     },
     "atlassian": {
       "type": "stdio",
