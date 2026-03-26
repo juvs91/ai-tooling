@@ -1,0 +1,56 @@
+{
+  "skill_name": "ux-expert",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review this authentication flow: after a failed login the app shows 'Wrong password' in red text, decrements a visible counter ('4 attempts remaining'), and after 3 more failures shows 'Account locked — contact support@company.com'. Is this good UX?",
+      "expected_output": "A structured heuristic evaluation identifying: (1) Security UX problem — 'Wrong password' is specific and confirms the username exists, enabling user enumeration; (2) The countdown is a timing oracle that reveals internal state; (3) Locking with a specific contact email is acceptable but the message should be generic. Recommendations should balance security with usability — generic error messages, constant-time feedback, lockout without revealing exact thresholds.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "The review identifies the user enumeration risk in showing 'Wrong password' specifically",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "The review flags the attempt countdown as leaking internal state",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Recommendations are provided, not just problems",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Nielsen's heuristics or equivalent framework is applied (explicitly or implicitly)",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Our desktop app starts with a blank white screen for 3-4 seconds while loading, then shows the main UI. Users keep thinking it crashed. How should we fix this?",
+      "expected_output": "Recommendation to add a loading/splash state with progress indicator (visibility of system status heuristic). Options: skeleton screens, progress bar, branded splash. The blank screen violates heuristic #1. Suggest async loading with immediate partial render. Also flag that 3-4 seconds is too long regardless of indicator — investigate what's blocking startup.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Identifies blank screen as violating 'Visibility of system status' (Nielsen heuristic #1)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Suggests concrete loading state patterns (skeleton, spinner, or progress)",
+          "passed": null,
+          "evidence": ""
+        },
+        {
+          "text": "Also recommends investigating the root cause of the 3-4 second delay, not just masking it",
+          "passed": null,
+          "evidence": ""
+        }
+      ]
+    }
+  ]
+}
