@@ -38,6 +38,7 @@
 
 ## software/quality
 - [bdd-writer](software/quality/bdd-writer/SKILL.md)
+- [code-review](software/quality/code-review/SKILL.md)
 - [code-reviewer](software/quality/code-reviewer/SKILL.md)
 - [coding-standards](software/quality/coding-standards/SKILL.md)
 - [eval-harness](software/quality/eval-harness/SKILL.md)
