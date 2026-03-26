@@ -41,11 +41,8 @@
       "args": ["-y", "@upstash/context7-mcp@latest"]
     },
     "serper": {
-      "command": "npx",
-      "args": ["-y", "serper-search-scrape-mcp-server"],
-      "env": {
-        "SERPER_API_KEY": "$SERPER_API_KEY"
-      }
+      "command": "bash",
+      "args": ["./mcp-scripts/serper-mcp.sh"]
     },
     "playwright": {
       "command": "npx",
