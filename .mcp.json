@@ -5,17 +5,8 @@
       "args": ["./mcp-scripts/alloydb-mcp.sh"]
     },
     "atlassian": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": ["mcp-atlassian"],
-      "env": {
-        "CONFLUENCE_URL": "https://deacero.atlassian.net/wiki",
-        "CONFLUENCE_USERNAME": "jeguzman@deacero.com",
-        "CONFLUENCE_API_TOKEN": "$ATLASSIAN_CONFLUENCE_TOKEN",
-        "JIRA_URL": "https://deacero.atlassian.net",
-        "JIRA_USERNAME": "jeguzman@deacero.com",
-        "JIRA_API_TOKEN": "$ATLASSIAN_JIRA_API_TOKEN"
-      }
+      "command": "bash",
+      "args": ["./mcp-scripts/atlassian-mcp.sh"]
     },
     "squit": {
       "command": "npx",
