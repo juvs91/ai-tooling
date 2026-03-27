@@ -3,6 +3,7 @@
 ## core
 - [learning-protocol](core/learning-protocol/SKILL.md)
 - [tool-writer](core/tool-writer/SKILL.md)
+- [brainstorming](core/brainstorming/SKILL.md)
 
 ## infrastructure
 - [database-expert](infrastructure/database-expert/SKILL.md)
@@ -36,12 +37,21 @@
 - [golang-patterns](software/language/go/golang-patterns/SKILL.md)
 - [golang-testing](software/language/go/golang-testing/SKILL.md)
 
+## software/frontend
+- [senior-frontend](software/frontend/senior-frontend/SKILL.md)
+- [nextjs-skills](software/frontend/nextjs/SKILL.md)
+
+## software/backend
+- [senior-backend](software/backend/senior-backend/SKILL.md)
+- [python-testing](software/backend/python-testing/SKILL.md)
+
 ## software/quality
 - [bdd-writer](software/quality/bdd-writer/SKILL.md)
 - [code-review](software/quality/code-review/SKILL.md)
 - [code-reviewer](software/quality/code-reviewer/SKILL.md)
 - [coding-standards](software/quality/coding-standards/SKILL.md)
 - [eval-harness](software/quality/eval-harness/SKILL.md)
+- [playwright-pro](software/quality/playwright-pro/SKILL.md)
 - [tdd-workflow](software/quality/tdd-workflow/SKILL.md)
 - [verification-loop](software/quality/verification-loop/SKILL.md)
 
