@@ -28,6 +28,12 @@ Depending on your platform (Claude Code, Cursor, Gemini), either use the `/activ
 15. **Go Code / Go Project**: If working with Go code, idiomatic patterns, or Go tests, read `.agents/skills/software/language/go/golang-patterns/SKILL.md`.
 16. **Code Review**: If reviewing a PR, checking code quality, or auditing a diff, read `.agents/skills/software/quality/code-reviewer/SKILL.md`.
 16b. **Bitbucket PR Code Review**: If asked to do a code review, review a PR, "revisar PR", "hacer code review", or `/code-review`, you MUST read `.agents/skills/software/quality/code-review/SKILL.md`.
+27. **Brainstorming / Design First**: If asked to build a new feature, add functionality, or design something new, you MUST read `.agents/skills/core/brainstorming/SKILL.md` BEFORE writing any code.
+28. **Frontend Development**: If working with React, Next.js, TypeScript, Tailwind, or Vue, read `.agents/skills/software/frontend/senior-frontend/SKILL.md`.
+29. **Next.js Specifics**: If working with Next.js App Router, server/client components, dynamic routes, or Vercel deployment, read `.agents/skills/software/frontend/nextjs/SKILL.md`.
+30. **Backend Development (Python)**: If implementing Python services, FastAPI endpoints, SOLID principles, or DRY patterns, read `.agents/skills/software/backend/senior-backend/SKILL.md`.
+31. **Python Testing**: If writing Python tests, pytest fixtures, mocks, or async tests, read `.agents/skills/software/backend/python-testing/SKILL.md`.
+32. **E2E / Playwright Testing**: If writing, fixing, or reviewing Playwright tests, read `.agents/skills/software/quality/playwright-pro/SKILL.md`.
 17. **Security Code Review**: If code changes touch auth, crypto, inputs, or secrets, read `.agents/skills/security/security-review/SKILL.md`.
 18. **Deep Multi-Source Research**: If a task requires searching across multiple sources (web, docs, repos), read `.agents/skills/integrations/deep-research/SKILL.md`.
 19. **REST API Design**: If designing or reviewing API endpoints, request/response shapes, or OpenAPI specs, read `.agents/skills/software/api/api-design/SKILL.md`.
