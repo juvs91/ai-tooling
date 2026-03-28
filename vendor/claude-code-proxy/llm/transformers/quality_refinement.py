@@ -22,8 +22,6 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any, Optional, TYPE_CHECKING
-from llm.transformers.grounding_validator import GroundingValidatorTransformer
-
 from llm.pipeline import TransformContext
 from utils.quality import score_response as score_response_quality
 
@@ -429,7 +427,7 @@ async def analysis_quality_stream(
 
     # 1.6. Skip refinement if response contains CC workflow tools (EnterPlanMode, ExitPlanMode, etc.)
     # Re-requesting could drop these tool calls, breaking CC plan mode / workflow prompts.
-    from llm.transformers.stream_event import _CC_WORKFLOW_TOOLS
+    from utils.tool_utils import _CC_WORKFLOW_TOOL_NAMES as _CC_WORKFLOW_TOOLS
     cc_workflow_hits = [n for n in tool_names if n in _CC_WORKFLOW_TOOLS]
     if cc_workflow_hits:
         logger.info(

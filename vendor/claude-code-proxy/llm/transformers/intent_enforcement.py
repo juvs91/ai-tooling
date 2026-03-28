@@ -104,7 +104,7 @@ class IntentEnforcementTransformer(Transformer):
         if intent == "READ" or intent == "ANALYZING" or ctx.analysis_phase in ("ANALYZING", "READ"):
             return self._get_read_prompt()
         elif intent == "PLAN":
-            return self._get_plan_prompt(request=request)
+            return self._get_plan_prompt(ctx=ctx, request=request)
         elif intent == "SYNTHESIZING":
             return self._get_synthesizing_prompt()
         elif intent == "BUILDING" or intent == "BUILD":
@@ -132,7 +132,9 @@ class IntentEnforcementTransformer(Transformer):
             '```python\nif token.expiry < now:\n    raise InvalidTokenError\n```'
         )
 
-    def _get_plan_prompt(self, request=None) -> str:
+    _PLAN_NUDGE_THRESHOLD = 8  # nudge after this many consecutive read turns during plan mode
+
+    def _get_plan_prompt(self, ctx=None, request=None) -> str:
         """PLAN intent: Grounding requirements for implementation planning."""
         messages = list(getattr(request, "messages", None) or []) if request else []
         system_text = getattr(request, "system", "") or "" if request else ""
@@ -140,10 +142,15 @@ class IntentEnforcementTransformer(Transformer):
         # Evaluate all three plan-mode-active signals from the proxy side.
         # The model will also check its own context, but these proxy-side signals
         # handle the case where CC's 'Plan mode is active' reminder is missing.
+        # Use ctx.plan_mode_active (authoritative, computed by intent_classifier) when
+        # available; fall back to local detection only if ctx is not provided.
         signal_cc = "Plan mode is active" in system_text
         signal_history = _plan_mode_active_from_history(messages)
         signal_disk = _recent_plan_file_exists()
-        plan_mode_active = signal_cc or signal_history or signal_disk
+        if ctx is not None:
+            plan_mode_active = ctx.plan_mode_active
+        else:
+            plan_mode_active = signal_cc or signal_history or signal_disk
 
         # Build proxy note so the model knows what the proxy detected
         proxy_signals: list[str] = []
@@ -180,6 +187,20 @@ class IntentEnforcementTransformer(Transformer):
             "you have read. Unverified plans will be rejected."
         )
 
+        # Nudge the model when it has been reading for many turns without calling
+        # ExitPlanMode. Uses ctx.analysis_read_count (preserved through PLAN_LOCK override).
+        # Fires well before Override D's generic SYNTHESIZING threshold (default 20 reads).
+        nudge = ""
+        if (plan_mode_active
+                and ctx is not None
+                and ctx.analysis_read_count >= self._PLAN_NUDGE_THRESHOLD):
+            nudge = (
+                f"\n⚠️ PLAN MODE NUDGE: You have completed {ctx.analysis_read_count} read "
+                "turns without calling ExitPlanMode. If you have enough information to write "
+                "a complete plan, call ExitPlanMode({}) NOW. "
+                "Only continue reading if you are missing critical information you cannot infer."
+            )
+
         if plan_mode_active:
             return (
                 "[INTENT-ENFORCEMENT] PLAN mode:\n"
@@ -190,6 +211,7 @@ class IntentEnforcementTransformer(Transformer):
                 f"{proxy_note}\n"
                 "CONCLUSION: Plan mode is ACTIVE. Follow the rules below.\n\n"
                 + plan_active_rules
+                + nudge
             )
         else:
             return (

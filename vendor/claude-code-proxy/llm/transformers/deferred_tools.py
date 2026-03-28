@@ -36,11 +36,39 @@ import logging
 from llm.compressor import get_session_deferred_tools, save_session_deferred_tools
 from llm.pipeline import Transformer, TransformContext
 from utils.tool_utils import extract_deferred_tool_names
+from utils.utils import bget
 
 logger = logging.getLogger(__name__)
 
+
+def _exit_plan_already_called(messages: list, window: int = 20) -> bool:
+    """Return True if ExitPlanMode was already called in recent assistant history.
+
+    Used to decide whether to strip plan-mode tools from the session cache.
+    Once ExitPlanMode is called the plan session is over; until then it must
+    stay available even during READ/ANALYZING intermediate turns of a multi-turn
+    plan session (where the model explores files before writing the final plan).
+
+    Window=20 matches Override G in intent_classifier.py.
+    """
+    count = 0
+    for msg in reversed(messages or []):
+        if bget(msg, "role") != "assistant":
+            continue
+        content = bget(msg, "content")
+        if isinstance(content, list):
+            for block in content:
+                if (bget(block, "type") == "tool_use"
+                        and bget(block, "name") == "ExitPlanMode"):
+                    return True
+        count += 1
+        if count >= window:
+            break
+    return False
+
 # Verified input schemas for CC workflow tools that require non-empty input.
-# Source of truth: universal_tool_extraction.py _FEW_SHOT_EXAMPLES + test fixtures.
+# Source of truth: ToolSearch → AskUserQuestion real schema + universal_tool_extraction.py
+# _FEW_SHOT_EXAMPLES + test fixtures.
 # Tools not listed here (EnterPlanMode, ExitPlanMode, Cron*, Worktree*, Task*)
 # use the empty stub — they either take no input or have no verified schema in proxy.
 _CC_TOOL_SCHEMAS: dict[str, dict] = {
@@ -49,25 +77,50 @@ _CC_TOOL_SCHEMAS: dict[str, dict] = {
         "properties": {
             "questions": {
                 "type": "array",
-                "description": "Questions to present to the user",
+                "description": "Questions to present to the user (1–4 items)",
+                "maxItems": 4,
                 "items": {
                     "type": "object",
+                    # All four fields are required by Claude Code's real validator.
+                    # Marking them required here guides the model to always supply them,
+                    # preventing secondary validation failures after the shape is correct.
+                    "required": ["question", "header", "options", "multiSelect"],
+                    "additionalProperties": False,
                     "properties": {
-                        "question":    {"type": "string"},
-                        "header":      {"type": "string"},
+                        "question": {
+                            "type": "string",
+                            "description": "The full question text to display to the user",
+                        },
+                        "header": {
+                            "type": "string",
+                            "description": "Short chip label shown above the question (max 12 chars)",
+                        },
                         "options": {
                             "type": "array",
+                            "description": "2–4 selectable choices for this question",
+                            "minItems": 2,
+                            "maxItems": 4,
                             "items": {
                                 "type": "object",
+                                "required": ["label", "description"],
+                                "additionalProperties": False,
                                 "properties": {
-                                    "label":       {"type": "string"},
-                                    "description": {"type": "string"},
+                                    "label": {
+                                        "type": "string",
+                                        "description": "Short display text for the option (1–5 words)",
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "description": "Explanation of what the option means or implies",
+                                    },
                                 },
                             },
                         },
-                        "multiSelect": {"type": "boolean"},
+                        "multiSelect": {
+                            "type": "boolean",
+                            "description": "True to allow selecting multiple options; False for single-select",
+                        },
                     },
-                    "required": ["question"],
                 },
             },
         },
@@ -119,11 +172,58 @@ _CC_TOOL_SCHEMAS: dict[str, dict] = {
     },
 }
 
+# Semantic descriptions for CC workflow tools.
+# These descriptions are shown to ALL models (both no-tools XML path and native-tools path).
+# For native-tools models build_tool_prompt() is never called, so the description field in
+# the tool definition is the ONLY guidance the model receives — a concrete example embedded
+# here is the highest-leverage fix for AskUserQuestion's question/questions naming confusion.
+_CC_TOOL_DESCRIPTIONS: dict[str, str] = {
+    "AskUserQuestion": (
+        "Display one or more questions to the user in an interactive dialog and collect their"
+        " answers. "
+        "IMPORTANT — the top-level key is 'questions' (plural, an ARRAY), NOT 'question'. "
+        "Each item in the array MUST have ALL FOUR fields: "
+        "'question' (string — the full question text), "
+        "'header' (string — short chip label, max 12 chars), "
+        "'options' (array of 2–4 objects each with 'label' string and 'description' string), "
+        "'multiSelect' (boolean). "
+        'Example: {"questions":[{"question":"Which approach should we use?",'
+        '"header":"Approach",'
+        '"options":[{"label":"Simple","description":"Minimal implementation, easier to maintain"},'
+        '{"label":"Robust","description":"Full implementation with error handling"}],'
+        '"multiSelect":false}]}'
+    ),
+    "TodoWrite": (
+        "Create or update the session task list. "
+        "Pass 'todos' (array of objects). Each todo MUST have: "
+        "'content' (string — task description), "
+        "'status' (string — 'pending', 'in_progress', or 'completed'), "
+        "'activeForm' (string — present-continuous form, e.g. 'Fixing bug'). "
+        'Example: {"todos":[{"content":"Fix bug","status":"in_progress","activeForm":"Fixing bug"}]}'
+    ),
+    "WebSearch": (
+        "Search the web for up-to-date information. "
+        "Pass 'query' (string — the search query). "
+        'Example: {"query":"python async best practices 2025"}'
+    ),
+    "WebFetch": (
+        "Fetch and extract content from a URL. "
+        "Pass 'url' (string) and 'prompt' (string — what to extract from the page). "
+        'Example: {"url":"https://example.com/docs","prompt":"Extract the API reference"}'
+    ),
+}
+
 # Tools that should only be injected during PLAN phase.
 # Injecting these outside PLAN phase is safe (they're passive), but filtering
 # them in non-PLAN turns makes it structurally impossible to accidentally
 # trigger the Plans tab from a cached tool list.
 _PLAN_ONLY_TOOLS: frozenset[str] = frozenset({"EnterPlanMode", "ExitPlanMode"})
+
+# Tools always guaranteed in PLAN phase even when CC's system prompt omits them.
+# Some CC project configurations (e.g. school-system) never include AskUserQuestion
+# in <available-deferred-tools>, yet plan-mode models MUST be able to call it to
+# surface the question dialog. TodoWrite is included for the same reason.
+_PLAN_DEFAULT_TOOLS: frozenset[str] = frozenset({"AskUserQuestion", "TodoWrite"})
 
 
 class DeferredToolsTransformer(Transformer):
@@ -144,6 +244,7 @@ class DeferredToolsTransformer(Transformer):
 
         # ── Step 1: Extract from CC's system prompt (primary source) ──────────
         deferred = extract_deferred_tool_names(system, messages=messages)
+        _source = "system_prompt" if deferred else None
 
         # ── Step 2: Persist to session cache if CC sent the list ──────────────
         if deferred and ctx.session_id:
@@ -153,26 +254,40 @@ class DeferredToolsTransformer(Transformer):
         if not deferred and ctx.session_id:
             cached = await get_session_deferred_tools(ctx.session_id)
             if cached:
-                # Plan-mode tools are only restored during PLAN phase.
-                # Other phases get the full cached list minus plan-only tools.
+                # Plan-mode tools (ExitPlanMode) are stripped from the cache
+                # ONLY once the plan session is over, i.e. ExitPlanMode was
+                # already called. Previously filtered by ctx.phase != "PLAN",
+                # which broke multi-turn plan sessions: intermediate READ /
+                # ANALYZING turns stripped ExitPlanMode even though the model
+                # still needed it to call the tool and surface the Plan tab.
                 if ctx.phase != "PLAN":
-                    cached = [n for n in cached if n not in _PLAN_ONLY_TOOLS]
+                    msgs = list(messages or [])
+                    if _exit_plan_already_called(msgs):
+                        cached = [n for n in cached if n not in _PLAN_ONLY_TOOLS]
                 if cached:
                     deferred = cached
+                    _source = "session_cache"
                     logger.debug(
-                        "[deferred-tools] restored %d tool(s) from session cache",
-                        len(deferred),
+                        "[deferred-tools] restored %d tool(s) from session cache (phase=%s)",
+                        len(deferred), ctx.phase,
                     )
 
         # ── Step 4: PLAN phase guarantee ──────────────────────────────────────
         # Even if session cache is empty (brand-new session, first turn),
         # always ensure plan-mode tools are available during PLAN phase so
         # EnterPlanMode can never be silently dropped by stream validation.
+        # _PLAN_DEFAULT_TOOLS (AskUserQuestion, TodoWrite) are also guaranteed
+        # because some CC project configs never include them in
+        # <available-deferred-tools> (RC-8).
         if ctx.phase == "PLAN":
             deferred_set = set(deferred)
-            extras = [n for n in _PLAN_ONLY_TOOLS if n not in deferred_set]
+            extras = [
+                n for n in (*_PLAN_ONLY_TOOLS, *_PLAN_DEFAULT_TOOLS)
+                if n not in deferred_set
+            ]
             if extras:
                 deferred = list(deferred) + extras
+                _source = _source or "plan_guarantee"
                 logger.debug(
                     "[deferred-tools] PLAN phase guarantee: added %s", extras
                 )
@@ -189,8 +304,10 @@ class DeferredToolsTransformer(Transformer):
         new_defs = [
             {
                 "name": name,
-                "description": f"Claude Code built-in workflow tool: {name}. "
-                               f"Use the input schema.",
+                "description": _CC_TOOL_DESCRIPTIONS.get(
+                    name,
+                    f"Claude Code built-in workflow tool: {name}. Use the input schema.",
+                ),
                 "input_schema": _CC_TOOL_SCHEMAS.get(name, {"type": "object", "properties": {}}),
             }
             for name in deferred
@@ -206,4 +323,7 @@ class DeferredToolsTransformer(Transformer):
 
         request.tools = list(request.tools or []) + new_defs
         names = [d["name"] for d in new_defs]
-        print(f"[deferred-tools] injected {len(names)} deferred tool(s): {', '.join(names)}", flush=True)
+        logger.info(
+            "[deferred-tools] injected %d tool(s) via %s (phase=%s): %s",
+            len(names), _source or "unknown", ctx.phase, ", ".join(names),
+        )

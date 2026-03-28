@@ -11,6 +11,7 @@ from llm.transformers.intent_classifier import (
     _detect_analysis_from_history,
     _count_consecutive_reads,
     _resolve_primary_overrides,
+    _plan_mode_active,
 )
 from config import ClassifierConfig, PolicyConfig
 
@@ -899,6 +900,10 @@ class TestLLMClassifierFiveIntents:
             msgs.append(SimpleNamespace(role="user", content=[
                 SimpleNamespace(type="tool_result", tool_use_id="x", content="file..."),
             ]))
+        # Add a final assistant message with no domain tools — this represents
+        # the model having processed all tool results and being ready to synthesize.
+        # Without this, Override F fires (last assistant had Read → converts SYNTHESIZING→READ).
+        msgs.append(SimpleNamespace(role="assistant", content="I now have sufficient context."))
 
         ctx = TransformContext()
         with patch(
@@ -1625,4 +1630,96 @@ class TestResolvePrimaryOverrides:
         )
         assert result is not None
         assert result.name == "G"  # P2 won, not A
+
+    # ── P0 (PLAN_LOCK) regression tests ────────────────────────────────────────
+
+    def _msgs_with_enter_plan_mode(self):
+        """History with EnterPlanMode tool call but no ExitPlanMode — plan mode active."""
+        return [{"role": "assistant", "content": [{"type": "tool_use", "name": "EnterPlanMode"}]}]
+
+    def _msgs_with_full_plan_cycle(self):
+        """History with EnterPlanMode followed by ExitPlanMode — plan mode ended."""
+        return [
+            {"role": "assistant", "content": [{"type": "tool_use", "name": "EnterPlanMode"}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "name": "ExitPlanMode"}]},
+        ]
+
+    def test_p0_plan_lock_fires_for_build_intent(self):
+        """P0: plan_mode_active=True blocks Override A (BUILD intent + HAS_WRITES)."""
+        result = _resolve_primary_overrides(
+            ctx_intent="BUILD",
+            history_phase="HAS_WRITES",
+            _is_explicit_analysis=False,
+            analysis_detected=False,
+            _is_gather_continuation=False,
+            tool_names=["Write"],
+            consecutive_reads=0,
+            messages=[],
+            plan_mode_active=True,
+        )
+        assert result is not None
+        assert result.name == "PLAN_LOCK"
+        assert result.intent == "PLAN"
+        assert result.phase == "PLAN"
+        assert result.is_analysis is False
+
+    def test_p0_plan_lock_fires_for_chat_and_read_intents(self):
+        """P0 blocks C2 (CHAT/READ + gather continuation) when plan mode is active."""
+        for intent in ("CHAT", "READ"):
+            result = _resolve_primary_overrides(
+                ctx_intent=intent,
+                history_phase="READS_ONLY",
+                _is_explicit_analysis=False,
+                analysis_detected=True,
+                _is_gather_continuation=True,
+                tool_names=["Read", "Grep"],
+                consecutive_reads=5,
+                messages=[],
+                plan_mode_active=True,
+            )
+            assert result is not None and result.name == "PLAN_LOCK", (
+                f"Expected PLAN_LOCK for intent={intent}, got {result}"
+            )
+            assert result.analysis_read_count == 5  # preserved for nudge
+
+    def test_p0_does_not_fire_after_exit_plan_mode(self):
+        """P0 inactive once ExitPlanMode called — P2/Override G can fire normally."""
+        msgs = self._msgs_with_full_plan_cycle()
+        # _plan_mode_active() returns False because ExitPlanMode resets found_enter
+        assert _plan_mode_active(msgs) is False
+
+        result = _resolve_primary_overrides(
+            ctx_intent="READ",
+            history_phase="READS_ONLY",
+            _is_explicit_analysis=False,
+            analysis_detected=False,
+            _is_gather_continuation=False,
+            tool_names=[],
+            consecutive_reads=0,
+            messages=msgs,
+            plan_mode_active=False,  # plan mode ended
+        )
+        # P2 (Override G) fires because ExitPlanMode is in history
+        assert result is not None
+        assert result.name == "G"
+        assert result.intent == "BUILD"
+
+    def test_p0_blocks_c2_regression(self):
+        """Regression: old C2 scenario (analysis_detected + gather continuation + PLAN intent)
+        must NOT override to READ when plan mode is active."""
+        result = _resolve_primary_overrides(
+            ctx_intent="PLAN",
+            history_phase="READS_ONLY",
+            _is_explicit_analysis=False,
+            analysis_detected=True,   # user requested analysis as part of planning
+            _is_gather_continuation=True,  # current message is pure tool_result
+            tool_names=["Read", "Grep", "Bash"],
+            consecutive_reads=8,
+            messages=[],
+            plan_mode_active=True,
+        )
+        assert result is not None
+        assert result.name == "PLAN_LOCK"   # P0 wins, NOT C2
+        assert result.intent == "PLAN"      # stays PLAN, not overridden to READ
+        assert result.is_analysis is False  # no READ enforcement
 

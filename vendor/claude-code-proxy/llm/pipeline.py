@@ -29,6 +29,12 @@ class TransformContext:
     analysis_phase: str = "NONE"  # NONE|ANALYZING|SYNTHESIZING|DONE
     analysis_read_count: int = 0
 
+    # Set by IntentClassifierTransformer — authoritative plan mode signal.
+    # True when EnterPlanMode was called in recent history WITHOUT subsequent ExitPlanMode.
+    # Computed once early in the pipeline; all downstream transformers read this field
+    # instead of independently re-deriving plan mode state from history.
+    plan_mode_active: bool = False
+
     # Set by TokenCapTransformer
     approx_tokens: int = 0
 
