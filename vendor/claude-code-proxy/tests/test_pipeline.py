@@ -79,6 +79,8 @@ class TestTransformContext:
             # Grounding fields
             "evidence_links", "citation_map", "grounding_score",
             "grounding_issues", "evidence_graph", "code_snippet_cache",
+            # Plan mode lock (set by IntentClassifierTransformer)
+            "plan_mode_active",
             # P3 — confidence scoring
             "intent_confidence", "secondary_intent",
             # P2 — adaptive routing

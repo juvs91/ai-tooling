@@ -80,7 +80,8 @@ class TestCountTokensEndpoint:
 
     def test_count_tokens_returns_input_tokens(self, client, basic_request):
         with patch("server.token_counter", return_value=42), \
-             patch("server.cached_token_count", return_value=None):
+             patch("server.cached_token_count", return_value=None), \
+             patch("server.scale_tokens", side_effect=lambda tokens, _: tokens):
             response = client.post("/v1/messages/count_tokens", json=basic_request)
             data = response.json()
             assert "input_tokens" in data

@@ -113,6 +113,31 @@ def _get_recent_all_tools(messages: list, window: int = 20) -> list[str]:
     return all_tools
 
 
+def _plan_mode_active(messages: list) -> bool:
+    """Return True if EnterPlanMode was called without a subsequent ExitPlanMode.
+
+    Duplicated from intent_enforcement._plan_mode_active_from_history() to avoid
+    circular imports between sibling transformer modules. Both must stay in sync
+    if the scan logic changes. Window=20 matches _exit_plan_already_called() in
+    deferred_tools.py.
+    """
+    recent = messages[-20:] if len(messages) > 20 else messages
+    found_enter = False
+    for msg in recent:
+        if bget(msg, "role") != "assistant":
+            continue
+        content = bget(msg, "content")
+        for block in content or []:
+            if bget(block, "type") != "tool_use":
+                continue
+            name = bget(block, "name", "")
+            if name == "EnterPlanMode":
+                found_enter = True
+            elif name == "ExitPlanMode":
+                found_enter = False
+    return found_enter
+
+
 def _resolve_primary_overrides(
     ctx_intent: str,
     history_phase: str | None,
@@ -122,6 +147,7 @@ def _resolve_primary_overrides(
     tool_names: list[str],
     consecutive_reads: int,
     messages: list,
+    plan_mode_active: bool = False,
 ) -> _IntentOverride | None:
     """Resolve primary intent overrides in explicit priority order.
 
@@ -136,6 +162,22 @@ def _resolve_primary_overrides(
     F, D, E (state machine transitions on analysis_phase) are handled separately
     by the caller and are not part of this function.
     """
+    # P0: Plan mode lock — highest priority gate.
+    # When EnterPlanMode was called without subsequent ExitPlanMode, the model is in
+    # an active planning session. Lock intent=PLAN so PLAN enforcement fires (not READ).
+    # Blocks C1, C2, A, B from breaking the plan session.
+    #
+    # Natural transition: _plan_mode_active() returns False once ExitPlanMode is called
+    # (found_enter resets to False), so P2/Override G fires correctly on the next turn.
+    #
+    # Override A (HAS_WRITES) is also blocked: writing the plan .md file sets
+    # HAS_WRITES but must NOT route to BUILD enforcement before ExitPlanMode.
+    #
+    # consecutive_reads is preserved so intent_enforcement can nudge the model
+    # when it has been reading for many turns without calling ExitPlanMode.
+    if plan_mode_active:
+        return _IntentOverride("PLAN_LOCK", "PLAN", "PLAN", "NONE", False, consecutive_reads)
+
     # P1: Explicit analysis request — user intent unambiguous.
     # Overrides HAS_WRITES and ExitPlanMode. Allows build→analysis pivot.
     if _is_explicit_analysis and ctx_intent not in ("READ", "SYNTHESIZING"):
@@ -418,13 +460,19 @@ class IntentClassifierTransformer(Transformer):
                 "SYNTHESIZING": "PLAN",
             }.get(ctx.intent, "EXECUTE")
 
-        # Step 5: Post-classification overrides (P1 highest priority, P5 lowest)
+        # Step 5: Post-classification overrides (P0 highest priority, P5 lowest)
+        # Compute plan mode once here — ctx.plan_mode_active is the authoritative signal
+        # for all downstream transformers (intent_enforcement, deferred_tools, etc.).
+        plan_mode_active = _plan_mode_active(messages)
+        ctx.plan_mode_active = plan_mode_active
+
         # _resolve_primary_overrides() evaluates all conditions in explicit order
         # and returns on first match — no hidden elif coupling.
         _override = _resolve_primary_overrides(
             ctx.intent, history_phase, _is_explicit_analysis,
             analysis_detected, _is_gather_continuation, tool_names,
             consecutive_reads, messages,
+            plan_mode_active=plan_mode_active,
         )
         if _override:
             logger.info(

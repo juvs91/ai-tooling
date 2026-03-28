@@ -18,6 +18,7 @@ from llm.transformers.universal_tool_extraction import UniversalToolExtractionTr
 from llm.transformers.grounding_validator import GroundingValidatorTransformer
 from llm.transformers.adaptive_context import AdaptiveContextTransformer
 from llm.transformers.quality_recorder import QualityRecorderTransformer
+from llm.transformers.tool_call_validator import ToolCallValidatorTransformer
 
 __all__ = [
     "Pipeline",
@@ -40,4 +41,5 @@ __all__ = [
     "GroundingValidatorTransformer",
     "AdaptiveContextTransformer",
     "QualityRecorderTransformer",
+    "ToolCallValidatorTransformer",
 ]

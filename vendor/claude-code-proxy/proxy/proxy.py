@@ -46,6 +46,7 @@ from llm.transformers import (
     ModelFeedbackTransformer,
     StreamEventTransformer,
     QualityRecorderTransformer,
+    ToolCallValidatorTransformer,
     # ──────────────────────────────────────────────────────────────────────────────────────
 )
 
@@ -107,6 +108,7 @@ def build_response_pipeline(cfg: ProxyConfig) -> Pipeline:
     return Pipeline([
         ReasoningHandlingTransformer(cfg.analysis),
         UniversalToolExtractionTransformer(),
+        ToolCallValidatorTransformer(),               # Validate/auto-correct CC tool params (e.g. AskUserQuestion)
         GroundingValidatorTransformer(enabled=cfg.policy.grounding_validation_enabled if hasattr(cfg, "policy") and hasattr(cfg.policy, "grounding_validation_enabled") else True),
         ModelFeedbackTransformer(cfg),
         QualityRecorderTransformer(),
@@ -509,6 +511,18 @@ async def run_messages(
                 request_obj, fb_request,
                 max_retries=cfg.max_retries, base_delay=cfg.retry_base_delay,
             )
+            # Normalize model name in non-streaming response so CC's VSCode
+            # extension receives the original claude-* model name and activates
+            # model-gated UI like the Plan panel (same as passthrough does via
+            # response_model= param).
+            if not is_stream and original_model:
+                try:
+                    if isinstance(out, dict):
+                        out["model"] = original_model
+                    elif hasattr(out, "model"):
+                        out.model = original_model
+                except Exception:
+                    pass
             return is_stream, out, provider.name
         except Exception as e:
             print(f"[fallback] {provider.name} failed: {e}")
