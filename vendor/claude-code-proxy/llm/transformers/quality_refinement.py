@@ -628,9 +628,9 @@ def _parse_stream_tokens(chunks: list[str]) -> tuple[int, int, str]:
     stop_reason = "end_turn"
     for chunk in chunks:
         for line in chunk.split("\n"):
-            if not line.startswith("data: "):
+            if not line.startswith("data:"):
                 continue
-            data_str = line[6:].strip()
+            data_str = line[5:].lstrip()
             if data_str == "[DONE]":
                 continue
             try:
