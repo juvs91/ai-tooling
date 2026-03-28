@@ -154,9 +154,9 @@ class PassthroughClient:
                         # Normalize model name in message_start so CC's VSCode extension
                         # receives the original request model (e.g. "claude-sonnet-4-6")
                         # regardless of what the upstream returned.
-                        if response_model and '"message_start"' in line and line.startswith("data: "):
+                        if response_model and '"message_start"' in line and line.startswith("data:"):
                             try:
-                                data = json.loads(line[6:])
+                                data = json.loads(line[5:].lstrip())
                                 if data.get("type") == "message_start":
                                     data["message"]["model"] = response_model
                                     line = "data: " + json.dumps(data, ensure_ascii=False)
@@ -167,8 +167,8 @@ class PassthroughClient:
                         if strip_reasoning and "<reasoning>" in line:
                             self._metrics.has_reasoning_leak = True
                             # Need to parse and modify the SSE data
-                            if line.startswith("data: "):
-                                data_str = line[6:]
+                            if line.startswith("data:"):
+                                data_str = line[5:].lstrip()
                                 cleaned = _strip_reasoning_from_text_delta(data_str)
                                 if not cleaned:
                                     continue  # Skip entirely empty delta

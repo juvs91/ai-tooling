@@ -1052,7 +1052,7 @@ async def passthrough_xml_tool_extraction(stream_gen: Any, request: Any):
             pending_event_line = chunk
             continue
 
-        if not chunk.startswith("data: "):
+        if not chunk.startswith("data:"):
             # Non-event, non-data line — flush pending event line and pass through
             if pending_event_line:
                 yield pending_event_line
@@ -1060,7 +1060,7 @@ async def passthrough_xml_tool_extraction(stream_gen: Any, request: Any):
             yield chunk
             continue
 
-        data_str = chunk[6:].strip()
+        data_str = chunk[5:].lstrip()
         if data_str in ("[DONE]", ""):
             if pending_event_line:
                 yield pending_event_line
@@ -1220,9 +1220,9 @@ async def accumulate_stream(
         async for chunk in stream_generator:
             chunks.append(chunk)
             for line in chunk.split("\n"):
-                if not line.startswith("data: "):
+                if not line.startswith("data:"):
                     continue
-                data_str = line[6:].strip()
+                data_str = line[5:].lstrip()
                 if data_str == "[DONE]":
                     continue
                 try:
@@ -1301,9 +1301,9 @@ async def tracked_stream(
     async for chunk in stream_gen:
         yield chunk
         for line in chunk.split("\n"):
-            if not line.startswith("data: "):
+            if not line.startswith("data:"):
                 continue
-            data_str = line[6:].strip()
+            data_str = line[5:].lstrip()
             if data_str == "[DONE]":
                 continue
             try:
