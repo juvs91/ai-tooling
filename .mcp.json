@@ -8,6 +8,10 @@
       "command": "bash",
       "args": ["./mcp-scripts/atlassian-mcp.sh"]
     },
+    "bitbucket": {
+      "command": "bash",
+      "args": ["./mcp-scripts/atlassian-mcp.sh", "bitbucket"]
+    },
     "squit": {
       "command": "npx",
       "args": [
