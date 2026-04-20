@@ -4,7 +4,7 @@
     {
       "id": 1,
       "prompt": "Review this GitHub Actions workflow:\n```yaml\nname: Deploy\non: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v3\n      - run: pip install -r requirements.txt\n      - env:\n          DB_PASSWORD: mypassword123\n          API_KEY: sk-prod-abc123\n        run: python deploy.py\n```",
-      "expected_output": "Critical findings: (1) CRITICAL — hardcoded secrets in workflow YAML (DB_PASSWORD, API_KEY) — these are committed to git and visible in GitHub UI; fix: use ${{ secrets.DB_PASSWORD }} and store in GitHub repository secrets; (2) on: push deploys on every push to every branch — add branch filter: on: push: branches: [main]; (3) No environment protection rules — add GitHub environment 'production' with required reviewers; (4) pip install without pinned hashes — supply chain risk, use pip-compile with hashes.",
+      "expected_output": "Critical findings: (1) CRITICAL — hardcoded secrets in workflow YAML (DB_PASSWORD, API_KEY) — these are committed to git and visible in GitHub UI; fix: use {{ '{{' }} secrets.DB_PASSWORD {{ '}}' }} and store in GitHub repository secrets; (2) on: push deploys on every push to every branch — add branch filter: on: push: branches: [main]; (3) No environment protection rules — add GitHub environment 'production' with required reviewers; (4) pip install without pinned hashes — supply chain risk, use pip-compile with hashes.",
       "files": [],
       "assertions": [
         {
@@ -13,9 +13,9 @@
           "evidence": ""
         },
         {
-          "text": "Provides the correct fix using ${{ secrets.NAME }} syntax",
-          "passed": null,
-          "evidence": ""
+          "type": "includes",
+          "text": "Provides the correct fix using ${{ '{{' }} secrets.NAME {{ '}}' }} syntax",
+          "weight": 1.0
         },
         {
           "text": "Flags that deployment triggers on all branches without a branch filter",

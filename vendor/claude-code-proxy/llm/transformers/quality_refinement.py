@@ -19,6 +19,7 @@ model-specific logic across multiple files (stream_quality.py, etc.).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Optional, TYPE_CHECKING
@@ -34,6 +35,40 @@ if TYPE_CHECKING:
     from config import ProxyConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ── Session quality persistence (Item 4 — quality feedback loop) ─────
+
+def _fire_quality_persist(ctx: TransformContext, issues: list[str]) -> None:
+    """Fire-and-forget: persist quality score + stub count into SessionCache.
+
+    Uses asyncio.create_task so it never blocks the streaming response path.
+    Safe to call from any async context; silently skips if no session_id.
+    """
+    session_id = getattr(ctx, "session_id", None)
+    if not session_id:
+        return
+
+    stub_delta = sum(
+        1 for issue in issues
+        if "stub_implementations" in issue or "stubbed_functions" in issue
+    )
+
+    async def _persist() -> None:
+        try:
+            from llm.compressor import append_session_quality
+            await append_session_quality(session_id, ctx.quality_score, stub_delta)
+            logger.debug(
+                "[quality-persist] session=%s score=%.2f stub_delta=%d",
+                session_id[:8], ctx.quality_score, stub_delta,
+            )
+        except Exception as exc:
+            logger.warning("[quality-persist] failed: %s", exc)
+
+    try:
+        asyncio.create_task(_persist())
+    except RuntimeError:
+        pass  # No running event loop — harmless in test contexts
 
 
 # ── Stateless quality helpers (migrated from stream_quality.py) ──────
@@ -174,6 +209,7 @@ def _build_refinement_feedback(
     issues: list[str],
     quality_threshold: float,
     request_messages: list[Any] | None = None,
+    intent: str = "",
 ) -> str:
     """Build human-readable quality feedback for a re-request.
 
@@ -183,22 +219,104 @@ def _build_refinement_feedback(
     own words back; it knows nothing about the task content.
     """
     issue_specific: list[str] = []
+
+    # H18: BUILD-specific stub repair — extract stubbed function names and generate
+    # targeted "implement these functions" instructions rather than generic advice.
+    if intent in ("BUILD", "BUILDING"):
+        stub_count = 0
+        stubbed_fns: list[str] = []
+        for issue in issues:
+            if issue.startswith("stub_implementations("):
+                import re as _re
+                m = _re.search(r"\((\d+)_stubs\)", issue)
+                if m:
+                    stub_count = int(m.group(1))
+            elif issue.startswith("stubbed_functions("):
+                import re as _re
+                m = _re.search(r"\(([^)]+)\)", issue)
+                if m:
+                    stubbed_fns = m.group(1).split(",")
+        if stub_count > 0:
+            stub_lines = [
+                f"CRITICAL — {stub_count} stub(s) detected in written code:",
+                "  FORBIDDEN: `pass`, `...`, `# TODO`, `raise NotImplementedError`",
+                "  REQUIRED: Every function body must contain real, working logic",
+            ]
+            if stubbed_fns:
+                stub_lines.append("  Functions that need full implementation:")
+                for fn in stubbed_fns:
+                    stub_lines.append(f"    - {fn.strip()}(): replace `pass`/`...` with actual code")
+            stub_lines.extend([
+                "  STEPS: (1) re-read the file, (2) implement the full logic, (3) verify by reading back",
+                "  Do NOT move on until every function has a real implementation.",
+            ])
+            issue_specific.extend(stub_lines)
+
+    # Detect primary refinement type for observability (first match wins for logging)
+    refinement_type = "generic"
+    for issue in issues:
+        if "stub_implementations" in issue or "stubbed_functions" in issue:
+            refinement_type = "stub"
+            break
+        elif "unverified" in issue:
+            refinement_type = "unverified_claims"
+            break
+        elif "shallow" in issue or "exploration" in issue:
+            refinement_type = "shallow_exploration"
+            break
+        elif "grounding" in issue:
+            refinement_type = "grounding"
+            break
+        elif "specificity" in issue:
+            refinement_type = "specificity"
+            break
+
     for issue in issues:
         if "factual_verification" in issue:
             continue
+        if "stub_implementations" in issue or "stubbed_functions" in issue:
+            continue  # handled above (H18 block)
         if "specificity" in issue:
-            issue_specific.append("- Add (file:line) citations to EVERY claim")
-        elif "unverified" in issue or "shallow" in issue:
-            issue_specific.append("- Read the files you mentioned before claiming")
+            issue_specific.append("- Add (file:line) citations to EVERY claim you make")
+        elif "unverified" in issue:
+            # H7: model made claims without reading files
+            import re as _re
+            m = _re.search(r"unverified_claims\(([^)]+)\)", issue)
+            if m:
+                claim_count = m.group(1)
+                issue_specific.append(
+                    f"- You made {claim_count} factual claim(s) without reading any files. "
+                    "Use Read/Grep to verify each claim before stating it."
+                )
+            else:
+                issue_specific.append(
+                    "- Claims detected without tool evidence. "
+                    "Read the relevant files first, then cite (file.py:line)."
+                )
+        elif "shallow" in issue:
+            # H6: model mentioned files but didn't read them
+            import re as _re
+            m = _re.search(r"shallow_exploration\(mentioned=(\d+),read=(\d+)\)", issue)
+            if m:
+                mentioned, read = m.group(1), m.group(2)
+                issue_specific.append(
+                    f"- You mentioned {mentioned} files but only read {read}. "
+                    f"Read the remaining {int(mentioned) - int(read)} file(s) before analyzing."
+                )
+            else:
+                issue_specific.append(
+                    "- Shallow exploration: you mentioned files you did not read. "
+                    "Use Read tool on every file you reference."
+                )
         elif "generic" in issue:
-            issue_specific.append("- Replace 'handles/manages' with actual code behavior")
+            issue_specific.append("- Replace 'handles/manages' with actual code behavior — quote the code")
         elif "exploration" in issue:
-            issue_specific.append("- Use Glob/Grep to find related patterns")
+            issue_specific.append("- Use Glob/Grep to find related patterns before summarizing")
         elif "concrete" in issue:
-            issue_specific.append("- Provide line counts, function names, numbers")
+            issue_specific.append("- Provide line counts, function names, specific numbers")
 
     parts = [
-        f"[quality-refinement] Score: {score:.0%} | Threshold: {quality_threshold:.0%}",
+        f"[quality-refinement:{refinement_type}] Score: {score:.0%} | Threshold: {quality_threshold:.0%}",
         f"Issues: {', '.join(issues)}",
     ]
     if issue_specific:
@@ -414,7 +532,9 @@ async def analysis_quality_stream(
     # 1.55. Skip refinement when ANY tool calls are present — tool execution IS productive work.
     # Refining a tool-call response replaces the response before Claude Code can execute the tools,
     # breaking the tool result chain. Score the turn as passing to avoid LLM gate overhead.
-    if tool_use_count > 0:
+    # EXCEPTION: BUILD/VERIFY intent — we score tool inputs for stub patterns (H18) even
+    # when tool calls are present. The refinement fires on the NEXT response, not mid-chain.
+    if tool_use_count > 0 and ctx.intent not in ("BUILD", "BUILDING", "VERIFY"):
         logger.info(
             "[stream-refinement] SKIP: tool_use_count=%d — tool execution in progress, no refinement",
             tool_use_count,
@@ -446,6 +566,7 @@ async def analysis_quality_stream(
 
     # 3. Two-tier gate: skip refinement if score is good or gate says PASS
     if max_refinements <= 0 or not await _should_refine(score, issues, ctx.intent, text, cfg_obj):
+        _fire_quality_persist(ctx, issues)
         for chunk in chunks:
             yield chunk
         return
@@ -474,7 +595,8 @@ async def analysis_quality_stream(
             verification_feedback = await _build_verification_feedback(text, target_path)
 
         feedback = _build_refinement_feedback(score, issues, quality_threshold,
-                                              request_messages=request.messages)
+                                              request_messages=request.messages,
+                                              intent=ctx.intent)
         if verification_feedback:
             feedback = feedback.replace(
                 "\nRe-read the codebase.",
@@ -568,6 +690,7 @@ def _build_unified_feedback(
     if quality_score < cfg.analysis.quality_threshold and quality_issues:
         parts.append(_build_refinement_feedback(
             quality_score, quality_issues, cfg.analysis.quality_threshold, request_messages,
+            intent=ctx.intent,
         ))
 
     # Grounding feedback
@@ -723,6 +846,7 @@ async def stream_response_pipeline(
         analysis_phase=ctx.analysis_phase,
         tools=ctx.tools,
         session_id=ctx.session_id,
+        plan_mode_active=ctx.plan_mode_active,
     )
     try:
         await response_pipeline.process(synthetic, resp_ctx)
@@ -758,6 +882,7 @@ async def stream_response_pipeline(
 
     # STEP 6a: PASS → replay original chunks
     if not needs_quality and not needs_grounding:
+        _fire_quality_persist(ctx, issues)
         for chunk in chunks:
             yield chunk
         return
@@ -800,6 +925,7 @@ async def stream_response_pipeline(
             strip_reasoning=cfg.policy.strip_reasoning,
         )
         ctx.refinement_attempt += 1
+        _fire_quality_persist(ctx, ctx.quality_issues)
 
         model = getattr(request, "original_model", None) or request.model
         in_tokens = (refined_anthropic.usage.input_tokens

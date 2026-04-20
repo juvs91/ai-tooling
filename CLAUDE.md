@@ -2,7 +2,13 @@
 
 ## Mandatory: Read before working
 - ALWAYS read `ai-notes/AI_LEARNING.md` at the start of every session (if it exists)
-- ALWAYS read `templates/GUARDRAILS.template.md` for the full policy
+- ALWAYS read `AGENTS.md` antes de cualquier tarea no trivial — contiene la tabla de routing de skills (qué skill cargar para cada tipo de tarea)
+- Ante nueva subtarea mid-session: re-verifica la tabla de routing en `AGENTS.md`
+
+## Agent Skills
+Skills en `.agents/skills/`. Routing completo con descripción de capacidad en `AGENTS.md`.
+Índice para discovery mid-session: `.agents/skills/skills.md`.
+Sync automático via `sync_skills.sh` (throttle 24h). Force: `bash .agents/sync_skills.sh --force`
 
 ## Guardrails
 - Do NOT guess or fabricate file paths, commands, or outputs
@@ -74,6 +80,15 @@ All MCP credentials are stored as environment variables (see `.env`):
 | **Squit** | `SQUIT_API_KEY` | API key |
 | **CloudSQL** | `WPC_ENV` + `PROD/QA/DEV_*` | Per-environment DB credentials |
 | **Serper** | `SERPER_API_KEY` | Web search API key |
+
+## ADR-First Gate
+Antes de editar `vendor/claude-code-proxy/**/*.py` o `.agents/skills/**/*.md` debes
+tener un ADR nuevo en staging (`docs/adr/ADR-NNNN-*.md`).
+
+- **Hook Claude Code** (PreToolUse): `.claude/hooks/adr-gate.sh` bloquea la edición
+- **Hook git** (pre-commit): `tools/check_adr_gate.py` bloquea el commit
+- **Instalar git hook**: `bash tools/install_hooks.sh`
+- **Bypass trivial**: agrega `[skip-adr]` al commit message
 
 ## Hooks de Seguridad (`.claude/hooks/`)
 

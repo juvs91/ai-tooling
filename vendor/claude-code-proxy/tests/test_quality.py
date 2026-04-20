@@ -392,3 +392,84 @@ class TestAnalysisQualityStream:
         # Should replay all original chunks (skip refinement for tool-heavy)
         assert len(result) == len(events)
         assert result == events
+
+
+# ── Refinement type detection (Item 3) ───────────────────────────────────────
+
+from llm.transformers.quality_refinement import _build_refinement_feedback
+
+
+class TestRefinementTypeDetection:
+    """_build_refinement_feedback must prefix the output with [quality-refinement:{type}]
+    and generate targeted messages per heuristic type."""
+
+    def test_stub_type_detected_and_prefix_present(self):
+        issues = ["stub_implementations(2_stubs)"]
+        result = _build_refinement_feedback(0.4, issues, 0.7, intent="BUILD")
+        assert "[quality-refinement:stub]" in result
+
+    def test_stub_type_with_stubbed_functions_issue(self):
+        issues = ["stubbed_functions(foo,bar)"]
+        result = _build_refinement_feedback(0.4, issues, 0.7, intent="BUILD")
+        assert "[quality-refinement:stub]" in result
+
+    def test_unverified_claims_type_detected(self):
+        issues = ["unverified_claims(5)"]
+        result = _build_refinement_feedback(0.5, issues, 0.7)
+        assert "[quality-refinement:unverified_claims]" in result
+
+    def test_unverified_claims_count_in_message(self):
+        issues = ["unverified_claims(3)"]
+        result = _build_refinement_feedback(0.5, issues, 0.7)
+        assert "3 factual claim(s)" in result
+
+    def test_unverified_claims_fallback_without_count(self):
+        """unverified issue without count pattern still generates targeted message."""
+        issues = ["unverified_something"]
+        result = _build_refinement_feedback(0.5, issues, 0.7)
+        assert "[quality-refinement:unverified_claims]" in result
+
+    def test_shallow_exploration_type_detected(self):
+        issues = ["shallow_exploration(mentioned=5,read=2)"]
+        result = _build_refinement_feedback(0.55, issues, 0.7)
+        assert "[quality-refinement:shallow_exploration]" in result
+
+    def test_shallow_exploration_counts_in_message(self):
+        issues = ["shallow_exploration(mentioned=7,read=3)"]
+        result = _build_refinement_feedback(0.55, issues, 0.7)
+        assert "mentioned 7 files" in result
+        assert "only read 3" in result
+
+    def test_shallow_exploration_fallback_without_counts(self):
+        """shallow issue without counts still generates targeted message."""
+        issues = ["shallow_response"]
+        result = _build_refinement_feedback(0.55, issues, 0.7)
+        assert "[quality-refinement:shallow_exploration]" in result
+
+    def test_grounding_type_detected(self):
+        issues = ["grounding_score_low(0.45)"]
+        result = _build_refinement_feedback(0.55, issues, 0.7)
+        assert "[quality-refinement:grounding]" in result
+
+    def test_specificity_type_detected(self):
+        issues = ["specificity_low"]
+        result = _build_refinement_feedback(0.55, issues, 0.7)
+        assert "[quality-refinement:specificity]" in result
+
+    def test_generic_type_fallback(self):
+        issues = ["some_unknown_heuristic_xyz"]
+        result = _build_refinement_feedback(0.4, issues, 0.7)
+        assert "[quality-refinement:generic]" in result
+
+    def test_first_match_wins_stub_before_unverified(self):
+        """When multiple issues present, first-match wins (stub before unverified)."""
+        issues = ["stub_implementations(1_stubs)", "unverified_claims(2)"]
+        result = _build_refinement_feedback(0.4, issues, 0.7, intent="BUILD")
+        assert "[quality-refinement:stub]" in result
+        assert "[quality-refinement:unverified_claims]" not in result
+
+    def test_score_and_threshold_in_prefix(self):
+        issues = ["stub_implementations(1_stubs)"]
+        result = _build_refinement_feedback(0.45, issues, 0.70, intent="BUILD")
+        assert "45%" in result or "0.45" in result or "Score:" in result
+        assert "70%" in result or "0.70" in result or "Threshold:" in result

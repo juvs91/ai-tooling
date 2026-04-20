@@ -1,0 +1,74 @@
+{
+  "skill_name": "telemetry",
+  "version": "1.0",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I just ran the software-archeologist skill using claude-sonnet-4-6 with 1200 input tokens and 450 output tokens. Emit the appropriate telemetry event.",
+      "expected_output": "Agent calls send_event with event_type='skill.invoked', skill_name='software-archeologist', model='claude-sonnet-4-6', input_tokens=1200, output_tokens=450, provider='anthropic', and estimated_cost_usd calculated from cost_rates table (non-null).",
+      "assertions": [
+        {
+          "text": "Output contains send_event call or @skill_span usage with event_type='skill.invoked'",
+          "passed": null
+        },
+        {
+          "text": "input_tokens=1200 and output_tokens=450 are present",
+          "passed": null
+        },
+        {
+          "text": "estimated_cost_usd is calculated and non-null",
+          "passed": null
+        },
+        {
+          "text": "provider='anthropic' is inferred from model name",
+          "passed": null
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Generate a cost report for the last 30 days grouped by model.",
+      "expected_output": "Agent invokes `cornerstone report cost --group-by model` or calls GET /v1/summary. Does NOT attempt to read local files for cost data.",
+      "assertions": [
+        {
+          "text": "Agent uses CLI or HTTP API, not local file reads",
+          "passed": null
+        },
+        {
+          "text": "Output includes model names and USD amounts",
+          "passed": null
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I just created a new skill at .agents/skills/software/quality/performance-reviewer/SKILL.md. Record this as a knowledge creation event.",
+      "expected_output": "Agent calls track_knowledge_created(kind='skill', path='.agents/skills/software/quality/performance-reviewer/SKILL.md').",
+      "assertions": [
+        {
+          "text": "track_knowledge_created is called with kind='skill'",
+          "passed": null
+        },
+        {
+          "text": "path matches the provided skill path",
+          "passed": null
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "AGENTIC_TELEMETRY_URL is not set. What happens when I call send_event?",
+      "expected_output": "Agent confirms send_event is a complete no-op — no network call, no exception, no log output. Execution continues normally.",
+      "assertions": [
+        {
+          "text": "Response confirms no-op behavior when env var is absent",
+          "passed": null
+        },
+        {
+          "text": "Response does NOT suggest the agent should skip telemetry calls — they should always be present in code",
+          "passed": null
+        }
+      ]
+    }
+  ]
+}

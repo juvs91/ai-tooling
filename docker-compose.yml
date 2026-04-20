@@ -1,6 +1,8 @@
 services:
   proxy_local:
-    image: ghcr.io/1rgs/claude-code-proxy:main
+    build:
+      context: ./vendor/claude-code-proxy
+      dockerfile: Dockerfile
     restart: unless-stopped
     env_file:
       - ./.env
@@ -9,12 +11,12 @@ services:
       - UV_LINK_MODE=copy
     ports:
       - "8082:8082"
-    volumes:
-      - ./vendor/claude-code-proxy:/claude-code-proxy
-    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py' --reload-exclude '.venv'
+    command: sh -c "[ -d .venv ] || uv sync && uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py' --reload-exclude '.venv'"
 
   proxy_cloud:
-    image: ghcr.io/1rgs/claude-code-proxy:main
+    build:
+      context: ./vendor/claude-code-proxy
+      dockerfile: Dockerfile
     restart: unless-stopped
     env_file:
       - ./.env
@@ -23,6 +25,4 @@ services:
       - UV_LINK_MODE=copy
     ports:
       - "8083:8082"
-    volumes:
-      - ./vendor/claude-code-proxy:/claude-code-proxy
-    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py' --reload-exclude '.venv'
+    command: sh -c "[ -d .venv ] || uv sync && uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py' --reload-exclude '.venv'"

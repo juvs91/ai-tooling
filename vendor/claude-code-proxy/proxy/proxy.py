@@ -47,6 +47,7 @@ from llm.transformers import (
     StreamEventTransformer,
     QualityRecorderTransformer,
     ToolCallValidatorTransformer,
+    PlanModeGuardTransformer,
     # ──────────────────────────────────────────────────────────────────────────────────────
 )
 
@@ -109,6 +110,7 @@ def build_response_pipeline(cfg: ProxyConfig) -> Pipeline:
         ReasoningHandlingTransformer(cfg.analysis),
         UniversalToolExtractionTransformer(),
         ToolCallValidatorTransformer(),               # Validate/auto-correct CC tool params (e.g. AskUserQuestion)
+        PlanModeGuardTransformer(),                   # Block Edit/Write/Bash-write in plan mode (tool-level, not advisory)
         GroundingValidatorTransformer(enabled=cfg.policy.grounding_validation_enabled if hasattr(cfg, "policy") and hasattr(cfg.policy, "grounding_validation_enabled") else True),
         ModelFeedbackTransformer(cfg),
         QualityRecorderTransformer(),
@@ -128,6 +130,7 @@ async def _run_response_pipeline(response: Any, ctx: TransformContext, cfg: Prox
         phase=ctx.phase,
         analysis_phase=ctx.analysis_phase,
         tools=ctx.tools,
+        plan_mode_active=ctx.plan_mode_active,
     )
     await build_response_pipeline(cfg).process(response, response_ctx)
 

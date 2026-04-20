@@ -81,6 +81,8 @@ class TestTransformContext:
             "grounding_issues", "evidence_graph", "code_snippet_cache",
             # Plan mode lock (set by IntentClassifierTransformer)
             "plan_mode_active",
+            # Ralph mode (set by IntentClassifierTransformer from PROXY_SESSION_MODE: ralph marker)
+            "ralph_mode",
             # P3 — confidence scoring
             "intent_confidence", "secondary_intent",
             # P2 — adaptive routing

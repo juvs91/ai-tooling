@@ -19,6 +19,8 @@ from router.llm_router import (
 from config import ClassifierConfig, PolicyConfig
 from utils.metrics import metrics
 from utils.utils import bget
+from llm.converters import _system_to_text
+from llm.compressor import get_session_plan_mode, set_session_plan_mode
 
 
 WRITE_TOOLS = frozenset({"Write", "Edit", "NotebookEdit"})
@@ -118,10 +120,12 @@ def _plan_mode_active(messages: list) -> bool:
 
     Duplicated from intent_enforcement._plan_mode_active_from_history() to avoid
     circular imports between sibling transformer modules. Both must stay in sync
-    if the scan logic changes. Window=20 matches _exit_plan_already_called() in
+    if the scan logic changes. Window=60 matches _exit_plan_already_called() in
     deferred_tools.py.
+    Plan sessions with many file reads easily exceed 20 messages; 60 gives
+    sufficient coverage for typical planning sessions.
     """
-    recent = messages[-20:] if len(messages) > 20 else messages
+    recent = messages[-60:] if len(messages) > 60 else messages
     found_enter = False
     for msg in recent:
         if bget(msg, "role") != "assistant":
@@ -185,9 +189,10 @@ def _resolve_primary_overrides(
 
     # P2: ExitPlanMode in recent history — hard planning boundary.
     # Model exited plan mode → next turn MUST be implementation.
-    # Window=20 survives GLM-4.7's multi-read implementation preamble.
+    # Window=60 matches _plan_mode_active() / _exit_plan_already_called() so that
+    # ExitPlanMode detection is consistent with plan mode detection across long sessions.
     if not _is_explicit_analysis and ctx_intent != "BUILD":
-        _recent_all = _get_recent_all_tools(messages, window=20)
+        _recent_all = _get_recent_all_tools(messages, window=60)
         if "ExitPlanMode" in _recent_all:
             return _IntentOverride("G", "BUILD", "EXECUTE", "NONE", False, 0)
 
@@ -464,7 +469,46 @@ class IntentClassifierTransformer(Transformer):
         # Compute plan mode once here — ctx.plan_mode_active is the authoritative signal
         # for all downstream transformers (intent_enforcement, deferred_tools, etc.).
         plan_mode_active = _plan_mode_active(messages)
+        if not plan_mode_active:
+            # Signal 1: CC system prompt explicitly says "Plan mode is active".
+            # This fires when /plan is used but the user's message text would otherwise
+            # classify as CHAT or BUILD (e.g., a short reply mid-plan-session).
+            _system_text = _system_to_text(getattr(request, "system", None))
+            if "Plan mode is active" in _system_text:
+                plan_mode_active = True
+        else:
+            _system_text = _system_to_text(getattr(request, "system", None))
+
+        # Ralph mode: Ralph injects PROXY_SESSION_MODE: ralph via --append-system-prompt.
+        # No headers, no files — the system prompt is the only in-band channel through CC.
+        if "PROXY_SESSION_MODE: ralph" in _system_text:
+            ctx.ralph_mode = True
+            logger.info("[classify] RALPH_MODE detected via system prompt marker")
+        # Pre-compute recent tools — reused by Signal 2 guard and ExitPlanMode override.
+        _recent_tools = _get_recent_all_tools(messages, window=60)
+        if not plan_mode_active and ctx.intent == "PLAN" and history_phase != "HAS_WRITES":
+            # Signal 2: Classifier detected PLAN intent. Activate from the FIRST turn
+            # even before EnterPlanMode is called, so the first turn is not unprotected.
+            # Guards:
+            #   - HAS_WRITES in history → impl session active, Override A should apply.
+            #   - ExitPlanMode in recent history → plan ended, "implement the plan" must
+            #     not re-enter plan mode even though it matches PLANNING_RE.
+            if "ExitPlanMode" not in _recent_tools:
+                plan_mode_active = True
+        # Signal 3: Session cache — persists plan mode state across history truncation
+        # and proxy restarts. Provides unlimited coverage for model-initiated plan mode
+        # (not bound by the 60-message Signal 0 window). Only fires when session_id is
+        # available (always set from X-Session-ID header for real CC sessions).
+        if not plan_mode_active and ctx.session_id:
+            plan_mode_active = await get_session_plan_mode(ctx.session_id)
+        # ExitPlanMode override: if called in recent history, always force False even if
+        # the session cache still says True (stale). This handles the first post-exit turn.
+        if plan_mode_active and "ExitPlanMode" in _recent_tools:
+            plan_mode_active = False
+        # Persist final state every turn: sets on activation, clears on exit.
         ctx.plan_mode_active = plan_mode_active
+        if ctx.session_id:
+            await set_session_plan_mode(ctx.session_id, plan_mode_active)
 
         # _resolve_primary_overrides() evaluates all conditions in explicit order
         # and returns on first match — no hidden elif coupling.

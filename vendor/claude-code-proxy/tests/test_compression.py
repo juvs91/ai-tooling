@@ -264,3 +264,104 @@ class TestEffectiveContextWindow:
                     new_callable=AsyncMock, return_value=(messages, False)) as mock:
             await t.transform(_request(), ctx)
             assert mock.call_args.kwargs["model_context_window"] == 200000
+
+
+# ── Session quality tracking (Item 4) ────────────────────────────────────────
+
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
+
+
+class TestSessionQualityTracking:
+    """Tests for append_session_quality / get_session_quality_history (Item 4)."""
+
+    @pytest.fixture(autouse=True)
+    def isolate_session_cache(self, tmp_path, monkeypatch):
+        """Each test gets a clean session cache so they don't bleed into each other."""
+        cache_file = str(tmp_path / "cache.json")
+        monkeypatch.setenv("PROXY_SESSION_CACHE_FILE", cache_file)
+        # Reload compressor so it picks up the fresh env var and empty cache
+        import importlib
+        import llm.compressor as comp
+        comp._session_cache.clear()
+        yield comp
+
+    @pytest.mark.asyncio
+    async def test_append_stores_score_and_stub_count(self, isolate_session_cache):
+        comp = isolate_session_cache
+        await comp.append_session_quality("sess-A", 0.45, stub_delta=2)
+        scores, stubs = await comp.get_session_quality_history("sess-A")
+        assert scores == [0.45]
+        assert stubs == 2
+
+    @pytest.mark.asyncio
+    async def test_append_accumulates_stub_count(self, isolate_session_cache):
+        comp = isolate_session_cache
+        await comp.append_session_quality("sess-B", 0.60, stub_delta=1)
+        await comp.append_session_quality("sess-B", 0.55, stub_delta=1)
+        _, stubs = await comp.get_session_quality_history("sess-B")
+        assert stubs == 2
+
+    @pytest.mark.asyncio
+    async def test_rolling_window_capped_at_10(self, isolate_session_cache):
+        comp = isolate_session_cache
+        for i in range(12):
+            await comp.append_session_quality("sess-C", float(i) / 12)
+        scores, _ = await comp.get_session_quality_history("sess-C")
+        assert len(scores) == 10
+
+    @pytest.mark.asyncio
+    async def test_rolling_window_keeps_most_recent(self, isolate_session_cache):
+        comp = isolate_session_cache
+        for i in range(12):
+            await comp.append_session_quality("sess-D", float(i) * 0.05)
+        scores, _ = await comp.get_session_quality_history("sess-D")
+        # Most recent 10 scores should be from i=2..11 (values 0.10..0.55)
+        assert scores[0] == pytest.approx(0.10, abs=0.01)
+        assert scores[-1] == pytest.approx(0.55, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_unknown_session_returns_empty(self, isolate_session_cache):
+        comp = isolate_session_cache
+        scores, stubs = await comp.get_session_quality_history("nonexistent-sess")
+        assert scores == []
+        assert stubs == 0
+
+    @pytest.mark.asyncio
+    async def test_multiple_sessions_isolated(self, isolate_session_cache):
+        comp = isolate_session_cache
+        await comp.append_session_quality("sess-X", 0.30, stub_delta=1)
+        await comp.append_session_quality("sess-Y", 0.90, stub_delta=0)
+        scores_x, stubs_x = await comp.get_session_quality_history("sess-X")
+        scores_y, stubs_y = await comp.get_session_quality_history("sess-Y")
+        assert scores_x == [0.30]
+        assert stubs_x == 1
+        assert scores_y == [0.90]
+        assert stubs_y == 0
+
+    @pytest.mark.asyncio
+    async def test_quality_fields_in_cache_dataclass(self, isolate_session_cache):
+        """_CompressionCache must have quality_scores and session_stub_count fields."""
+        from llm.compressor import _CompressionCache
+        from dataclasses import fields
+        field_names = {f.name for f in fields(_CompressionCache)}
+        assert "quality_scores" in field_names
+        assert "session_stub_count" in field_names
+
+    @pytest.mark.asyncio
+    async def test_quality_fields_persisted_to_disk(self, isolate_session_cache, tmp_path, monkeypatch):
+        """Disk cache file must include quality_scores and session_stub_count."""
+        import json
+        comp = isolate_session_cache
+        # _SESSION_CACHE_FILE is a module-level constant — patch it directly
+        cache_file = str(tmp_path / "disk_cache.json")
+        monkeypatch.setattr(comp, "_SESSION_CACHE_FILE", cache_file)
+        await comp.append_session_quality("sess-persist", 0.72, stub_delta=3)
+        with open(cache_file) as f:
+            data = json.load(f)
+        entry = data.get("sess-persist")
+        assert entry is not None, "Session not persisted to disk"
+        assert "quality_scores" in entry
+        assert "session_stub_count" in entry
+        assert entry["quality_scores"] == [0.72]
+        assert entry["session_stub_count"] == 3

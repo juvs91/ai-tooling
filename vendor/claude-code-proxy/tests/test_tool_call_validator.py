@@ -473,3 +473,221 @@ class TestDeferredToolsDescriptionQuality:
         assert "_CC_TOOL_DESCRIPTIONS" in src, (
             "DeferredToolsTransformer.transform must use _CC_TOOL_DESCRIPTIONS for descriptions"
         )
+
+
+# ── New correctors: ExitPlanMode / EnterPlanMode ─────────────────────────────
+
+from llm.transformers.tool_call_validator import (
+    _correct_no_param_tool,
+    _correct_todo_write,
+    _correct_web_search,
+    _correct_web_fetch,
+    _correct_notebook_edit,
+)
+
+
+class TestCorrectNoPramTool:
+    """ExitPlanMode and EnterPlanMode must take no params."""
+
+    def test_exit_plan_mode_strips_reason_param(self):
+        corrected, corrections = _correct_no_param_tool({"reason": "done"}, "ExitPlanMode")
+        assert corrected == {}
+        assert len(corrections) == 1
+        assert "ExitPlanMode" in corrections[0]
+
+    def test_enter_plan_mode_strips_spurious_params(self):
+        corrected, corrections = _correct_no_param_tool({"mode": "auto"}, "EnterPlanMode")
+        assert corrected == {}
+        assert len(corrections) == 1
+
+    def test_empty_input_no_correction(self):
+        corrected, corrections = _correct_no_param_tool({}, "ExitPlanMode")
+        assert corrected == {}
+        assert corrections == []
+
+    def test_none_input_no_correction(self):
+        corrected, corrections = _correct_no_param_tool(None, "ExitPlanMode")
+        assert corrected == {}
+        assert corrections == []
+
+    @pytest.mark.asyncio
+    async def test_transformer_strips_exit_plan_mode_params(self):
+        """ToolCallValidatorTransformer must strip ExitPlanMode params end-to-end."""
+        from llm.pipeline import TransformContext
+        block = {"type": "tool_use", "name": "ExitPlanMode", "id": "x1",
+                 "input": {"reason": "planning complete"}}
+        req = SimpleNamespace(content=[block])
+        ctx = MagicMock(spec=TransformContext)
+        ctx.quality_issues = []
+        transformer = ToolCallValidatorTransformer()
+        await transformer.transform(req, ctx)
+        assert block["input"] == {}
+        assert any("tool_corrections" in str(issue) for issue in ctx.quality_issues)
+
+    @pytest.mark.asyncio
+    async def test_transformer_strips_enter_plan_mode_params(self):
+        from llm.pipeline import TransformContext
+        block = {"type": "tool_use", "name": "EnterPlanMode", "id": "x2",
+                 "input": {"title": "my plan"}}
+        req = SimpleNamespace(content=[block])
+        ctx = MagicMock(spec=TransformContext)
+        ctx.quality_issues = []
+        transformer = ToolCallValidatorTransformer()
+        await transformer.transform(req, ctx)
+        assert block["input"] == {}
+
+
+# ── New corrector: TodoWrite ──────────────────────────────────────────────────
+
+class TestCorrectTodoWrite:
+
+    def test_flat_string_wrapped_into_array(self):
+        corrected, corrections = _correct_todo_write({"todos": "write tests"})
+        assert isinstance(corrected["todos"], list)
+        assert corrected["todos"][0]["content"] == "write tests"
+        assert corrected["todos"][0]["status"] == "pending"
+        assert corrected["todos"][0]["priority"] == "medium"
+        assert len(corrections) == 1
+
+    def test_single_dict_wrapped_into_array(self):
+        corrected, corrections = _correct_todo_write({"todos": {"content": "task", "status": "done", "priority": "high"}})
+        assert isinstance(corrected["todos"], list)
+        assert corrected["todos"][0]["content"] == "task"
+        assert len(corrections) == 1
+
+    def test_missing_todos_key_gets_placeholder(self):
+        corrected, corrections = _correct_todo_write({})
+        assert len(corrected["todos"]) >= 1
+        assert len(corrections) >= 1
+
+    def test_valid_array_passes_through(self):
+        inp = {"todos": [{"content": "task A", "status": "pending", "priority": "high"}]}
+        corrected, corrections = _correct_todo_write(inp)
+        assert corrected["todos"][0]["content"] == "task A"
+        assert corrections == []
+
+    def test_non_dict_input_handled(self):
+        corrected, corrections = _correct_todo_write("bad input")
+        assert "todos" in corrected
+        assert len(corrections) >= 1
+
+    def test_todo_item_missing_fields_patched(self):
+        inp = {"todos": [{"content": "fix bug"}]}  # missing status and priority
+        corrected, _ = _correct_todo_write(inp)
+        item = corrected["todos"][0]
+        assert item["status"] == "pending"
+        assert item["priority"] == "medium"
+
+
+# ── New corrector: WebSearch ──────────────────────────────────────────────────
+
+class TestCorrectWebSearch:
+
+    def test_missing_query_gets_placeholder(self):
+        corrected, corrections = _correct_web_search({})
+        assert corrected["query"] == "search"
+        assert len(corrections) == 1
+
+    def test_valid_query_passes_through(self):
+        corrected, corrections = _correct_web_search({"query": "python async generators"})
+        assert corrected["query"] == "python async generators"
+        assert corrections == []
+
+    def test_none_query_gets_placeholder(self):
+        corrected, corrections = _correct_web_search({"query": None})
+        assert corrected["query"] == "search"
+        assert len(corrections) == 1
+
+    def test_non_dict_input_treated_as_query_string(self):
+        corrected, corrections = _correct_web_search("find proxies")
+        assert corrected["query"] == "find proxies"
+        assert len(corrections) == 1
+
+    def test_empty_string_query_gets_placeholder(self):
+        corrected, corrections = _correct_web_search({"query": ""})
+        assert corrected["query"] == "search"
+        assert len(corrections) >= 1
+
+
+# ── New corrector: WebFetch ───────────────────────────────────────────────────
+
+class TestCorrectWebFetch:
+
+    def test_injects_default_prompt_when_missing(self):
+        corrected, corrections = _correct_web_fetch({"url": "https://example.com"})
+        assert "prompt" in corrected
+        assert len(corrected["prompt"]) > 0
+        assert len(corrections) == 1
+
+    def test_missing_url_gets_placeholder(self):
+        corrected, corrections = _correct_web_fetch({})
+        assert "url" in corrected
+        assert len(corrections) >= 1
+
+    def test_valid_url_and_prompt_passes_through(self):
+        inp = {"url": "https://docs.python.org", "prompt": "summarize"}
+        corrected, corrections = _correct_web_fetch(inp)
+        assert corrected["url"] == "https://docs.python.org"
+        assert corrected["prompt"] == "summarize"
+        assert corrections == []
+
+    def test_non_dict_input_treated_as_url(self):
+        corrected, corrections = _correct_web_fetch("https://example.com")
+        assert corrected["url"] == "https://example.com"
+        assert "prompt" in corrected
+        assert len(corrections) == 1
+
+
+# ── New corrector: NotebookEdit ───────────────────────────────────────────────
+
+class TestCorrectNotebookEdit:
+
+    def test_all_missing_fields_get_placeholders(self):
+        corrected, corrections = _correct_notebook_edit({})
+        assert "notebook_path" in corrected
+        assert "cell_id" in corrected
+        assert "new_source" in corrected
+        assert len(corrections) == 3
+
+    def test_partial_input_fills_missing_only(self):
+        corrected, corrections = _correct_notebook_edit({"notebook_path": "nb.ipynb"})
+        assert corrected["notebook_path"] == "nb.ipynb"
+        assert "cell_id" in corrected
+        assert "new_source" in corrected
+        assert len(corrections) == 2
+
+    def test_complete_input_passes_through(self):
+        inp = {"notebook_path": "nb.ipynb", "cell_id": "cell-1", "new_source": "print('hi')"}
+        corrected, corrections = _correct_notebook_edit(inp)
+        assert corrected == inp
+        assert corrections == []
+
+    def test_non_dict_input_handled_gracefully(self):
+        corrected, corrections = _correct_notebook_edit("bad input")
+        # Should not raise — returns raw or empty
+        assert isinstance(corrected, (dict, str))
+
+
+# ── Full dispatcher: all 7 tools ─────────────────────────────────────────────
+
+class TestDispatcherAllTools:
+    """Verify the _CORRECTORS dispatch map covers all 7 deferred tools."""
+
+    def test_all_seven_tools_in_dispatcher(self):
+        from llm.transformers.tool_call_validator import _CORRECTORS
+        expected = {"AskUserQuestion", "ExitPlanMode", "EnterPlanMode",
+                    "TodoWrite", "WebSearch", "WebFetch", "NotebookEdit"}
+        assert set(_CORRECTORS.keys()) == expected
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_is_noop(self):
+        """Tools not in the dispatcher (e.g. Bash, Read) must not be touched."""
+        from llm.pipeline import TransformContext
+        block = {"type": "tool_use", "name": "Bash", "id": "b1",
+                 "input": {"command": "ls -la"}}
+        req = SimpleNamespace(content=[block])
+        ctx = MagicMock(spec=TransformContext)
+        ctx.quality_issues = []
+        transformer = ToolCallValidatorTransformer()
+        await transformer.transform(req, ctx)
+        assert block["input"] == {"command": "ls -la"}  # untouched

@@ -90,6 +90,11 @@ class TransformContext:
     # Cache of code snippets from tool results for verification
     # Key: file_path → Value: relevant code snippet (first 500 chars)
 
+    # Set by IntentClassifierTransformer — True when PROXY_SESSION_MODE: ralph
+    # detected in system prompt. Downstream transformers use this to suppress
+    # AskUserQuestion calls and make autonomous best-effort decisions.
+    ralph_mode: bool = False
+
     # Set by IntentClassifierTransformer (P3 — confidence scoring)
     intent_confidence: float = 1.0    # 1.0 = not evaluated (safe default)
     secondary_intent: str = ""        # secondary intent for multi-task requests

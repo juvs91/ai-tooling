@@ -110,6 +110,30 @@
           }
         ],
         "description": "Block git --no-verify flag to protect pre-commit hooks"
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/adr-gate.sh",
+            "timeout": 10
+          }
+        ],
+        "description": "ADR Gate: bloquea edits a vendor/ y .agents/ sin ADR staged"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .agents/sync_skills.sh 2>/dev/null || true",
+            "timeout": 30
+          }
+        ],
+        "description": "Sync agent skills al inicio de cada sesión (throttle 24h)"
       }
     ]
   },

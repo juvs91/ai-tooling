@@ -1723,3 +1723,85 @@ class TestResolvePrimaryOverrides:
         assert result.intent == "PLAN"      # stays PLAN, not overridden to READ
         assert result.is_analysis is False  # no READ enforcement
 
+
+# ── Ralph mode detection (Item 1) ────────────────────────────────────────────
+
+class TestRalphModeDetection:
+    """PROXY_SESSION_MODE: ralph in system prompt must set ctx.ralph_mode = True."""
+
+    def _make_transformer(self):
+        return IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+
+    def _make_request_with_system(self, text="fix the bug", system=""):
+        msg = SimpleNamespace(role="user", content=text)
+        req = SimpleNamespace(messages=[msg], tools=None, system=system)
+        return req
+
+    @pytest.mark.asyncio
+    async def test_ralph_marker_sets_ralph_mode_true(self):
+        """The PROXY_SESSION_MODE: ralph marker must set ctx.ralph_mode = True."""
+        t = self._make_transformer()
+        ctx = TransformContext()
+        req = self._make_request_with_system(
+            system="You are helpful.\nPROXY_SESSION_MODE: ralph"
+        )
+        await t.transform(req, ctx)
+        assert ctx.ralph_mode is True
+
+    @pytest.mark.asyncio
+    async def test_no_marker_leaves_ralph_mode_false(self):
+        """Without the marker, ralph_mode must remain False."""
+        t = self._make_transformer()
+        ctx = TransformContext()
+        req = self._make_request_with_system(system="You are helpful.")
+        await t.transform(req, ctx)
+        assert ctx.ralph_mode is False
+
+    @pytest.mark.asyncio
+    async def test_empty_system_leaves_ralph_mode_false(self):
+        t = self._make_transformer()
+        ctx = TransformContext()
+        req = self._make_request_with_system(system="")
+        await t.transform(req, ctx)
+        assert ctx.ralph_mode is False
+
+    @pytest.mark.asyncio
+    async def test_none_system_leaves_ralph_mode_false(self):
+        t = self._make_transformer()
+        ctx = TransformContext()
+        req = SimpleNamespace(
+            messages=[SimpleNamespace(role="user", content="fix the bug")],
+            tools=None,
+            system=None,
+        )
+        await t.transform(req, ctx)
+        assert ctx.ralph_mode is False
+
+    @pytest.mark.asyncio
+    async def test_ralph_and_plan_mode_coexist(self):
+        """Ralph mode and plan mode can both be active in the same turn."""
+        t = self._make_transformer()
+        ctx = TransformContext()
+        req = self._make_request_with_system(
+            text="write the plan",
+            system="Plan mode is active.\nPROXY_SESSION_MODE: ralph",
+        )
+        await t.transform(req, ctx)
+        assert ctx.ralph_mode is True
+        assert ctx.plan_mode_active is True
+
+    @pytest.mark.asyncio
+    async def test_partial_marker_does_not_trigger(self):
+        """A partial match (e.g. just 'ralph') must NOT set ralph_mode."""
+        t = self._make_transformer()
+        ctx = TransformContext()
+        req = self._make_request_with_system(system="ralph session mode")
+        await t.transform(req, ctx)
+        assert ctx.ralph_mode is False
+
+    @pytest.mark.asyncio
+    async def test_ralph_mode_default_is_false(self):
+        """TransformContext must default ralph_mode to False."""
+        ctx = TransformContext()
+        assert ctx.ralph_mode is False
+

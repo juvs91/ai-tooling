@@ -1,0 +1,47 @@
+{
+  "skill_name": "characterization-tester",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I have a hypothesis feature file for sp_generar_factura (billing SP). SQUIT MCP is not available. Please run characterization testing on it.\n\nFeature file content:\n```gherkin\n# status: hypothesis\n# inferred_from: sp_generar_factura source code analysis by software-archeologist\n# sp: sp_generar_factura\n# database: DEACERO_VENTAS\nFeature: Generar factura de pedido\n  As a billing system\n  I want to generate an invoice for a sales order\n  So that the client can be charged correctly\n\n  Scenario: Factura generada exitosamente para pedido valido\n    Given un pedido con id 10234 asignado al cliente C001\n    And el pedido tiene 3 lineas de productos\n    When se ejecuta sp_generar_factura con @pedido_id = 10234 y @cliente_id = 'C001'\n    Then se retorna una fila con monto = 15420.50\n    And el campo impuesto = 2467.28\n    And el campo estatus_factura = 'GENERADA'\n\n  Scenario: Error cuando pedido no existe\n    Given un pedido_id que no existe en la base de datos\n    When se ejecuta sp_generar_factura con @pedido_id = 99999 y @cliente_id = 'C001'\n    Then el resultado es un conjunto vacio\n    And se registra un mensaje de error en log_errores\n```\n\nSP source snippet available:\n```sql\nCREATE PROCEDURE sp_generar_factura\n    @pedido_id   INT,\n    @cliente_id  VARCHAR(10)\nAS BEGIN\n    SELECT\n        p.pedido_id,\n        SUM(pl.cantidad * pl.precio_lista) AS monto,\n        SUM(pl.cantidad * pl.precio_lista) * 0.16 AS impuesto,\n        'GENERADA' AS estatus_factura\n    FROM pedidos p\n    JOIN pedido_lineas pl ON pl.pedido_id = p.pedido_id\n    WHERE p.pedido_id = @pedido_id\n      AND p.cliente_id = @cliente_id\n    GROUP BY p.pedido_id\nEND\n```\n\nGraph edges for sp_generar_factura:\n- READS: pedidos, pedido_lineas\n- WRITES: (none)\n\nGenerate characterization test scripts and mark scenarios as pending_execution since SQUIT is unavailable.",
+      "expected_output": "The skill should generate characterization SQL scripts using BEGIN TRAN/ROLLBACK pattern, mark both scenarios as pending_execution (since SQUIT is unavailable), and produce clear instructions for manual execution. The scripts should use the correct parameter types inferred from SP source.",
+      "files": [],
+      "expectations": [
+        "A characterization SQL script is generated for sp_generar_factura with BEGIN TRAN and ROLLBACK wrapping the EXEC call",
+        "The script uses @pedido_id = 10234 and @cliente_id = 'C001' as inputs for the happy path scenario",
+        "The feature file scenarios are marked as pending_execution since SQUIT is unavailable",
+        "The output includes explicit instructions telling the user which database to run the scripts against (DEACERO_VENTAS)",
+        "The result table in the script includes columns matching the SP output: monto, impuesto, estatus_factura",
+        "No attempt is made to execute the scripts without SQUIT — the skill correctly handles the unavailability"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Run characterization testing on this hypothesis feature about VIP discount application. SQUIT is available and returned real output.\n\nFeature file:\n```gherkin\n# status: hypothesis\n# inferred_from: sp_aplicar_descuento source analysis\n# sp: sp_aplicar_descuento\n# database: DEACERO_VENTAS\nFeature: Aplicar descuento VIP a factura\n  Scenario: Descuento VIP aplicado correctamente\n    Given una factura con id 5501 para cliente VIP 'C001'\n    And el monto base de la factura es 10000.00\n    When se ejecuta sp_aplicar_descuento con @factura_id = 5501\n    Then el descuento aplicado es 1500.00\n    And el monto final es 8500.00\n    And el campo tipo_descuento = 'VIP_15PCT'\n```\n\nSQUIT execution result (already obtained):\n```\nfactura_id | descuento | monto_final | tipo_descuento\n5501       | 1200.00   | 8800.00     | VIP_12PCT\n```\n\nSP source snippet:\n```sql\nCREATE PROCEDURE sp_aplicar_descuento\n    @factura_id INT\nAS BEGIN\n    DECLARE @pct DECIMAL(5,2)\n    SELECT @pct = porcentaje_descuento\n    FROM categorias_cliente cc\n    JOIN facturas f ON f.cliente_id = cc.cliente_id\n    WHERE f.factura_id = @factura_id\n\n    UPDATE facturas\n    SET descuento = monto_base * @pct,\n        monto_final = monto_base * (1 - @pct),\n        tipo_descuento = 'VIP_' + CAST(@pct * 100 AS VARCHAR) + 'PCT'\n    WHERE factura_id = @factura_id\n\n    SELECT factura_id, descuento, monto_final, tipo_descuento\n    FROM facturas WHERE factura_id = @factura_id\nEND\n```\n\nThe SP reads discount % from categorias_cliente table. Classify this scenario and update the feature file.",
+      "expected_output": "The skill should detect a CONFLICT: the hypothesis says 15% discount (1500.00) but reality shows 12% discount (1200.00). The conflict should be classified precisely: the archaeologist inferred 15% from one place in the code or data, but the actual client record has 12%. The feature file should be updated with conflict_detail, hypothesis explanation, and reality explanation.",
+      "files": [],
+      "expectations": [
+        "The scenario is classified as CONFLICT (not VERIFIED or UNTESTABLE)",
+        "The conflict_detail clearly states the numeric discrepancy: hypothesis 1500.00 vs reality 1200.00",
+        "The conflict explains that the discount percentage differs: hypothesis assumed 15% (VIP_15PCT) but system uses 12% (VIP_12PCT)",
+        "The feature file header is updated with # status: conflict and # conflict_detail fields",
+        "The feature file is updated to reflect reality: descuento = 1200.00, monto_final = 8800.00, tipo_descuento = 'VIP_12PCT'",
+        "The skill provides a business-level explanation of why the conflict matters (the discount table data drives behavior, not the SP code itself)"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Run characterization testing on this hypothesis feature for a SP that returns a timestamp and auto-generated invoice number. SQUIT returned real output.\n\nFeature file:\n```gherkin\n# status: hypothesis\n# inferred_from: sp_confirmar_pedido source analysis\n# sp: sp_confirmar_pedido\n# database: DEACERO_VENTAS\nFeature: Confirmar pedido y generar numero de folio\n  Scenario: Pedido confirmado genera folio unico\n    Given un pedido pendiente con id 7890\n    When se ejecuta sp_confirmar_pedido con @pedido_id = 7890\n    Then el pedido queda en estatus CONFIRMADO\n    And se genera un numero de folio unico\n    And la fecha de confirmacion es registrada\n    And se retorna una fila con los datos del pedido confirmado\n```\n\nSQUIT execution result:\n```\npedido_id | folio_numero       | fecha_confirmacion          | estatus\n7890      | FOLIO-2026-0034521 | 2026-03-19 14:23:45.123    | CONFIRMADO\n```\n\nSP source snippet:\n```sql\nCREATE PROCEDURE sp_confirmar_pedido\n    @pedido_id INT\nAS BEGIN\n    DECLARE @folio VARCHAR(30)\n    SET @folio = 'FOLIO-' + CAST(YEAR(GETDATE()) AS VARCHAR)\n                 + '-' + RIGHT('0000000' + CAST(NEXT VALUE FOR seq_folios AS VARCHAR), 7)\n\n    UPDATE pedidos\n    SET estatus = 'CONFIRMADO',\n        folio_numero = @folio,\n        fecha_confirmacion = GETDATE()\n    WHERE pedido_id = @pedido_id\n\n    SELECT pedido_id, folio_numero, fecha_confirmacion, estatus\n    FROM pedidos WHERE pedido_id = @pedido_id\nEND\n```\n\nGraph edges:\n- READS: pedidos, seq_folios\n- WRITES: pedidos (estatus, folio_numero, fecha_confirmacion)\n\nHandle the non-deterministic fields and generate a useful characterization result.",
+      "expected_output": "The skill should identify that folio_numero and fecha_confirmacion are non-deterministic (sequence number + GETDATE()), apply masking, still classify the deterministic fields as VERIFIED (estatus=CONFIRMADO, pedido_id=7890), and document which fields were masked. The feature file should be updated with masked_fields annotation. The skill should also note the WRITES to pedidos table but recognize it is an internal table that can be rolled back.",
+      "files": [],
+      "expectations": [
+        "The fields folio_numero and fecha_confirmacion are identified as non-deterministic and listed in masked_fields",
+        "The deterministic fields (estatus=CONFIRMADO, pedido_id=7890) are verified against the captured output",
+        "The scenario is classified as VERIFIED (not CONFLICT) because the deterministic fields match the hypothesis",
+        "The feature file is updated with # masked_fields: folio_numero, fecha_confirmacion",
+        "The feature file is updated with # assertion_strategy noting comparison excludes masked fields",
+        "The skill notes that the WRITES to the pedidos table is reversible (internal table, covered by ROLLBACK) so the SP remains testable"
+      ]
+    }
+  ]
+}

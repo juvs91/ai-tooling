@@ -1,0 +1,19 @@
+{
+  "starter": "base",
+  "capabilities": [
+    "backend",
+    "security",
+    "api",
+    "frontend",
+    "infrastructure"
+  ],
+  "agents_repo": "https://github.com/deagentic/cornerstone-agents",
+  "agents_ref": "master",
+  "cornerstone_version": "0.8.3",
+  "generated_at": "2026-04-09T00:00:00Z",
+  "project": {
+    "name": "ai-tooling",
+    "github_username": "deagentic",
+    "adr_path": "docs/adr"
+  }
+}

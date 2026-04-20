@@ -9,11 +9,15 @@ the model toward proper intent fulfillment.
 from __future__ import annotations
 
 import glob as _glob
+import logging
 import os
 import time
 
 from llm.pipeline import Transformer, TransformContext
 from utils.utils import ensure_system_note, bget
+from llm.converters import _system_to_text
+
+logger = logging.getLogger(__name__)
 
 
 def _plan_mode_active_from_history(messages: list) -> bool:
@@ -25,7 +29,7 @@ def _plan_mode_active_from_history(messages: list) -> bool:
     subsequent ExitPlanMode. This handles the case where CC failed to inject
     its system reminder on the current turn.
     """
-    recent = messages[-20:] if len(messages) > 20 else messages
+    recent = messages[-60:] if len(messages) > 60 else messages
     found_enter = False
     for msg in recent:
         if bget(msg, "role") != "assistant":
@@ -94,6 +98,50 @@ class IntentEnforcementTransformer(Transformer):
         if intent in ("BUILD", "VERIFY") and tools_in == 0:
             return
 
+        # Ralph mode: suppress AskUserQuestion — no human is present in autonomous loops.
+        # Injected as a separate note so it stacks with intent-specific prompts.
+        if ctx.ralph_mode:
+            ensure_system_note(
+                request,
+                "[RALPH MODE — AUTONOMOUS]: No human is present. "
+                "Do NOT call AskUserQuestion under any circumstances. "
+                "Make best-effort decisions based on available context. "
+                "Document assumptions in the plan file instead of asking. "
+                "Prefer ExitPlanMode over asking for clarification.",
+            )
+
+        # Adaptive quality enforcement (Item 4) — reads session history to escalate
+        # when the model has consistently produced low-quality or stub-heavy responses.
+        # Zero coupling: proxy reads its own SessionCache, no external coordination needed.
+        session_id = getattr(ctx, "session_id", None)
+        if session_id:
+            try:
+                from llm.compressor import get_session_quality_history
+                scores, stub_count = await get_session_quality_history(session_id)
+                if scores:
+                    avg_quality = sum(scores[-5:]) / len(scores[-5:])
+                    adaptive_notes: list[str] = []
+                    if avg_quality < 0.55:
+                        adaptive_notes.append(
+                            "CRITICAL: Your previous responses in this session had quality scores "
+                            f"averaging {avg_quality:.0%}. Be extremely thorough, specific, and "
+                            "cite (file:line) for every claim."
+                        )
+                    if stub_count >= 2:
+                        adaptive_notes.append(
+                            f"STRICT: You have produced {stub_count} stub implementation(s) in this "
+                            "session. ALL function bodies MUST contain complete, working logic — "
+                            "no `pass`, no `...`, no `# TODO`. Implement fully or not at all."
+                        )
+                    if adaptive_notes:
+                        ensure_system_note(request, "[SESSION-QUALITY] " + " | ".join(adaptive_notes))
+                        logger.info(
+                            "[adaptive-quality] session=%s avg=%.2f stubs=%d — escalated enforcement",
+                            session_id[:8], avg_quality, stub_count,
+                        )
+            except Exception as exc:
+                logger.debug("[adaptive-quality] session history unavailable: %s", exc)
+
         # Inject intent-specific prompt into request.system
         prompt = self._get_enforcement_prompt(intent, ctx, request=request)
         if prompt:
@@ -108,7 +156,7 @@ class IntentEnforcementTransformer(Transformer):
         elif intent == "SYNTHESIZING":
             return self._get_synthesizing_prompt()
         elif intent == "BUILDING" or intent == "BUILD":
-            return self._get_building_prompt()
+            return self._get_building_prompt(request=request)
         elif intent == "VERIFY":
             return self._get_verify_prompt()
         return ""
@@ -137,7 +185,7 @@ class IntentEnforcementTransformer(Transformer):
     def _get_plan_prompt(self, ctx=None, request=None) -> str:
         """PLAN intent: Grounding requirements for implementation planning."""
         messages = list(getattr(request, "messages", None) or []) if request else []
-        system_text = getattr(request, "system", "") or "" if request else ""
+        system_text = _system_to_text(getattr(request, "system", None)) if request else ""
 
         # Evaluate all three plan-mode-active signals from the proxy side.
         # The model will also check its own context, but these proxy-side signals
@@ -249,9 +297,9 @@ class IntentEnforcementTransformer(Transformer):
             "Include code snippets for any behavioral claims."
         )
 
-    def _get_building_prompt(self) -> str:
-        """BUILDING intent: Grounding requirements for code changes."""
-        return (
+    def _get_building_prompt(self, request=None) -> str:
+        """BUILDING intent: Grounding requirements for code changes + anti-stub mandate."""
+        base = (
             "[INTENT-ENFORCEMENT] BUILDING mode active:\n"
             "RULE 1: Make the file changes NOW. Do not describe what you will do — just do it.\n"
             "RULE 2: Use Edit tool for modifications. Use Write tool for new files. "
@@ -264,8 +312,82 @@ class IntentEnforcementTransformer(Transformer):
             "before/after code snippets.\n"
             "RULE 7: If a change requires multiple files, use TodoWrite to track all pending changes.\n"
             "GROUNDING RULE: Verify changes by reading the modified code. "
-            "Cite the lines you changed."
+            "Cite the lines you changed.\n"
+            "\n"
+            "ANTI-STUB MANDATE (non-negotiable):\n"
+            "  FORBIDDEN: `pass`, `...`, `# TODO`, `# FIXME`, `raise NotImplementedError`\n"
+            "  FORBIDDEN: Empty test bodies — every test must have real assertions\n"
+            "  REQUIRED: Every function body must contain complete, working logic\n"
+            "  REQUIRED: Every Pydantic model must define all fields with types\n"
+            "  REQUIRED: Every API endpoint handler must implement the full request/response flow\n"
+            "\n"
+            "COMPLETION CHECKLIST — verify before marking done:\n"
+            "  [ ] All functions have real implementations (no pass/...)\n"
+            "  [ ] All Pydantic schemas define every field\n"
+            "  [ ] All tests contain at least one assert statement\n"
+            "  [ ] All API route handlers process input and return a response\n"
         )
+        task_prompt = self._detect_task_type_sub_prompt(request)
+        return base + task_prompt if task_prompt else base
+
+    def _detect_task_type_sub_prompt(self, request=None) -> str:
+        """Detect task type from recent messages and return specialized sub-prompt.
+
+        Scans the last 10 messages for domain keywords (alembic, fastapi, pytest)
+        and injects targeted checklists. Keeps injected content short to avoid
+        context bloat — this is advisory, not a replacement for SKILL.md.
+        """
+        if request is None:
+            return ""
+        messages = list(getattr(request, "messages", None) or [])
+        # Collect text from the last 10 messages (user + assistant)
+        recent_text = ""
+        for msg in messages[-10:]:
+            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", "")
+            if role not in ("user", "assistant"):
+                continue
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            if isinstance(content, str):
+                recent_text += " " + content
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        recent_text += " " + (block.get("text") or "")
+        recent_lower = recent_text.lower()
+
+        parts: list[str] = []
+
+        # Database / Alembic / SQLAlchemy
+        if any(kw in recent_lower for kw in ("alembic", "migration", "sqlalchemy", "db model", "orm model")):
+            parts.append(
+                "DATABASE TASK DETECTED — mandatory steps:\n"
+                "  1. After creating/modifying SQLAlchemy models: run `alembic revision --autogenerate -m 'desc'`\n"
+                "  2. Apply migration: `alembic upgrade head`\n"
+                "  3. Verify: `alembic current` (must show the new revision)\n"
+                "  4. Define Pydantic schemas (Create/Update/Response) for ALL new models\n"
+            )
+
+        # FastAPI / routers / endpoints
+        if any(kw in recent_lower for kw in ("router", "fastapi", "endpoint", "api route", "include_router")):
+            parts.append(
+                "API TASK DETECTED — mandatory steps:\n"
+                "  1. Define Pydantic request/response schemas BEFORE writing endpoint handlers\n"
+                "  2. Every endpoint handler must be fully implemented — no `pass` bodies\n"
+                "  3. Include HTTPException for 4xx errors; handle 5xx with generic handler\n"
+                "  4. Register router with `app.include_router(...)` in the main app file\n"
+            )
+
+        # Pytest / tests
+        if any(kw in recent_lower for kw in ("pytest", "test_", "unittest", "assert ", "fixture")):
+            parts.append(
+                "TEST TASK DETECTED — mandatory steps:\n"
+                "  1. Every test function must contain at least one `assert` statement\n"
+                "  2. No `pass` test bodies — implement all test cases fully\n"
+                "  3. Run `pytest -x` after writing tests and report actual output\n"
+                "  4. If tests fail, fix the implementation before moving on\n"
+            )
+
+        return "\n" + "\n".join(parts) if parts else ""
 
     def _get_verify_prompt(self) -> str:
         """VERIFY intent: Grounding requirements for testing."""

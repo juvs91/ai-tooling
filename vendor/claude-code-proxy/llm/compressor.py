@@ -76,6 +76,15 @@ class _CompressionCache:
     # Deferred tools cache — persists CC's <available-deferred-tools> list
     # across turns so injection never depends on CC re-sending the block.
     deferred_tool_names: list[str] = field(default_factory=list)
+    # Plan mode state — persists across history truncation and proxy restarts.
+    # Set True on first EnterPlanMode/PLAN-intent turn; cleared on ExitPlanMode.
+    plan_mode_active: bool = False
+
+    # Quality feedback loop (Item 4) — proxy-internal session history.
+    # Used by intent_enforcement.py to escalate enforcement when quality is consistently low.
+    # Populated by quality_refinement.py after every response that has a quality score.
+    quality_scores: list[float] = field(default_factory=list)  # last N quality scores (0.0–1.0)
+    session_stub_count: int = 0                                 # stubs detected so far in this session
 
 _session_cache: Dict[str, _CompressionCache] = {}  # Multi-session support: session_id -> cache entry
 _SESSION_TTL = 604800.0          # 7 days — matches typical dev session rhythm (survive weekend gaps)
@@ -107,6 +116,9 @@ def _save_session_cache_to_disk() -> None:
                 "verified_claims": list(c.verified_claims),
                 "citation_history": c.citation_history,
                 "deferred_tool_names": c.deferred_tool_names,
+                "plan_mode_active": c.plan_mode_active,
+                "quality_scores": c.quality_scores,
+                "session_stub_count": c.session_stub_count,
             }
             for sid, c in _session_cache.items()
         }
@@ -147,6 +159,9 @@ def _load_session_cache_from_disk() -> None:
                 verified_claims=set(entry.get("verified_claims", [])),
                 citation_history=entry.get("citation_history", []),
                 deferred_tool_names=entry.get("deferred_tool_names", []),
+                plan_mode_active=entry.get("plan_mode_active", False),
+                quality_scores=entry.get("quality_scores", []),
+                session_stub_count=entry.get("session_stub_count", 0),
             )
             loaded += 1
         if loaded:
@@ -161,6 +176,57 @@ def _load_session_cache_from_disk() -> None:
 
 
 _load_session_cache_from_disk()  # restore sessions from previous proxy run
+
+
+async def get_session_plan_mode(session_id: str) -> bool:
+    """Return cached plan_mode_active for a session, or False if not found/expired."""
+    async with _state_lock:
+        entry = _session_cache.get(session_id)
+        if entry is not None and time.time() - entry.timestamp < _SESSION_TTL:
+            return entry.plan_mode_active
+    return False
+
+
+async def set_session_plan_mode(session_id: str, active: bool) -> None:
+    """Persist plan_mode_active into the session cache for this session."""
+    async with _state_lock:
+        entry = _session_cache.get(session_id)
+        if entry is not None:
+            entry.plan_mode_active = active
+        else:
+            _session_cache[session_id] = _CompressionCache(
+                session_id=session_id,
+                timestamp=time.time(),
+                plan_mode_active=active,
+            )
+        _save_session_cache_to_disk()
+
+
+async def get_session_quality_history(session_id: str) -> tuple[list[float], int]:
+    """Return (quality_scores, session_stub_count) for a session."""
+    async with _state_lock:
+        entry = _session_cache.get(session_id)
+        if entry is not None and time.time() - entry.timestamp < _SESSION_TTL:
+            return list(entry.quality_scores), entry.session_stub_count
+    return [], 0
+
+
+async def append_session_quality(session_id: str, quality_score: float, stub_delta: int = 0) -> None:
+    """Append quality_score and accumulate stubs into the session cache.
+
+    Keeps only the last 10 scores to bound memory and keep averages current.
+    Persists to disk immediately so the history survives proxy reloads.
+    """
+    async with _state_lock:
+        entry = _session_cache.get(session_id)
+        if entry is None:
+            entry = _CompressionCache(session_id=session_id, timestamp=time.time())
+            _session_cache[session_id] = entry
+        entry.quality_scores.append(quality_score)
+        if len(entry.quality_scores) > 10:
+            entry.quality_scores = entry.quality_scores[-10:]
+        entry.session_stub_count += stub_delta
+        _save_session_cache_to_disk()
 
 
 _COMPRESS_PROMPT = (

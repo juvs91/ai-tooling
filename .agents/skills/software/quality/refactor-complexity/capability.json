@@ -1,0 +1,5 @@
+{
+  "name": "refactor-complexity",
+  "description": "Refactoring for low cognitive complexity and O(n) efficiency",
+  "sparse_paths": ["common/software/quality/refactor-complexity/"]
+}
