@@ -18,6 +18,19 @@ _FACTUAL_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 _READ_TOOL_NAMES = frozenset({"Read", "Glob", "Grep", "Agent", "WebFetch", "WebSearch"})
+_WRITE_TOOL_NAMES = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+# H18: Stub detection regexes for BUILD phase
+# Matches bare `pass` or `...` on its own line, and TODO/FIXME/STUB comments
+_STUB_LINE_RE = re.compile(
+    r"^\s*(pass|\.\.\.)\s*$|#\s*(TODO|FIXME|STUB|PLACEHOLDER)",
+    re.MULTILINE | re.IGNORECASE,
+)
+# Matches function definitions whose sole body is `pass` or `...`
+_STUB_FUNC_RE = re.compile(
+    r"(?:async\s+)?def\s+(\w+)[^:]*:\s*\n\s*(pass|\.\.\.)\s*\n",
+    re.MULTILINE,
+)
 
 # H_SPECIFICITY: code-level references that distinguish deep analysis from generic text
 _LINE_REF_RE = re.compile(r"(?:line\s+\d+|:\d{2,4}\b|\bL\d{2,}\b|línea\s+\d+)")
@@ -263,6 +276,36 @@ def score_response(
             issue, penalty = h17_result
             issues.append(issue)
             score += penalty
+
+    # ── Stub detection heuristic (H18) ────────────────────────────────
+
+    # H18: Detect implementation stubs during BUILD phase.
+    # GLM-4.7 and other models frequently write `pass` / `...` / `# TODO` as
+    # placeholder function bodies instead of real implementations. This heuristic
+    # scans the *content* of Write/Edit tool calls to detect such stubs and
+    # penalizes the score so the refinement loop fires with targeted feedback.
+    if intent in ("BUILD", "BUILDING"):
+        stub_count = 0
+        stubbed_fns: list[str] = []
+        for tc in tool_calls:
+            if tc.get("name") not in _WRITE_TOOL_NAMES:
+                continue
+            inp = tc.get("input") or {}
+            if not isinstance(inp, dict):
+                continue
+            content = (inp.get("content") or "") + (inp.get("new_string") or "")
+            stubs = _STUB_LINE_RE.findall(content)
+            stub_count += len(stubs)
+            # Extract function names whose body is only `pass` or `...`
+            for m in _STUB_FUNC_RE.finditer(content):
+                stubbed_fns.append(m.group(1))
+        if stub_count > 0:
+            issues.append(f"stub_implementations({stub_count}_stubs)")
+            if stubbed_fns:
+                issues.append(f"stubbed_functions({','.join(stubbed_fns[:5])})")
+            # Base penalty 0.35 (enough to breach 0.70 threshold on its own) +
+            # 0.05 per additional stub, capped at 0.60 total.
+            score -= min(0.60, 0.35 + (stub_count - 1) * 0.05)
 
     return max(0.0, round(score, 2)), issues
 

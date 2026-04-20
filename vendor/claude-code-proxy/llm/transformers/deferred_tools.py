@@ -31,7 +31,10 @@ will not discard the call.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import uuid
 
 from llm.compressor import get_session_deferred_tools, save_session_deferred_tools
 from llm.pipeline import Transformer, TransformContext
@@ -40,8 +43,29 @@ from utils.utils import bget
 
 logger = logging.getLogger(__name__)
 
+_DEFERRED_PREFIX_SIZE = 20  # Messages to hash for deterministic session identity
 
-def _exit_plan_already_called(messages: list, window: int = 20) -> bool:
+
+def _compute_deferred_session_id(messages: list) -> str | None:
+    """Compute a deterministic session ID from the conversation prefix.
+
+    Used as a fallback when ctx.session_id is None (Claude Code CLI does not
+    send X-Session-ID by default). Mirrors the compressor's approach:
+    uuid5(NAMESPACE_OID, sha256(first N messages)).
+
+    Returns None if messages is empty (nothing to hash).
+    """
+    if not messages:
+        return None
+    prefix = messages[:_DEFERRED_PREFIX_SIZE]
+    raw = json.dumps(prefix, sort_keys=True, default=str)
+    prefix_hash = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, prefix_hash))
+
+
+
+
+def _exit_plan_already_called(messages: list, window: int = 60) -> bool:
     """Return True if ExitPlanMode was already called in recent assistant history.
 
     Used to decide whether to strip plan-mode tools from the session cache.
@@ -49,7 +73,9 @@ def _exit_plan_already_called(messages: list, window: int = 20) -> bool:
     stay available even during READ/ANALYZING intermediate turns of a multi-turn
     plan session (where the model explores files before writing the final plan).
 
-    Window=20 matches Override G in intent_classifier.py.
+    Window=60 matches _plan_mode_active() in intent_classifier.py.
+    Plan sessions with many file reads easily exceed 20 messages; 60 gives
+    sufficient coverage for typical planning sessions.
     """
     count = 0
     for msg in reversed(messages or []):
@@ -242,17 +268,23 @@ class DeferredToolsTransformer(Transformer):
         system = getattr(request, "system", None)
         messages = getattr(request, "messages", None)
 
+        # Resolve effective session ID: prefer explicit X-Session-ID header, fall
+        # back to a deterministic UUID derived from the conversation prefix. This
+        # mirrors the compressor's approach and ensures the cache works even when
+        # Claude Code CLI is used without sending X-Session-ID.
+        effective_sid = ctx.session_id or _compute_deferred_session_id(messages)
+
         # ── Step 1: Extract from CC's system prompt (primary source) ──────────
         deferred = extract_deferred_tool_names(system, messages=messages)
         _source = "system_prompt" if deferred else None
 
         # ── Step 2: Persist to session cache if CC sent the list ──────────────
-        if deferred and ctx.session_id:
-            await save_session_deferred_tools(ctx.session_id, deferred)
+        if deferred and effective_sid:
+            await save_session_deferred_tools(effective_sid, deferred)
 
         # ── Step 3: Fall back to session cache if system prompt has no list ───
-        if not deferred and ctx.session_id:
-            cached = await get_session_deferred_tools(ctx.session_id)
+        if not deferred and effective_sid:
+            cached = await get_session_deferred_tools(effective_sid)
             if cached:
                 # Plan-mode tools (ExitPlanMode) are stripped from the cache
                 # ONLY once the plan session is over, i.e. ExitPlanMode was
@@ -273,13 +305,20 @@ class DeferredToolsTransformer(Transformer):
                     )
 
         # ── Step 4: PLAN phase guarantee ──────────────────────────────────────
-        # Even if session cache is empty (brand-new session, first turn),
-        # always ensure plan-mode tools are available during PLAN phase so
-        # EnterPlanMode can never be silently dropped by stream validation.
+        # Always ensure plan-mode tools are available when plan mode is active,
+        # even if session cache is empty (brand-new session, first turn).
         # _PLAN_DEFAULT_TOOLS (AskUserQuestion, TodoWrite) are also guaranteed
         # because some CC project configs never include them in
         # <available-deferred-tools> (RC-8).
-        if ctx.phase == "PLAN":
+        #
+        # ctx.plan_mode_active is the single authoritative signal, set by
+        # IntentClassifierTransformer (which runs before this transformer).
+        # It uses Signals 0-3 (history scan + CC system prompt + intent + session
+        # cache) for unlimited coverage across sessions of any length.
+        # ctx.phase == "PLAN" is kept as a belt-and-suspenders fallback for the
+        # very first turn before the classifier has run.
+        _phase_is_plan = ctx.phase == "PLAN"
+        if _phase_is_plan or ctx.plan_mode_active:
             deferred_set = set(deferred)
             extras = [
                 n for n in (*_PLAN_ONLY_TOOLS, *_PLAN_DEFAULT_TOOLS)
@@ -289,7 +328,7 @@ class DeferredToolsTransformer(Transformer):
                 deferred = list(deferred) + extras
                 _source = _source or "plan_guarantee"
                 logger.debug(
-                    "[deferred-tools] PLAN phase guarantee: added %s", extras
+                    "[deferred-tools] plan_guarantee: added %s", extras
                 )
 
         if not deferred:

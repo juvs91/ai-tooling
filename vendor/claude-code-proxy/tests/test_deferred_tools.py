@@ -226,6 +226,7 @@ class TestDeferredToolsTransformer:
 
     def _make_ctx(self):
         ctx = MagicMock()
+        ctx.plan_mode_active = False
         return ctx
 
     @pytest.mark.asyncio
@@ -379,22 +380,22 @@ class TestExitPlanAlreadyCalled:
         assert _exit_plan_already_called(messages) is True
 
     def test_window_limits_scan(self):
-        """ExitPlanMode beyond window=20 assistant messages is not found."""
+        """ExitPlanMode beyond window=60 assistant messages is not found."""
         from llm.transformers.deferred_tools import _exit_plan_already_called
         # ExitPlanMode as the oldest (position 0 in list, last in reversed scan)
-        # followed by 21 newer Read messages → ExitPlanMode is message #22 in reverse
+        # followed by 61 newer Read messages → ExitPlanMode is message #62 in reverse
         messages = [self._asst("ExitPlanMode")]
-        for _ in range(21):
+        for _ in range(61):
             messages.append(self._asst("Read"))
-        # reversed: [Read×21, ExitPlanMode] — 21 Reads exhaust the window before ExitPlanMode
+        # reversed: [Read×61, ExitPlanMode] — 61 Reads exhaust the window before ExitPlanMode
         assert _exit_plan_already_called(messages) is False
 
     def test_within_window_is_found(self):
-        """ExitPlanMode within window=20 is correctly found."""
+        """ExitPlanMode within window=60 is correctly found."""
         from llm.transformers.deferred_tools import _exit_plan_already_called
-        # ExitPlanMode oldest, 15 Reads after → ExitPlanMode is #16 in reversed scan
+        # ExitPlanMode oldest, 50 Reads after → ExitPlanMode is #51 in reversed scan
         messages = [self._asst("ExitPlanMode")]
-        for _ in range(15):
+        for _ in range(50):
             messages.append(self._asst("Read"))
         assert _exit_plan_already_called(messages) is True
 
@@ -434,6 +435,7 @@ class TestMultiTurnPlanSession:
         ctx = MagicMock()
         ctx.phase = phase
         ctx.session_id = session_id
+        ctx.plan_mode_active = False
         return ctx
 
     def _asst(self, *tool_names):
@@ -636,6 +638,7 @@ class TestConnectionResetScenarios:
         ctx = MagicMock()
         ctx.phase = phase
         ctx.session_id = session_id
+        ctx.plan_mode_active = False
         return ctx
 
     def _asst(self, *tool_names):
@@ -808,7 +811,7 @@ class TestConnectionResetScenarios:
 
 class TestCompressionEdgeCases:
     """Tests for the interaction between context compression and ExitPlanMode
-    detection in _exit_plan_already_called (window=20).
+    detection in _exit_plan_already_called (window=60).
 
     After compression, old messages are replaced with a summary string.
     If ExitPlanMode was in the compressed (old) window, the tool_use block
@@ -817,7 +820,7 @@ class TestCompressionEdgeCases:
     Consequence: plan-mode tools are kept in the session cache (false-negative).
     This is acceptable because:
     - Injecting ExitPlanMode into a BUILD turn is harmless (model won't call it)
-    - The same window=20 is used by Override G in intent_classifier.py, so the
+    - The same window=60 is used by Override G in intent_classifier.py, so the
       classifier also won't force BUILD based on a compressed ExitPlanMode.
     - HAS_WRITES detection (unlimited scan) catches any Write/Edit and
       forces BUILD phase regardless, so plan tools won't trigger plan re-entry.
@@ -859,26 +862,26 @@ class TestCompressionEdgeCases:
         )
 
     def test_exit_plan_just_inside_window_is_found(self):
-        """ExitPlanMode at exactly window position 20 IS found (boundary check)."""
+        """ExitPlanMode at exactly window position 60 IS found (boundary check)."""
         from llm.transformers.deferred_tools import _exit_plan_already_called
 
-        # ExitPlanMode is the OLDEST, with exactly 19 Read messages after it
+        # ExitPlanMode is the OLDEST, with exactly 59 Read messages after it
         messages = [self._asst("ExitPlanMode")]
-        for _ in range(19):
+        for _ in range(59):
             messages.append(self._asst("Read"))
 
-        # reversed scan: 19 Reads (count 1-19), then ExitPlanMode (count 20, found!)
+        # reversed scan: 59 Reads (count 1-59), then ExitPlanMode (count 60, found!)
         assert _exit_plan_already_called(messages) is True
 
     def test_exit_plan_just_outside_window_is_not_found(self):
-        """ExitPlanMode at position 21 (one beyond window=20) is NOT found."""
+        """ExitPlanMode at position 61 (one beyond window=60) is NOT found."""
         from llm.transformers.deferred_tools import _exit_plan_already_called
 
         messages = [self._asst("ExitPlanMode")]
-        for _ in range(20):
+        for _ in range(60):
             messages.append(self._asst("Read"))
 
-        # reversed scan: 20 Reads (count reaches 20, break), ExitPlanMode not reached
+        # reversed scan: 60 Reads (count reaches 60, break), ExitPlanMode not reached
         assert _exit_plan_already_called(messages) is False
 
     def test_mixed_user_assistant_messages_count_only_assistant(self):
@@ -960,10 +963,11 @@ class TestPlanDefaultToolsGuarantee:
         req.tools = tools or []
         return req
 
-    def _make_ctx(self, phase="PLAN", session_id="school-session-1"):
+    def _make_ctx(self, phase="PLAN", session_id="school-session-1", plan_mode_active=False):
         ctx = MagicMock()
         ctx.phase = phase
         ctx.session_id = session_id
+        ctx.plan_mode_active = plan_mode_active
         return ctx
 
     @pytest.mark.asyncio
@@ -1075,4 +1079,104 @@ class TestPlanDefaultToolsGuarantee:
         # Empty system prompt + empty cache + non-PLAN phase → no injection at all
         assert req.tools == [], (
             "No tools should be injected in BUILD phase with empty cache and no system prompt"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ctx.plan_mode_active as tertiary injection signal (Signal 3 path)
+# ---------------------------------------------------------------------------
+
+class TestCtxPlanModeActiveInjection:
+    """Regression: DeferredToolsTransformer must use ctx.plan_mode_active as tertiary
+    signal for plan tool injection.
+
+    Covers model-initiated plan sessions >60 messages where _plan_mode_active_from_history
+    can no longer see EnterPlanMode in the sliding window. ctx.plan_mode_active (set by
+    IntentClassifierTransformer via session cache) is the authoritative signal.
+    """
+
+    def _make_request(self, system=None, messages=None, tools=None):
+        req = MagicMock()
+        req.system = system
+        req.messages = messages or []
+        req.tools = tools or []
+        return req
+
+    def _make_ctx(self, phase="EXECUTE", session_id="signal3-test", plan_mode_active=False):
+        ctx = MagicMock()
+        ctx.phase = phase
+        ctx.session_id = session_id
+        ctx.plan_mode_active = plan_mode_active
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_plan_tools_injected_via_ctx_plan_mode_active(self):
+        """ctx.plan_mode_active=True guarantees ExitPlanMode/AskUserQuestion injection
+        even when ctx.phase is not PLAN and history scan misses EnterPlanMode.
+
+        Simulates a 70-message session: EnterPlanMode at position 5 is beyond the
+        60-message window, so _plan_mode_active_from_history returns False.
+        ctx.plan_mode_active=True (from session cache Signal 3) must activate the
+        plan tool guarantee.
+        """
+        from llm.transformers.deferred_tools import DeferredToolsTransformer
+        from unittest.mock import patch
+
+        # 70 messages: EnterPlanMode at position 5, beyond the 60-msg window
+        messages = []
+        for i in range(70):
+            if i == 5:
+                messages.append({
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "name": "EnterPlanMode", "id": "tu1", "input": {}}],
+                })
+            else:
+                messages.append({
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Read", "id": f"tu{i}",
+                                  "input": {"file_path": f"src/file{i}.ts"}}],
+                })
+
+        req = self._make_request(system=None, messages=messages, tools=[])
+        # phase="EXECUTE", plan_mode_active=True — simulates Signal 3 restoring state
+        ctx = self._make_ctx(phase="EXECUTE", plan_mode_active=True)
+
+        with patch("llm.transformers.deferred_tools.get_session_deferred_tools",
+                   new_callable=AsyncMock, return_value=[]), \
+             patch("llm.transformers.deferred_tools.save_session_deferred_tools",
+                   new_callable=AsyncMock):
+            transformer = DeferredToolsTransformer()
+            await transformer.transform(req, ctx)
+
+        injected = {
+            t["name"] if isinstance(t, dict) else getattr(t, "name", None)
+            for t in req.tools
+        }
+        assert "ExitPlanMode" in injected, (
+            "ExitPlanMode must be injected when ctx.plan_mode_active=True "
+            "even if ctx.phase != PLAN and history scan misses EnterPlanMode"
+        )
+        assert "AskUserQuestion" in injected, (
+            "AskUserQuestion must be injected when ctx.plan_mode_active=True"
+        )
+
+    @pytest.mark.asyncio
+    async def test_plan_tools_not_injected_when_ctx_plan_mode_false(self):
+        """Complement: ctx.plan_mode_active=False + non-PLAN phase → no plan tool guarantee."""
+        from llm.transformers.deferred_tools import DeferredToolsTransformer
+        from unittest.mock import patch
+
+        req = self._make_request(system=None, messages=[], tools=[])
+        ctx = self._make_ctx(phase="EXECUTE", plan_mode_active=False)
+
+        with patch("llm.transformers.deferred_tools.get_session_deferred_tools",
+                   new_callable=AsyncMock, return_value=[]), \
+             patch("llm.transformers.deferred_tools.save_session_deferred_tools",
+                   new_callable=AsyncMock):
+            transformer = DeferredToolsTransformer()
+            await transformer.transform(req, ctx)
+
+        assert req.tools == [], (
+            "No plan tools should be injected when ctx.plan_mode_active=False "
+            "and phase is not PLAN"
         )

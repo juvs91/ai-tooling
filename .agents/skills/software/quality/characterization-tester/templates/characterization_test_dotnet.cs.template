@@ -1,0 +1,43 @@
+// characterization: {{namespace}}.{{class_name}}.{{method_name}}
+// feature: {{feature_file_name}}
+// scenario: {{scenario_name}}
+// status: hypothesis → run to verify
+// adapter: dotnet
+// generated_at: {{date}}
+using Xunit;
+using {{namespace}};
+
+public class {{class_name}}CharacterizationTests
+{
+    // IMPORTANT: these tests record CURRENT behavior, not desired behavior.
+    // A failing assertion means you found a CONFLICT — document it, don't fix it yet.
+
+    [Fact]
+    public void {{scenario_slug}}__current_behavior()
+    {
+        // Arrange — inputs from feature file
+        // TODO: fill constructor args from decompiled source in output/decompiled/dotnet/
+        var sut = new {{class_name}}(/* {{constructor_args}} */);
+
+        // Act
+        var result = sut.{{method_name}}(/* {{args}} */);
+
+        // Assert — hypothesis value from feature file
+        // If this assertion fails, update the feature file with:
+        //   # status: conflict
+        //   # conflict_detail: hypothesis was {{expected}} but system returns <actual>
+        Assert.Equal({{expected}}, result);
+    }
+
+    // For DB-touching methods, wrap in a TransactionScope that never commits:
+    //
+    // [Fact]
+    // public void {{scenario_slug}}__with_db_rollback()
+    // {
+    //     using var scope = new System.Transactions.TransactionScope();
+    //     var sut = new {{class_name}}(/* inject real DB connection */);
+    //     var result = sut.{{method_name}}(/* args */);
+    //     Assert.Equal({{expected}}, result);
+    //     // scope disposed here → automatically rolled back
+    // }
+}

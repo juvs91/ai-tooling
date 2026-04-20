@@ -6,21 +6,28 @@ usage() {
 Usage:
   cc-proxy-up [path-to-override.yml]
 
+Levanta la unión de servicios definidos en docker-compose.yml + el override.
+Si un servicio aparece en ambos, el override tiene precedencia (merge estándar).
+
 Env vars:
-  PROFILE_ENV=profile-envs/cloud.groq.env   # (optional) force provider profile env_file
-  HOST_SERVER=./vendor/claude-code-proxy/server.py   # (optional) local path to server.py
-  CONTAINER_SERVER=/claude-code-proxy/server.py      # (optional) path inside container
+  PROFILE_ENV=profile-envs/cloud.groq.env   # env_file extra para todos los servicios
+  HOST_SERVER=./vendor/claude-code-proxy/server.py
+  CONTAINER_SERVER=/claude-code-proxy/server.py
   ENABLE_RELOAD=1|0  (default 1)
-  BIND_PORT=8083     (optional) override proxy_cloud port mapping (host->8082)
+  BIND_PORT=8083     # si se setea, fuerza ese puerto en TODOS los servicios (útil para testing)
 
 Examples:
-  cc-proxy-up
-  PROFILE_ENV=profile-envs/cloud.groq.env cc-proxy-up docker-compose.cloud.override.yml
-  HOST_SERVER=./vendor/claude-code-proxy/server.py cc-proxy-up docker-compose.cloud.override.yml
+  # Levanta proxy_local (8082) + proxy_cloud (8083) + proxy_cloud_school (8084)
+  cc-proxy-up cloud-provider-ymls/docker-compose.zai-school.override.yml
+
+  # Levanta proxy_local (8082) + proxy_cloud (8083, con cloud.zai.env)
+  cc-proxy-up cloud-provider-ymls/docker-compose.zai.override.yml
+
+  # Override explícito de puerto (single-service, para testing)
+  BIND_PORT=8090 cc-proxy-up cloud-provider-ymls/docker-compose.zai.override.yml
 USAGE
 }
 
-# --- symlink-safe repo root discovery ---
 resolve_self() {
   if command -v python3 >/dev/null 2>&1; then
     python3 - "$1" <<'PY'
@@ -47,7 +54,6 @@ SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 source "${SCRIPT_DIR}/_cc-lib.sh"
 ROOT_DIR="$(cc_repo_dir)"
 cd "$ROOT_DIR"
-# -----------------------------------------------
 
 OVERRIDE="${1:-docker-compose.cloud.override.yml}"
 case "${OVERRIDE}" in
@@ -55,7 +61,7 @@ case "${OVERRIDE}" in
 esac
 
 if [[ ! -f docker-compose.yml ]]; then
-  echo "ERROR: missing docker-compose.yml (run inside repo)" >&2
+  echo "ERROR: missing docker-compose.yml" >&2
   exit 2
 fi
 if [[ ! -f "$OVERRIDE" ]]; then
@@ -63,10 +69,9 @@ if [[ ! -f "$OVERRIDE" ]]; then
   exit 2
 fi
 
-# Defaults (can be set in root .env or exported)
 HOST_SERVER="${HOST_SERVER:-./vendor/claude-code-proxy/server.py}"
 CONTAINER_SERVER="${CONTAINER_SERVER:-/claude-code-proxy/server.py}"
-ENABLE_RELOAD="${ENABLE_RELOAD:-1}"
+BIND_PORT_EXPLICIT="${BIND_PORT:-}"   # vacío si el usuario no lo seteó
 BIND_PORT="${BIND_PORT:-8083}"
 
 if [[ ! -f "$HOST_SERVER" ]]; then
@@ -74,64 +79,61 @@ if [[ ! -f "$HOST_SERVER" ]]; then
   exit 2
 fi
 
-TMP_OVERRIDE="$(mktemp -t cc-proxy-dev-override.XXXXXX.yml)"
-trap 'rm -f "$TMP_OVERRIDE"' EXIT
-
-# Build a tiny override that ALWAYS:
-# - adds global .env
-# - optionally forces profile env_file (PROFILE_ENV)
-# - mounts server.py
-# - command is NOT set (respects docker-compose.yml and override files)
-{
-  echo "services:"
-  echo "  proxy_cloud:"
-
-  # Always include global env flags
-  echo "    env_file:"
-  echo "      - ./.env"
-
-  # If PROFILE_ENV is set, force it (it will override previous env_file keys)
-  if [[ -n "${PROFILE_ENV:-}" ]]; then
-    echo "      - ${PROFILE_ENV}"
-  fi
-
-  # Mount server.py to container
-  echo "    volumes:"
-  echo "      - ./vendor/claude-code-proxy:/claude-code-proxy"
-
-
-  # Optional: also mount entire vendor folder if you prefer (uncomment)
-  # echo "      - ./vendor/claude-code-proxy:/claude-code-proxy"
-
-  # Note: command is NOT set here — let the override files define it
-  # (docker-compose.yml or provider-specific override)
-
-  # Optional: override port mapping (handy if you run multiple)
-  echo "    ports:"
-  echo "      - \"${BIND_PORT}:8082\""
-} > "$TMP_OVERRIDE"
-
-echo "Using override: $OVERRIDE"
-echo "Global env: ./.env"
-if [[ -n "${PROFILE_ENV:-}" ]]; then
-  echo "Profile env forced: $PROFILE_ENV"
-else
-  echo "Profile env: (from $OVERRIDE)"
-fi
-echo "Mount: $HOST_SERVER -> $CONTAINER_SERVER"
-echo "Port: $BIND_PORT -> 8082"
-# Get services from override file (supports multi-service override files)
-services=$(parse_override_services "$OVERRIDE")
+# ✅ 1. obtener servicios PRIMERO (unión de base + override)
+services=$(parse_compose_services "docker-compose.yml" "$OVERRIDE")
 
 if [[ -z "$services" ]]; then
   echo "ERROR: No services found in $OVERRIDE" >&2
   exit 2
 fi
 
-# Recreate each service
+# ✅ 2. generar override dinámico correctamente
+TMP_OVERRIDE="$(mktemp -t cc-proxy-dev-override.XXXXXX.yml)"
+trap 'rm -f "$TMP_OVERRIDE"' EXIT
+
+{
+  echo "services:"
+  for service in $services; do
+    echo "  $service:"
+
+    # Venv aislado por servicio → evita race condition cuando varios comparten el bind mount
+    echo "    environment:"
+    echo "      - UV_PROJECT_ENVIRONMENT=/claude-code-proxy/.venv-${service}"
+
+    echo "    env_file:"
+    echo "      - ./.env"
+
+    if [[ -n "${PROFILE_ENV:-}" ]]; then
+      echo "      - ${PROFILE_ENV}"
+    fi
+
+    echo "    volumes:"
+    echo "      - ./vendor/claude-code-proxy:/claude-code-proxy"
+
+    if [[ -n "$BIND_PORT_EXPLICIT" ]]; then
+      echo "    ports:"
+      echo "      - \"${BIND_PORT}:8082\""
+    fi
+  done
+} > "$TMP_OVERRIDE"
+
+echo "Using override: $OVERRIDE"
+echo "Services: $services"
+echo "Mount: $HOST_SERVER -> $CONTAINER_SERVER"
+if [[ -n "$BIND_PORT_EXPLICIT" ]]; then
+  echo "Port: $BIND_PORT -> 8082 (forced)"
+else
+  echo "Port: from compose YAMLs (no override)"
+fi
+
+# ✅ 3. levantar servicios correctamente
 for service in $services; do
   echo "[+] Recreating service: $service"
-  docker compose -f docker-compose.yml -f "$OVERRIDE" up -d --force-recreate "$service"
+  docker compose \
+    -f docker-compose.yml \
+    -f "$OVERRIDE" \
+    -f "$TMP_OVERRIDE" \
+    up -d --force-recreate "$service"
 done
 
 docker ps --format "table {{.Names}}\t{{.Ports}}"

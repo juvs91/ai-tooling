@@ -1,0 +1,57 @@
+// characterization: {{package}}.{{ClassName}}.{{methodName}}
+// feature: {{feature_file_name}}
+// scenario: {{scenario_name}}
+// status: hypothesis → run to verify
+// adapter: jvm
+// generated_at: {{date}}
+package characterization.{{package}};
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+import {{package}}.{{ClassName}};
+
+class {{ClassName}}CharacterizationTest {
+
+    // IMPORTANT: these tests record CURRENT behavior, not desired behavior.
+    // A failing assertion means you found a CONFLICT — document it, don't fix it yet.
+
+    @Test
+    void {{scenario_slug}}__current_behavior() {
+        // Arrange — inputs from feature file
+        // TODO: fill constructor args from decompiled source in output/decompiled/java/
+        var sut = new {{ClassName}}(/* {{constructor_args}} */);
+
+        // Act
+        var result = sut.{{methodName}}(/* {{args}} */);
+
+        // Assert — hypothesis value from feature file
+        // If this assertion fails, update the feature file with:
+        //   # status: conflict
+        //   # conflict_detail: hypothesis was {{expected}} but system returns <actual>
+        assertEquals({{expected}}, result);
+    }
+
+    // For private methods, use reflection:
+    //
+    // @Test
+    // void {{scenario_slug}}__private_method() throws Exception {
+    //     var m = {{ClassName}}.class.getDeclaredMethod("{{methodName}}", {{ParamType}}.class);
+    //     m.setAccessible(true);
+    //     var sut = new {{ClassName}}(/* args */);
+    //     var result = m.invoke(sut, /* args */);
+    //     assertEquals({{expected}}, result);
+    // }
+
+    // For DB-touching methods, use a connection with autoCommit=false and rollback after:
+    //
+    // @Test
+    // void {{scenario_slug}}__with_db_rollback() throws Exception {
+    //     try (var conn = dataSource.getConnection()) {
+    //         conn.setAutoCommit(false);
+    //         var sut = new {{ClassName}}(conn);
+    //         var result = sut.{{methodName}}(/* args */);
+    //         assertEquals({{expected}}, result);
+    //         conn.rollback();
+    //     }
+    // }
+}

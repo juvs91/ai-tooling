@@ -128,6 +128,7 @@ async def _run_post_stream_validation(
         phase=ctx.phase,
         analysis_phase=ctx.analysis_phase,
         session_id=session_id,
+        plan_mode_active=ctx.plan_mode_active,
     )
 
     await grounding_validator.transform(mock_response, validation_ctx)

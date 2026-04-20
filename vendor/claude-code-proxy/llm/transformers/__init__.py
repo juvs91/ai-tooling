@@ -19,6 +19,7 @@ from llm.transformers.grounding_validator import GroundingValidatorTransformer
 from llm.transformers.adaptive_context import AdaptiveContextTransformer
 from llm.transformers.quality_recorder import QualityRecorderTransformer
 from llm.transformers.tool_call_validator import ToolCallValidatorTransformer
+from llm.transformers.plan_mode_guard import PlanModeGuardTransformer
 
 __all__ = [
     "Pipeline",
@@ -42,4 +43,5 @@ __all__ = [
     "AdaptiveContextTransformer",
     "QualityRecorderTransformer",
     "ToolCallValidatorTransformer",
+    "PlanModeGuardTransformer",
 ]

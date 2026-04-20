@@ -7,43 +7,75 @@
 * **Description:** Anthropic→OpenAI proxy + agentic CI infrastructure tooling (Claude Code harness, provider routing, Docker-based).
 * **Core Objective:** Evolve, document, and improve the proxy pipeline and agent skills with full traceability.
 
-## 2. Core Routing Directives
+## 2. Skill Routing — Tabla de Dispatch
 
-Depending on your platform (Claude Code, Cursor, Gemini), either use the `/activate_skill` tool OR read the corresponding `SKILL.md` file before proceeding:
+**Lee esta tabla al inicio de cada sesión y ante cada nueva subtarea.**
+Primera fila que hace match con el intent del usuario → lee ese SKILL.md → aplica protocolo.
+Paths son relativos a `.agents/skills/`.
 
-1. **Reverse Engineering & Analysis**: If asked to reverse engineer, analyze, backtrack, or generate an executions graph, you MUST read `.agents/skills/software/discovery/software-archeologist/SKILL.md`.
-2. **Tool Creation**: If you determine a new tool or script is needed, or if instructed to create one, DO NOT write it yourself. You MUST read `.agents/skills/core/tool-writer/SKILL.md` and delegate the task.
-3. **Architecture**: If asked to design a system, review component boundaries, or make structural trade-offs, you MUST read `.agents/skills/software/architecture/architect/SKILL.md`.
-4. **Behavior Driven Development**: If asked to write Gherkin specs or backtrack to BDD feature files, you MUST read `.agents/skills/software/quality/bdd-writer/SKILL.md`.
-5. **Decision Logging**: If analyzing code to extract why a hardcoded value or architectural choice was made, read `.agents/skills/software/architecture/decision-logger/SKILL.md`.
-6. **Architecture Decision Records**: If an architectural decision is made or confirmed, read `.agents/skills/software/architecture/adr-writer/SKILL.md` to document it.
-7. **The Learning Protocol**: If you learn a new domain concept, solve a recurring issue, discover a reusable pattern, or create a new generalized sub-agent, you MUST read `.agents/skills/core/learning-protocol/SKILL.md` and persist the knowledge to the repository.
-8. **Security Threat Modeling**: If performing threat modeling, vulnerability analysis, or security hardening, read `.agents/skills/security/security-expert/SKILL.md` before merging.
-9. **Database / AlloyDB / SQL**: If working with database queries, schema design, AlloyDB, or MCP data tools, read `.agents/skills/infrastructure/database-expert/SKILL.md`.
-10. **CI/CD / Docker / GitOps**: If working with Docker Compose, GitHub Actions, deployment pipelines, or infra config, read `.agents/skills/infrastructure/gitops-expert/SKILL.md`.
-11. **Claude API / Anthropic SDK**: If working with the Anthropic SDK, Claude API, streaming, tool use, prompt caching, or the Agent SDK, read `.agents/skills/integrations/claude-api/SKILL.md`.
-12. **MCP Server Development**: If asked to build or modify an MCP server (tools, resources, stdio vs HTTP), read `.agents/skills/software/api/mcp-server-patterns/SKILL.md`.
-13. **TDD / Test-First**: If writing new features, fixing bugs, or refactoring — use test-driven development. Read `.agents/skills/software/quality/tdd-workflow/SKILL.md`.
-14. **Live Library/Framework Docs**: If looking up current API docs for Python, FastAPI, Docker, uvicorn, or any library, read `.agents/skills/integrations/documentation-lookup/SKILL.md` (uses Context7 MCP).
-15. **Go Code / Go Project**: If working with Go code, idiomatic patterns, or Go tests, read `.agents/skills/software/language/go/golang-patterns/SKILL.md`.
-16. **Code Review**: If reviewing a PR, checking code quality, or auditing a diff, read `.agents/skills/software/quality/code-reviewer/SKILL.md`.
-16b. **Bitbucket PR Code Review**: If asked to do a code review, review a PR, "revisar PR", "hacer code review", or `/code-review`, you MUST read `.agents/skills/software/quality/code-review/SKILL.md`.
-27. **Brainstorming / Design First**: If asked to build a new feature, add functionality, or design something new, you MUST read `.agents/skills/core/brainstorming/SKILL.md` BEFORE writing any code.
-28. **Frontend Development**: If working with React, Next.js, TypeScript, Tailwind, or Vue, read `.agents/skills/software/frontend/senior-frontend/SKILL.md`.
-29. **Next.js Specifics**: If working with Next.js App Router, server/client components, dynamic routes, or Vercel deployment, read `.agents/skills/software/frontend/nextjs/SKILL.md`.
-30. **Backend Development (Python)**: If implementing Python services, FastAPI endpoints, SOLID principles, or DRY patterns, read `.agents/skills/software/backend/senior-backend/SKILL.md`.
-31. **Python Testing**: If writing Python tests, pytest fixtures, mocks, or async tests, read `.agents/skills/software/backend/python-testing/SKILL.md`.
-32. **E2E / Playwright Testing**: If writing, fixing, or reviewing Playwright tests, read `.agents/skills/software/quality/playwright-pro/SKILL.md`.
-17. **Security Code Review**: If code changes touch auth, crypto, inputs, or secrets, read `.agents/skills/security/security-review/SKILL.md`.
-18. **Deep Multi-Source Research**: If a task requires searching across multiple sources (web, docs, repos), read `.agents/skills/integrations/deep-research/SKILL.md`.
-19. **REST API Design**: If designing or reviewing API endpoints, request/response shapes, or OpenAPI specs, read `.agents/skills/software/api/api-design/SKILL.md`.
-20. **Backend Implementation Patterns**: If implementing services, error handling, pagination, or rate limiting, read `.agents/skills/software/api/backend-patterns/SKILL.md`.
-21. **Go Testing**: If writing Go tests, benchmarks, or table-driven tests, read `.agents/skills/software/language/go/golang-testing/SKILL.md`.
-22. **Coding Standards**: If writing Python, JS/TS, or any code that must pass linting/formatting gates, read `.agents/skills/software/quality/coding-standards/SKILL.md`.
-23. **Formal Evals**: If building an eval harness, scoring model outputs, or running A/B prompt experiments, read `.agents/skills/software/quality/eval-harness/SKILL.md`.
-24. **Verification Loop**: If completing an implementation and need to verify correctness end-to-end, read `.agents/skills/software/quality/verification-loop/SKILL.md`.
-25. **Unknown Domain**: If encountering a completely unfamiliar codebase or domain, read `.agents/skills/software/discovery/unknown-domain-protocol/SKILL.md`.
-26. **Behavior Backtracking**: If tracing a specific runtime behavior back to its code entry point, read `.agents/skills/software/discovery/retro-engineer/SKILL.md`.
+| Triggers | Skill — Capacidad que activa | Path | No usar para |
+|---|---|---|---|
+| nueva feature, "quiero hacer X", add, build, diseñar algo, ambiguous request | **brainstorming** — Gate de diseño obligatorio. Transforma ideas en specs aprobados. Hard gate: CERO código hasta que el usuario aprueba el diseño. | `core/brainstorming/SKILL.md` | Cambios mid-impl, bugfixes pequeños |
+| nuevo script, herramienta, automation, utility, parser, analyzer | **tool-writer** — Crea herramientas reutilizables y cross-platform. Consulta AGENTS.md y docs/tools/ antes de crear para evitar duplicados. Produce script ejecutable con tests. | `core/tool-writer/SKILL.md` | Scripts one-shot desechables |
+| aprendí algo, nuevo patrón reutilizable, problema recurrente resuelto, crear sub-agente | **learning-protocol** — Persiste conocimiento en ai-notes/ para que no muera con la sesión. Invocar al DESCUBRIR algo nuevo, no al inicio. | `core/learning-protocol/SKILL.md` | Inicio de sesión |
+| orquestar, multi-agent pipeline, descomponer goal, delegar a especialistas | **orchestrator** — Descompone goals en 4 Core Pipelines (Archaeology, Docs, Architecture, Re-impl). Coordina agentes especialistas. The Queen del swarm. | `core/orchestrator/SKILL.md` | Single-agent tasks |
+| agent drift, swarm, coordinación paralela, 2+ agentes simultáneos, consistencia | **swarm-anti-drift** — Coordinación multi-agente con anti-drift guarantees. Previene diseños contradictorios en trabajo paralelo. | `core/swarm-anti-drift/SKILL.md` | Single-agent |
+| telemetría, observabilidad agente, métricas, trace agent, cost report | **telemetry** — Instrumenta actividad de agentes (skill.invoked, tool.executed, knowledge.created). Forward a servicio de observabilidad. | `core/telemetry/SKILL.md` | — |
+| diseño de sistema, componentes, boundaries, trade-offs estructurales, integración | **architect** — Piensa en sistemas y límites. Evalúa trade-offs, diagnstica problemas estructurales, revisa diseños ANTES de codificar. Primer step: escribe ADR. | `software/architecture/architect/SKILL.md` | Implementación local |
+| ADR, architecture decision record, documentar decisión técnica | **adr-writer** — Captura decisiones arquitectónicas en formato MADR. Inmutables — nunca se editan, se superseden. | `software/architecture/adr-writer/SKILL.md` | Decisiones de impl local |
+| por qué está hardcodeado, extraer decisión del código, decision logger | **decision-logger** — Extrae decisiones implícitas en el código y las convierte en ADRs. | `software/architecture/decision-logger/SKILL.md` | — |
+| reverse engineer, analizar codebase, execution graph, call tree, mapear sistema | **software-archeologist** — Ingeniería inversa del codebase: genera execution graph, mapea call trees, extrae API inventory, construye findings ledger. Entry point para análisis profundo. | `software/discovery/software-archeologist/SKILL.md` | — |
+| backtrack, trazar comportamiento, de dónde viene X, trazar ejecución | **retro-engineer** — Análisis estructural automatizado. Produce retro-report.md. Complementa software-archeologist. | `software/discovery/retro-engineer/SKILL.md` | — |
+| sistema desconocido, código nunca visto, unfamiliar codebase, primer contacto | **unknown-domain-protocol** — Protocolo para dominar sistemas desconocidos sin documentación. Produce mapa de dominio y plan de exploración. | `software/discovery/unknown-domain-protocol/SKILL.md` | — |
+| escribir tests, TDD, test-first, agregar cobertura, fix bug, nueva feature con tests | **tdd-workflow** — Enforces TDD: tests ANTES del código. Requiere 80%+ coverage (unit + integration + E2E). Aplica para features, bugfixes, y refactors. | `software/quality/tdd-workflow/SKILL.md` | Arreglar tests existentes únicamente |
+| Gherkin, BDD, feature file, given/when/then, behavioral spec | **bdd-writer** — Traduce comportamiento del código en specs Gherkin ejecutables (pytest-bdd). Puente entre "qué hace el código" y "qué debería hacer". | `software/quality/bdd-writer/SKILL.md` | — |
+| review PR, revisar código, code review, revisar diff, /code-review, revisar PR | **code-review** — Revisión de calidad, seguridad, correctitud y cobertura de ADRs sobre un diff o PR. Encuentra bugs, security holes, race conditions. | `software/quality/code-review/SKILL.md` | — |
+| audit diff, revisar calidad general, code reviewer, antes de merge | **code-reviewer** — Quality/security/correctness reviewer para código general. Usa después de escribir, antes de merge. | `software/quality/code-reviewer/SKILL.md` | — |
+| verificar implementación, pre-PR, quality gate, terminé de implementar | **verification-loop** — Loop de verificación post-implementación. Corre tests, revisa cobertura, verifica reqs antes de PR. | `software/quality/verification-loop/SKILL.md` | Inicio de tarea |
+| linting, formateo, coding standards, ruff, eslint, estilo de código | **coding-standards** — Enforces estilo consistente por lenguaje (ruff para Python, eslint para TS). | `software/quality/coding-standards/SKILL.md` | — |
+| eval harness, evaluar output del modelo, A/B prompt, EDD, scoring | **eval-harness** — Framework de evaluación para outputs de LLM. Produce scores y comparaciones. | `software/quality/eval-harness/SKILL.md` | — |
+| caracterización, legacy behavior capture, tests de caracterización | **characterization-tester** — Captura comportamiento de código legacy para refactors seguros. Genera tests que documentan el comportamiento actual. | `software/quality/characterization-tester/SKILL.md` | Código nuevo |
+| refactor complejidad, reducir cognitive load, simplificar código complejo | **refactor-complexity** — Identifica y reduce complejidad ciclomática y cognitiva. Produce código más simple sin cambiar behavior. | `software/quality/refactor-complexity/SKILL.md` | Refactors de naming |
+| documentación, MkDocs, diataxis, docstrings, README, docs site | **technical-writer** — Governance de documentación. MkDocs, Diataxis framework, docstrings, static sites. "Docs or it didn't happen." | `software/quality/technical-writer/SKILL.md` | Comentarios inline |
+| playwright, E2E test, browser test, test flaky, Cypress migration | **playwright-pro** — Browser testing con Playwright: page objects, locators, intercepts, fixtures, CI integration. | `software/quality/playwright-pro/SKILL.md` | Unit tests |
+| React, Next.js, TypeScript, Tailwind, componente React, hook, props | **senior-frontend** — React/Next.js patterns: component optimization, bundle analysis, accessibility, TypeScript, Tailwind. | `software/frontend/senior-frontend/SKILL.md` | Backend puro |
+| App Router, server component, RSC, client component, Vercel, Next.js routing | **nextjs** — Next.js App Router patterns: RSC vs client components, data fetching, layouts, middleware. | `software/frontend/nextjs/SKILL.md` | — |
+| UI design, UX, user flow, wireframe, interfaz de usuario, accesibilidad | **ux-expert** — User experience advisor. User goals, mental models, friction points. Nielsen's heuristics, accessibility. | `design/ux-expert/SKILL.md` | Backend puro |
+| FastAPI, Python service, Pydantic, async Python, SOLID Python, endpoint | **senior-backend** — Backend engineering Python/FastAPI: SOLID, DRY, API design, N+1 queries, async patterns, JWT/OAuth, rate limiting, caching, middleware. | `software/backend/senior-backend/SKILL.md` | Go code, JS/TS |
+| pytest, fixtures, mock, async test, conftest, parametrize, Python test | **python-testing** — Testing patterns Python: pytest fixtures, async tests, mocking, coverage, property-based testing. | `software/backend/python-testing/SKILL.md` | Go tests, JS tests |
+| Go, Gin, goroutine, interface, idiomatic Go, concurrencia, channels, context | **golang-patterns** — Go idioms: interfaces, concurrency (goroutines, channels, context cancellation), error wrapping, dependency injection, project layout. | `software/language/go/golang-patterns/SKILL.md` | Python/JS/TS |
+| go test, table-driven tests, benchmark, fuzzing, testify, Go coverage | **golang-testing** — Testing en Go: table-driven, subtests, mocks con interfaces, benchmarks, fuzzing, integration tests. | `software/language/go/golang-testing/SKILL.md` | — |
+| base de datos, SQL, schema, migración, AlloyDB, NoSQL, ORM, indexing, queries | **database-expert** — Data modeling, SQL/NoSQL, time-series, query optimization, migrations. PostgreSQL, BigQuery, AlloyDB, Redis. | `infrastructure/database-expert/SKILL.md` | — |
+| CI/CD, pipeline, Docker, deploy, GitHub Actions, Terraform, IaC, GitOps, Cloud Run | **gitops-expert** — Source control, CI/CD, deployment, IaC, secrets management, branching strategy. | `infrastructure/gitops-expert/SKILL.md` | — |
+| Claude API, Anthropic SDK, streaming, tool use, prompt caching, Agent SDK, MCP client | **claude-api** — Patterns Python/TypeScript con Anthropic API: streaming, tool use, vision, batches, Agent SDK. | `integrations/claude-api/SKILL.md` | — |
+| investigar, web research, multi-fuente, buscar información, fact-check | **deep-research** — Web research multi-source con síntesis. Produce research report con fuentes verificadas. | `integrations/deep-research/SKILL.md` | — |
+| docs de librería, framework docs, how does X work, look up API, Context7 | **documentation-lookup** — Busca documentación actualizada vía Context7/web. Usar cuando docs pueden haber cambiado desde el training. | `integrations/documentation-lookup/SKILL.md` | — |
+| seguridad, auth, crypto, secrets, access control, JWT, OAuth, threat model, OWASP | **security-expert** — Threat modeler y cryptography reviewer. OWASP Top 10, key management, auth patterns, timing attacks, protocol security. | `security/security-expert/SKILL.md` | — |
+| security review, vulnerabilidades en diff, revisar auth code, pen test | **security-review** — Security code review de diffs específicos. Produce findings con severity rating. | `security/security-review/SKILL.md` | Review general de calidad |
+| REST API, endpoint, OpenAPI, paginación, error codes, versioning, rate limiting | **api-design** — REST API design: resource naming, status codes, pagination, filtering, error responses, versioning. | `software/api/api-design/SKILL.md` | — |
+| backend patterns, service layer, error handling, arquitectura de servicio | **backend-patterns** — Arquitectura backend: service/repository, error propagation, retry/circuit breaker. | `software/api/backend-patterns/SKILL.md` | — |
+| MCP server, build MCP tool, stdio vs HTTP, MCP resource, MCP prompt | **mcp-server-patterns** — Design e implementación de MCP servers. stdio vs Streamable HTTP, tools vs resources. | `software/api/mcp-server-patterns/SKILL.md` | — |
+
+### Compound Tasks — Skills que se apilan
+
+Algunos requests disparan múltiples skills. Cargarlos en este orden:
+1. **brainstorming** — siempre primero si es feature nueva o request ambiguo
+2. Skill de dominio: `golang-patterns`, `senior-backend`, `senior-frontend`, etc.
+3. **tdd-workflow** — si hay implementación de código
+4. **security-expert** o **security-review** — si hay auth, crypto, o secrets
+5. **verification-loop** — siempre al terminar implementación, antes de PR
+6. **learning-protocol** — al cerrar sesión si hubo nuevo conocimiento reutilizable
+
+Ejemplo: "agrega autenticación JWT a la API Python" →
+`brainstorming` → `senior-backend` → `tdd-workflow` → `security-expert` → `verification-loop`
+
+### Mid-Session Re-Trigger
+
+Re-verificar la tabla de routing cuando:
+- El dominio de la tarea cambia (ej: infra → API design, backend → frontend)
+- El usuario dice "ahora también...", "y además...", "y agrega..."
+- Cambias de tipo de archivo (`.py` → `.go`, servicio → test, código → docs)
+- Empiezas una subtarea claramente diferente dentro de la misma sesión
 
 ## 3. DEDUPLICATION MANDATE
 Before writing any new tool, script, or proposing a new agent, you MUST consult this `AGENTS.md` and `docs/tools/index.md` (if it exists). Reuse and refine existing capabilities. If merging two similar tools, keep the CLI contract compatible.

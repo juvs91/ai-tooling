@@ -12,34 +12,31 @@ cc_repo_dir() {
     fi
 }
 
-# Helper function to parse override file and extract service names
+# Helper function to parse override file and extract service names (single file, kept for compat)
 parse_override_services() {
-    local override_file="$1"
+    parse_compose_services "$1"
+}
 
-    if [[ ! -f "$override_file" ]]; then
-        echo "ERROR: Override file not found: $override_file" >&2
-        return 1
-    fi
+# Parse service names from one or more compose files, returns sorted union
+parse_compose_services() {
+    local files=("$@")
+    python3 - "${files[@]}" <<'PY'
+import yaml, sys
 
-    # Use Python for robust YAML parsing
-    python3 - <<PY
-import yaml
-import sys
+services = set()
+for fpath in sys.argv[1:]:
+    try:
+        with open(fpath) as f:
+            config = yaml.safe_load(f)
+            if config and "services" in config:
+                services.update(config["services"].keys())
+    except Exception as e:
+        print(f"WARNING: Could not parse {fpath}: {e}", file=sys.stderr)
 
-try:
-    with open("$override_file", "r") as f:
-        config = yaml.safe_load(f)
-        if "services" in config:
-            services = sorted(config.get("services", {}).keys())
-            print("\n".join(services))
-            sys.stdout.flush()
-            sys.exit(0)
-        else:
-            print(f"ERROR: No \"services\" section in $override_file", file=sys.stderr)
-            sys.exit(1)
-except Exception as e:
-    print(f"ERROR: Failed to parse $override_file: {e}", file=sys.stderr)
+if not services:
+    print("ERROR: No services found in provided compose files", file=sys.stderr)
     sys.exit(1)
-PY
 
+print("\n".join(sorted(services)))
+PY
 }

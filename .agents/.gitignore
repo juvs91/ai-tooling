@@ -1,0 +1,8 @@
+# Cache del repo de agents (git sparse-checkout clone)
+_repo/
+
+# Timestamp del último sync (local, no commitear)
+.last_sync
+
+# Log de bypasses ADR (local)
+../.adr-gate-bypasses.log

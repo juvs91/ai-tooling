@@ -1,0 +1,46 @@
+-- ============================================================
+-- Characterization Test: {{sp_name}}
+-- Feature:   {{feature_file}}
+-- Scenario:  {{scenario_name}}
+-- Status:    hypothesis → run to verify
+-- Generated: {{generated_date}}
+-- Database:  {{database_name}}
+-- ============================================================
+-- INSTRUCTIONS:
+--   1. Run this script against {{database_name}} in a read-only session
+--      (the ROLLBACK at the end prevents any permanent changes)
+--   2. Copy the SELECT output and paste it back to the characterization agent
+--   3. The agent will compare it against the hypothesis and classify the result
+-- ============================================================
+
+BEGIN TRAN
+
+-- Capture result set into table variable to avoid side effects leaking
+DECLARE @result TABLE (
+    {{result_columns}}
+    -- TODO: Add columns matching the SP's result set
+    -- Example: col_name  DATA_TYPE [NULL]
+)
+
+-- Execute SP with representative inputs
+INSERT INTO @result
+    EXEC {{sp_name}}
+        {{parameters}}
+        -- Example: @pedido_id   = 10234,
+        --          @cliente_id  = 'C001'
+
+-- This SELECT is the "ground truth" capture
+-- Copy its output for comparison against the hypothesis
+SELECT * FROM @result
+
+-- ROLLBACK ensures NO permanent changes to the database
+-- Safe to run against production (with caution)
+ROLLBACK
+
+-- ============================================================
+-- Expected output (from hypothesis):
+-- {{expected_output_description}}
+--
+-- Non-deterministic fields to MASK when comparing:
+-- {{masked_fields}}
+-- ============================================================

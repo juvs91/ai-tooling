@@ -1,18 +1,30 @@
+x-proxy-base: &proxy-base
+  build:
+    context: ./vendor/claude-code-proxy
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  environment:
+    - PYTHONUNBUFFERED=1
+    - UV_LINK_MODE=copy
+    - UV_PROJECT_ENVIRONMENT=/claude-code-proxy/.venv
+  volumes:
+    - ./vendor/claude-code-proxy:/claude-code-proxy
+  working_dir: /claude-code-proxy
+  command: sh -c "uv sync && uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py' --reload-exclude '.venv'"
+
 services:
+  proxy_cloud:
+    <<: *proxy-base
+    env_file:
+      - ./.env
+    ports:
+      - "8083:8082"
+
   proxy_cloud_school:
-    image: ghcr.io/1rgs/claude-code-proxy:main
+    <<: *proxy-base
     container_name: ai-tooling-proxy_cloud-1-school
-    restart: unless-stopped
     env_file:
       - ./.env
       - profile-envs/cloud.zai-anthropic.env
-    environment:
-      - PYTHONUNBUFFERED=1
-      - UV_LINK_MODE=copy
-      - UV_PROJECT_ENVIRONMENT=/tmp/.venv-school
     ports:
-      - "8083:8082"
       - "8084:8082"
-    volumes:
-      - ./vendor/claude-code-proxy:/claude-code-proxy
-    command: uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py' --reload-exclude '.venv'

@@ -252,3 +252,161 @@ class TestWrapUpTurnNoEnforcement:
         await t.transform(req, ctx)
         assert req.system is not None
         assert "[INTENT-ENFORCEMENT]" in req.system
+
+
+# ── Ralph mode suppression (Item 1) ──────────────────────────────────────────
+
+from llm.converters import _system_to_text as _to_text
+
+
+class TestRalphModeSuppression:
+    """When ctx.ralph_mode=True, enforcement must inject the no-AskUserQuestion note."""
+
+    @pytest.mark.asyncio
+    async def test_ralph_mode_injects_autonomous_note(self):
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="BUILD", ralph_mode=True)
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Edit")], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system)
+        assert "RALPH MODE" in text
+        assert "AskUserQuestion" in text
+        assert "AUTONOMOUS" in text
+
+    @pytest.mark.asyncio
+    async def test_ralph_mode_false_does_not_inject_note(self):
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="BUILD", ralph_mode=False)
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Edit")], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system) or ""
+        assert "RALPH MODE" not in text
+
+    @pytest.mark.asyncio
+    async def test_ralph_note_stacks_with_intent_enforcement(self):
+        """Ralph note and intent-specific prompt must both appear in system."""
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="BUILD", ralph_mode=True)
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Edit")], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system)
+        assert "RALPH MODE" in text
+        assert "[INTENT-ENFORCEMENT]" in text  # intent note also present
+
+    @pytest.mark.asyncio
+    async def test_ralph_note_injected_regardless_of_intent(self):
+        """Ralph suppression fires for any non-CHAT intent, not just BUILD."""
+        for intent in ("READ", "PLAN", "SYNTHESIZING", "VERIFY"):
+            t = IntentEnforcementTransformer(enabled=True)
+            ctx = TransformContext(intent=intent, ralph_mode=True)
+            req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Read")], messages=[])
+            await t.transform(req, ctx)
+            text = _to_text(req.system) or ""
+            assert "RALPH MODE" in text, f"RALPH MODE note missing for intent={intent}"
+
+
+# ── Adaptive quality enforcement (Item 4) ────────────────────────────────────
+
+class TestAdaptiveQualityEnforcement:
+    """Adaptive enforcement escalates when session quality history is consistently poor."""
+
+    @pytest.fixture(autouse=True)
+    def isolate_session(self, monkeypatch, tmp_path):
+        """Each test gets a clean session cache."""
+        import llm.compressor as comp
+        monkeypatch.setattr(comp, "_SESSION_CACHE_FILE", str(tmp_path / "cache.json"))
+        comp._session_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_low_avg_quality_triggers_critical_note(self):
+        from llm.compressor import append_session_quality
+        sid = "low-qual-test"
+        for _ in range(5):
+            await append_session_quality(sid, 0.35)
+
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="READ", session_id=sid)
+        req = SimpleNamespace(system=None, tools=[], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system) or ""
+        assert "SESSION-QUALITY" in text
+        assert "CRITICAL" in text
+
+    @pytest.mark.asyncio
+    async def test_high_avg_quality_no_escalation(self):
+        from llm.compressor import append_session_quality
+        sid = "high-qual-test"
+        for _ in range(5):
+            await append_session_quality(sid, 0.90)
+
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="BUILD", session_id=sid)
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Edit")], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system) or ""
+        assert "SESSION-QUALITY" not in text
+
+    @pytest.mark.asyncio
+    async def test_stub_count_2_triggers_strict_note(self):
+        from llm.compressor import append_session_quality
+        sid = "stub-test"
+        await append_session_quality(sid, 0.80, stub_delta=2)  # 2 stubs, score above threshold
+
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="BUILD", session_id=sid)
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Edit")], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system) or ""
+        assert "SESSION-QUALITY" in text
+        assert "STRICT" in text
+
+    @pytest.mark.asyncio
+    async def test_stub_count_1_no_escalation(self):
+        """Below threshold (< 2 stubs) must NOT trigger escalation."""
+        from llm.compressor import append_session_quality
+        sid = "one-stub-test"
+        await append_session_quality(sid, 0.80, stub_delta=1)
+
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="BUILD", session_id=sid)
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Edit")], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system) or ""
+        assert "SESSION-QUALITY" not in text
+
+    @pytest.mark.asyncio
+    async def test_no_session_id_no_escalation(self):
+        """Empty session_id must not trigger any adaptive enforcement."""
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="READ", session_id="")
+        req = SimpleNamespace(system=None, tools=[], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system) or ""
+        assert "SESSION-QUALITY" not in text
+
+    @pytest.mark.asyncio
+    async def test_empty_history_no_escalation(self):
+        """Unknown session (no history) must not trigger any adaptive enforcement."""
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="BUILD", session_id="fresh-unknown-session")
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Edit")], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system) or ""
+        assert "SESSION-QUALITY" not in text
+
+    @pytest.mark.asyncio
+    async def test_both_conditions_trigger_combined_note(self):
+        """Low quality AND stubs both present — both messages must appear."""
+        from llm.compressor import append_session_quality
+        sid = "both-bad"
+        for _ in range(5):
+            await append_session_quality(sid, 0.30, stub_delta=0)
+        await append_session_quality(sid, 0.30, stub_delta=2)
+
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="BUILD", session_id=sid)
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Edit")], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system) or ""
+        assert "CRITICAL" in text
+        assert "STRICT" in text
