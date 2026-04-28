@@ -7,6 +7,7 @@
         "**/Thumbs.db": true,
         ".mule": true
     },
+    "python.defaultInterpreterPath": "/Users/jeguzman/ai-tooling/vendor/claude-code-proxy/.venv/bin/python3",
     "claudeCode.terminalEnvironment": {
         "ANTHROPIC_BASE_URL": "http://127.0.0.1:8082",
         "ANTHROPIC_AUTH_TOKEN": "dummy"

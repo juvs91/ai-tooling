@@ -23,7 +23,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional, Dict
-
+import litellm
 from litellm import token_counter
 from utils.metrics import metrics
 from utils.utils import count_tokens_accurate  # toksum integration
@@ -655,7 +655,6 @@ async def _llm_compress_single(
     Call a single compressor endpoint with retry + exponential backoff.
     Returns summary string or None on failure.
     """
-    import litellm
 
     for attempt in range(retries):
         print(f"[compress] {label} calling {model} (attempt {attempt + 1}/{retries})")

@@ -13,14 +13,8 @@
       "args": ["./mcp-scripts/atlassian-mcp.sh", "bitbucket"]
     },
     "squit": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote",
-        "https://squit-mcp.deacero.us/mcp",
-        "--header",
-        "X-API-Key:REDACTED_SQUIT_KEY"
-      ]
+      "command": "bash",
+      "args": ["./mcp-scripts/squit-mcp.sh"]
     },
     "cloudsql": {
       "command": "bash",
