@@ -26,8 +26,6 @@ from typing import Any, Optional, TYPE_CHECKING
 from llm.pipeline import TransformContext
 from utils.quality import score_response as score_response_quality
 
-# Import accumulate_stream via TYPE_CHECKING to avoid circular dependency
-from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from llm.transformers.stream_event import accumulate_stream
 

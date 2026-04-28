@@ -7,16 +7,7 @@ import time
 import logging
 import warnings
 from datetime import datetime, timezone
-
-# Configure logging BEFORE any module imports that use getLogger()
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s:%(name)s:%(message)s",
-)
 from dotenv import load_dotenv
-
-# Suppress LiteLLM's Pydantic serialization warnings (cosmetic, from internal validation)
-warnings.filterwarnings("ignore", message="Pydantic serializer warnings", category=UserWarning)
 
 import litellm
 from litellm import token_counter
@@ -57,6 +48,15 @@ from llm.transformers.quality_refinement import (
 )
 from llm.transformers.stream_event import tracked_stream
 from config import load_config
+
+# Configure logging BEFORE any module imports that use getLogger()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s:%(message)s",
+)
+
+# Suppress LiteLLM's Pydantic serialization warnings (cosmetic, from internal validation)
+warnings.filterwarnings("ignore", message="Pydantic serializer warnings", category=UserWarning)
 
 
 load_dotenv()

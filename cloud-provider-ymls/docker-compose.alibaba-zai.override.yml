@@ -13,12 +13,11 @@ x-proxy-base: &proxy-base
   command: sh -c "uv sync && uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py' --reload-exclude '.venv'"
 
 services:
-
-  proxy_cloud_zai:
+  proxy_cloud_alibaba:
     <<: *proxy-base
-    container_name: ai-tooling-proxy_zai_anthropic_cloud-1
+    container_name: ai-tooling-proxy_cloud-1-alibaba
     env_file:
       - ./.env
-      - profile-envs/cloud.zai-anthropic.env
+      - profile-envs/cloud.alibaba-zai.env
     ports:
-      - "8086:8082"
+      - "8085:8082"

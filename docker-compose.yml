@@ -1,18 +1,4 @@
 services:
-  proxy_local:
-    build:
-      context: ./vendor/claude-code-proxy
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    env_file:
-      - ./.env
-    environment:
-      - PYTHONUNBUFFERED=1
-      - UV_LINK_MODE=copy
-    ports:
-      - "8082:8082"
-    command: sh -c "[ -d .venv ] || uv sync && uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload --reload-include '*.py' --reload-exclude '.venv'"
-
   proxy_cloud:
     build:
       context: ./vendor/claude-code-proxy
