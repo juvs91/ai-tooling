@@ -42,3 +42,7 @@ profile-envs/*
 .vscode/
 *.swp
 *.swo
+# Local Claude Code settings (may contain tokens)
+.claude/proxy.settings.local.json
+# Salesforce
+.sfdx/
