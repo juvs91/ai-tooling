@@ -172,6 +172,14 @@ class ModelCosts:
 
 
 @dataclass
+class ProviderQuirksConfig:
+    """Per-provider tunable parameters. All values configurable via env vars."""
+    kimi_max_temp: float = 0.8           # QUIRKS_KIMI_MAX_TEMP — clamp threshold
+    kimi_clamp_temp: float = 0.6         # QUIRKS_KIMI_CLAMP_TEMP — value to clamp to
+    deepseek_analysis_max_tokens: int = 8000  # QUIRKS_DEEPSEEK_ANALYSIS_MAX_TOKENS
+
+
+@dataclass
 class ProxyConfig:
     credentials: ProviderCredentials
     routing: ModelRouting
@@ -188,6 +196,7 @@ class ProxyConfig:
     passthrough_thinking_timeout: float  # ENV: PASSTHROUGH_THINKING_TIMEOUT (default: 300)
     thinking_max_input_chars: int  # ENV: THINKING_MAX_INPUT_CHARS (0 = no cap)
     adaptive: AdaptiveRoutingConfig = field(default_factory=AdaptiveRoutingConfig)
+    quirks: ProviderQuirksConfig = field(default_factory=ProviderQuirksConfig)
     litellm_thinking_params: Optional[dict] = None  # Provider-specific thinking params for LiteLLM
     cache_enabled: bool = True
     cache_ttl: int = 60
@@ -422,6 +431,11 @@ def load_config() -> ProxyConfig:
         passthrough_timeout=float(_env("PASSTHROUGH_TIMEOUT", "120")),
         passthrough_thinking_timeout=float(_env("PASSTHROUGH_THINKING_TIMEOUT", "300")),
         thinking_max_input_chars=int(_env("THINKING_MAX_INPUT_CHARS", "0")),
+        quirks=ProviderQuirksConfig(
+            kimi_max_temp=float(_env("QUIRKS_KIMI_MAX_TEMP", "0.8")),
+            kimi_clamp_temp=float(_env("QUIRKS_KIMI_CLAMP_TEMP", "0.6")),
+            deepseek_analysis_max_tokens=int(_env("QUIRKS_DEEPSEEK_ANALYSIS_MAX_TOKENS", "8000")),
+        ),
         litellm_thinking_params=_parse_litellm_thinking_params(),
         max_retries=int(_env("MAX_RETRIES", "5")),
         retry_base_delay=float(_env("RETRY_BASE_DELAY", "1.0")),

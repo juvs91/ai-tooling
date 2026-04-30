@@ -77,7 +77,12 @@ def build_litellm_pipeline(cfg: ProxyConfig) -> Pipeline:
     """Phase 2: Transformers that operate on the LiteLLM-format request."""
     return Pipeline([
         CompressionTransformer(cfg.compressor, cfg.routing),
-        ProviderQuirksTransformer(cfg.stream_extra_body, cfg.litellm_thinking_params),
+        ProviderQuirksTransformer(
+            cfg.stream_extra_body,
+            cfg.litellm_thinking_params,
+            analysis_thinking=cfg.analysis.thinking_params,
+            quirks_cfg=cfg.quirks,
+        ),
         CredentialTransformer(cfg.credentials, cfg.analysis),
     ])
 
@@ -86,7 +91,7 @@ def build_passthrough_pipeline(cfg: ProxyConfig) -> Pipeline:
     """Phase 2b: Request transformers for passthrough (Anthropic-compatible endpoints like Z.AI)."""
     return Pipeline([
         CompressionTransformer(cfg.compressor, cfg.routing),
-        ProviderQuirksTransformer(cfg.stream_extra_body, cfg.litellm_thinking_params),
+        ProviderQuirksTransformer(cfg.stream_extra_body, cfg.litellm_thinking_params, quirks_cfg=cfg.quirks),
     ])
     # Note: Response transformers run AFTER model returns, NOT here
     # See run_messages() passthrough path for response pipeline integration

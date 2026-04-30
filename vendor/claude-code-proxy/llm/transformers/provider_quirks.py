@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from config import ProviderQuirksConfig
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +25,17 @@ class ProviderQuirksTransformer(Transformer):
     def name(self) -> str:
         return "provider_quirks"
 
-    def __init__(self, stream_extra_body: Optional[dict] = None, litellm_thinking_params: Optional[dict] = None) -> None:
+    def __init__(
+        self,
+        stream_extra_body: Optional[dict] = None,
+        litellm_thinking_params: Optional[dict] = None,
+        analysis_thinking: Optional[dict] = None,
+        quirks_cfg: Optional["ProviderQuirksConfig"] = None,
+    ) -> None:
         self._extra = stream_extra_body
         self._litellm_thinking_params = litellm_thinking_params or {}
+        self._analysis_thinking = analysis_thinking or {}
+        self._quirks = quirks_cfg
 
     async def transform(self, request: Any, ctx: TransformContext) -> None:
         if (
@@ -57,25 +68,44 @@ class ProviderQuirksTransformer(Transformer):
                 ctx.litellm_request["temperature"] = 0.6
                 logger.info("[quirks] Overrode temperature %.1f → 0.6 for %s (R1 repetition prevention)", current_temp, model)
 
-        # LiteLLM provider-specific thinking support (NEW)
-        # Injects provider-specific thinking params for DeepSeek, MiniMax, etc.
+        # Kimi K2: clamp high temperatures — quality collapses at temp > threshold in long sessions
+        if "kimi" in model.lower():
+            current_temp = ctx.litellm_request.get("temperature")
+            max_temp = self._quirks.kimi_max_temp if self._quirks else 0.8
+            clamp_temp = self._quirks.kimi_clamp_temp if self._quirks else 0.6
+            if current_temp is not None and current_temp > max_temp:
+                ctx.litellm_request["temperature"] = clamp_temp
+                logger.info("[quirks] kimi-k2: temp_clamped %.1f (was %.1f)", clamp_temp, current_temp)
+
+        # LiteLLM provider-specific thinking + generic fallback
         # Only applies during ANALYZING/READ/SYNTHESIZING phases
         model = str(getattr(request, "model", "") or "")
-        if ctx.litellm_request and getattr(ctx, "analysis_phase", "") in ("ANALYZING", "READ", "SYNTHESIZING") and self._litellm_thinking_params:
-            # Provider-specific thinking injection
-            if "deepseek" in model.lower():
-                # DeepSeek R1 uses "max_tokens" for thinking output
-                if ctx.litellm_request.get("max_tokens"):
-                    # DeepSeek R1 can handle larger max_tokens for thinking
-                    # Default max_tokens is usually around 4K, but for R1 we want more
+        if ctx.litellm_request and getattr(ctx, "analysis_phase", "") in ("ANALYZING", "READ", "SYNTHESIZING"):
+            thinking_handled = False
+            if self._litellm_thinking_params:
+                if "deepseek" in model.lower():
+                    # DeepSeek R1 uses "max_tokens" for thinking output
+                    analysis_max = self._quirks.deepseek_analysis_max_tokens if self._quirks else 8000
                     current_max = ctx.litellm_request.get("max_tokens", 0)
-                    if current_max < 8000:
-                        ctx.litellm_request["max_tokens"] = 8000
-                        logger.info("[quirks] Injected DeepSeek R1 max_tokens: 8000 (for thinking output)")
-            elif "minimax" in model.lower():
-                # MiniMax thinking params (if supported)
-                minimax_params = self._litellm_thinking_params.get("minimax")
-                if minimax_params and minimax_params.get("thinking"):
-                    ctx.litellm_request.setdefault("extra_body", {}).update(minimax_params["thinking"])
-                    logger.info("[quirks] Injected MiniMax thinking params: %s", list(minimax_params.get("thinking", {}).keys()))
-            # Add other providers as needed
+                    if current_max < analysis_max:
+                        ctx.litellm_request["max_tokens"] = analysis_max
+                        logger.info("[quirks] deepseek: max_tokens bumped to %d (thinking output)", analysis_max)
+                    thinking_handled = True
+                elif "minimax" in model.lower():
+                    minimax_params = self._litellm_thinking_params.get("minimax")
+                    if minimax_params and minimax_params.get("thinking"):
+                        ctx.litellm_request.setdefault("extra_body", {}).update(minimax_params["thinking"])
+                        logger.info("[quirks] minimax: thinking injected %s", list(minimax_params.get("thinking", {}).keys()))
+                    thinking_handled = True
+                elif "kimi" in model.lower():
+                    kimi_params = self._litellm_thinking_params.get("kimi")
+                    if kimi_params and kimi_params.get("thinking"):
+                        ctx.litellm_request.setdefault("extra_body", {}).update(kimi_params["thinking"])
+                        logger.info("[quirks] kimi-k2: thinking injected %s", list(kimi_params.get("thinking", {}).keys()))
+                    thinking_handled = True
+
+            # Generic fallback: inject ANALYSIS_THINKING_PARAMS into extra_body for unknown
+            # LiteLLM models that accept Anthropic-format thinking params
+            if not thinking_handled and self._analysis_thinking:
+                ctx.litellm_request.setdefault("extra_body", {}).update(self._analysis_thinking)
+                logger.info("[quirks] analysis_thinking (generic fallback): %s", list(self._analysis_thinking.keys()))

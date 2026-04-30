@@ -48,6 +48,7 @@ from llm.transformers.quality_refinement import (
 )
 from llm.transformers.stream_event import tracked_stream
 from config import load_config
+import asyncio
 
 # Configure logging BEFORE any module imports that use getLogger()
 logging.basicConfig(
@@ -153,6 +154,23 @@ elif cfg.credentials.anthropic_base_url:
     )
 else:
     logger.info("[startup] Passthrough: N/A (no custom anthropic base_url)")
+
+
+@app.on_event("startup")
+async def _schedule_cache_cleanup() -> None:
+    """Schedule hourly eviction of expired sessions from the session cache."""
+    from llm.compressor import cleanup_expired_sessions
+
+    async def _loop() -> None:
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                await cleanup_expired_sessions()
+            except Exception as exc:
+                logger.warning("[session] Hourly cache cleanup failed: %s", exc)
+
+    asyncio.create_task(_loop())
+    logger.info("[startup] Session cache cleanup: scheduled every 3600s")
 
 
 def _classify_llm_error(e: Exception) -> tuple[int, str]:

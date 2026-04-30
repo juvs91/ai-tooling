@@ -27,6 +27,11 @@ import litellm
 from litellm import token_counter
 from utils.metrics import metrics
 from utils.utils import count_tokens_accurate  # toksum integration
+from llm.session_state import extract_session_state, inject_state_into_system_prompt, SessionState
+
+
+_MAX_SESSION_STATE_ENTITIES = 150  # cap entities per session to bound session_state size
+_MAX_CITATION_HISTORY = 200        # cap citation history per session
 
 
 # Circuit breaker state (module-level, persists across requests)
@@ -86,6 +91,10 @@ class _CompressionCache:
     quality_scores: list[float] = field(default_factory=list)  # last N quality scores (0.0–1.0)
     session_stub_count: int = 0                                 # stubs detected so far in this session
 
+    # Priority 2: structured state (entities, decisions, phase checkpoints) extracted before
+    # each compression and injected back into the system prompt after reassembly.
+    session_state: Optional[dict] = None  # serialized SessionState.to_dict()
+
 _session_cache: Dict[str, _CompressionCache] = {}  # Multi-session support: session_id -> cache entry
 _SESSION_TTL = 604800.0          # 7 days — matches typical dev session rhythm (survive weekend gaps)
 _CACHE_MSG_TOLERANCE = 100   # Reuse if ≤100 new old messages since last compression
@@ -104,24 +113,42 @@ def _compute_prefix_hash(messages: list[dict], n: int = _CACHE_PREFIX_SIZE) -> s
 
 
 def _save_session_cache_to_disk() -> None:
-    """Persist _session_cache to JSON. Must be called within _state_lock."""
+    """Persist _session_cache to JSON. Must be called within _state_lock.
+
+    Evicts expired sessions before saving so disk and in-memory cache stay clean.
+    Trims per-session fields that grow unbounded (session_state.entities, citation_history).
+    """
     try:
-        data = {
-            str(sid) if sid is not None else "__default__": {
+        now = time.time()
+        expired = [sid for sid, c in _session_cache.items() if now - c.timestamp >= _SESSION_TTL]
+        for sid in expired:
+            del _session_cache[sid]
+        if expired:
+            print(f"[session] Cache cleanup: removed {len(expired)} expired session(s)")
+
+        data = {}
+        for sid, c in _session_cache.items():
+            # Trim session_state.entities to prevent unbounded growth
+            ss = c.session_state
+            if ss and len(ss.get("entities", {})) > _MAX_SESSION_STATE_ENTITIES:
+                trimmed_entities = dict(list(ss["entities"].items())[-_MAX_SESSION_STATE_ENTITIES:])
+                ss = {**ss, "entities": trimmed_entities}
+
+            data[str(sid) if sid is not None else "__default__"] = {
                 "summary": c.summary,
                 "old_msg_count": c.old_msg_count,
                 "timestamp": c.timestamp,
                 "session_id": c.session_id,
                 "grounding_graph": c.grounding_graph,
                 "verified_claims": list(c.verified_claims),
-                "citation_history": c.citation_history,
+                "citation_history": c.citation_history[-_MAX_CITATION_HISTORY:],
                 "deferred_tool_names": c.deferred_tool_names,
                 "plan_mode_active": c.plan_mode_active,
                 "quality_scores": c.quality_scores,
                 "session_stub_count": c.session_stub_count,
+                "session_state": ss,
             }
-            for sid, c in _session_cache.items()
-        }
+
         with open(_SESSION_CACHE_FILE, "w") as f:
             json.dump(data, f)
     except Exception as e:
@@ -162,6 +189,7 @@ def _load_session_cache_from_disk() -> None:
                 plan_mode_active=entry.get("plan_mode_active", False),
                 quality_scores=entry.get("quality_scores", []),
                 session_stub_count=entry.get("session_stub_count", 0),
+                session_state=entry.get("session_state"),
             )
             loaded += 1
         if loaded:
@@ -465,6 +493,59 @@ def _enforce_message_cap(
     return capped
 
 
+async def _apply_preserved_state(
+    messages: list[dict],
+    session_id: str,
+    source_messages: list[dict],
+) -> list[dict]:
+    """Extract structured state from source_messages and inject into system prompt.
+
+    Merges with any previously persisted state so checkpoint history accumulates
+    across multiple compression boundaries (not just the current one).
+    """
+    try:
+        async with _state_lock:
+            entry = _session_cache.get(session_id)
+            existing_raw = entry.session_state if entry else None
+        existing = SessionState.from_dict(existing_raw) if existing_raw else None
+
+        state = extract_session_state(source_messages, existing)
+
+        async with _state_lock:
+            entry = _session_cache.get(session_id)
+            if entry:
+                entry.session_state = state.to_dict()
+
+        result = list(messages)
+        for i, msg in enumerate(result):
+            if msg.get("role") == "system":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    result[i] = {**msg, "content": inject_state_into_system_prompt(content, state)}
+                elif isinstance(content, list):
+                    text_idx = next(
+                        (j for j, b in enumerate(content) if isinstance(b, dict) and b.get("type") == "text"),
+                        None,
+                    )
+                    if text_idx is not None:
+                        blocks = list(content)
+                        blocks[text_idx] = {
+                            **blocks[text_idx],
+                            "text": inject_state_into_system_prompt(blocks[text_idx].get("text", ""), state),
+                        }
+                        result[i] = {**msg, "content": blocks}
+                break
+
+        print(
+            f"[compress] State preserved: {len(state.checkpoints)} checkpoints, "
+            f"{len(state.decisions)} decisions, {len(state.entities)} entities"
+        )
+        return result
+    except Exception as exc:
+        print(f"[compress] State preservation failed (non-fatal): {exc}")
+        return messages
+
+
 async def compress_messages_if_needed(
     messages: list[dict],
     cfg: Any,  # CompressorConfig with all new parameters
@@ -594,6 +675,7 @@ async def compress_messages_if_needed(
 
     if cached_summary is not None:
         compressed = _reassemble_with_summary(system_msg, cached_summary, recent_messages)
+        compressed = await _apply_preserved_state(compressed, effective_session_id, old_messages)
         new_tokens = count_tokens_accurate(compressed, model=target_model)
         print(f"[compress] Success (cached): {estimated_tokens} → {new_tokens} tokens "
               f"(saved {estimated_tokens - new_tokens})")
@@ -613,6 +695,7 @@ async def compress_messages_if_needed(
         await update_session(effective_session_id, summary, len(old_messages))
         # Reassemble with summary
         merged = _reassemble_with_summary(system_msg, summary, recent_messages)
+        merged = await _apply_preserved_state(merged, effective_session_id, old_messages)
 
         # Step 5: Enforce token budget
         merged = _trim_by_token_budget(merged, max_tokens, target_model)
@@ -990,6 +1073,97 @@ async def save_session_deferred_tools(session_id: str, tool_names: list[str]) ->
                 deferred_tool_names=list(tool_names),
             )
         _save_session_cache_to_disk()
+
+
+# =============================================================================
+# Evidence Graph Persistence (Priority 4 — session-level grounding continuity)
+# =============================================================================
+
+async def get_session_grounding_graph(session_id: str) -> dict:
+    """Return the full persisted grounding graph for a session.
+
+    Used by GroundingValidatorTransformer to restore historical file evidence
+    after compression removes old tool_result messages from context.
+    """
+    if not session_id:
+        return {}
+    async with _state_lock:
+        entry = _session_cache.get(session_id)
+        if entry is not None and time.time() - entry.timestamp < _SESSION_TTL:
+            return dict(entry.grounding_graph)
+    return {}
+
+
+async def extend_session_grounding_graph(
+    session_id: str,
+    new_entities: dict,
+    new_snippets: dict,
+) -> None:
+    """Merge new entities + snippets into the session's persistent grounding graph.
+
+    New entries take precedence. Existing entries get updated citations and last_verified.
+    Persists to disk immediately so evidence survives proxy reloads and compressions.
+    """
+    if not session_id:
+        return
+    try:
+        async with _state_lock:
+            entry = _session_cache.get(session_id)
+            if entry is None:
+                entry = _CompressionCache(session_id=session_id, timestamp=time.time())
+                _session_cache[session_id] = entry
+            now = time.time()
+            for entity, data in new_entities.items():
+                if entity not in entry.grounding_graph:
+                    entry.grounding_graph[entity] = {
+                        **data,
+                        "first_seen": now,
+                        "last_verified": now,
+                    }
+                else:
+                    existing = entry.grounding_graph[entity]
+                    existing["last_verified"] = now
+                    # Merge citations (deduplicate)
+                    merged_cits = list(set(existing.get("citations", []) + data.get("citations", [])))
+                    existing["citations"] = merged_cits
+                    # Update snippet only if new one is available
+                    if data.get("code_snippet"):
+                        existing["code_snippet"] = data["code_snippet"]
+            # Also persist code snippets for file evidence (mapped by file_path)
+            for file_path, snippet in new_snippets.items():
+                # Store as a special "$file:" key for raw file lookup
+                key = f"$file:{file_path}"
+                if key not in entry.grounding_graph:
+                    entry.grounding_graph[key] = {
+                        "file": file_path,
+                        "related": [],
+                        "citations": [],
+                        "code_snippet": snippet,
+                        "first_seen": now,
+                        "last_verified": now,
+                    }
+            _save_session_cache_to_disk()
+    except Exception as exc:
+        print(f"[grounding] extend_session_grounding_graph failed: {exc}")
+
+
+async def get_session_read_files(session_id: str) -> set[str]:
+    """Return the set of file paths that were read in this session (from grounding graph).
+
+    Used by GroundingValidatorTransformer to validate citations against historically
+    read files even after compression removed the original tool_result messages.
+    """
+    if not session_id:
+        return set()
+    async with _state_lock:
+        entry = _session_cache.get(session_id)
+        if entry is None or time.time() - entry.timestamp >= _SESSION_TTL:
+            return set()
+        return {
+            v["file"]
+            for k, v in entry.grounding_graph.items()
+            if k.startswith("$file:") and v.get("file")
+        }
 
 
 # =============================================================================

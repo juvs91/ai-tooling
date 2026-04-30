@@ -110,6 +110,12 @@ class TransformContext:
     stream_input_tokens: int = 0
     stream_output_tokens: int = 0
 
+    # Proactive degradation detection (Priority 3)
+    # Populated from session cache quality_scores at request time
+    quality_history: list[float] = field(default_factory=list)
+    degradation_count: int = 0          # number of proactive triggers this session
+    last_degradation_turn: int = 0      # turn index of last proactive trigger
+
 
 class Transformer(ABC):
     """Single-responsibility request modifier.

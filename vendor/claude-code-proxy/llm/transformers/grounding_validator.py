@@ -4,12 +4,17 @@ Grounding Validator Transformer
 Validates citations in model output against actual tool results.
 Injects code snippets into system prompt for claim verification.
 Prevents hallucinations by ensuring all claims have verified evidence.
+
+Priority 4 enhancement: loads historically-read files from session cache so
+citations to files read before a compression boundary still validate.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from typing import Any
 
 from llm.pipeline import Transformer, TransformContext
@@ -29,6 +34,19 @@ _CLAIM_PATTERN = re.compile(
     r'(?:[A-Z][^.!?]+(?:does|is|are|has|uses|handles|manages|implements|provides|calls|invokes|returns|throws)[^.!?]+)[.!?]',
     re.IGNORECASE
 )
+
+
+async def _persist_evidence_graph(
+    session_id: str,
+    evidence_graph: dict,
+    code_snippet_cache: dict,
+) -> None:
+    """Fire-and-forget: persist evidence graph entries to session cache."""
+    try:
+        from llm.compressor import extend_session_grounding_graph
+        await extend_session_grounding_graph(session_id, evidence_graph, code_snippet_cache)
+    except Exception as exc:
+        logger.warning("[grounding] Evidence graph persistence failed: %s", exc)
 
 
 class GroundingValidatorTransformer(Transformer):
@@ -74,6 +92,22 @@ class GroundingValidatorTransformer(Transformer):
         evidence_map = self._build_evidence_map(messages)
         logger.info("[grounding] Found evidence for %d unique files", len(evidence_map))
 
+        # Priority 4: augment with historically-read files that survived compression
+        if ctx.session_id:
+            try:
+                from llm.compressor import get_session_read_files
+                historical_files = await get_session_read_files(ctx.session_id)
+                if historical_files:
+                    added = 0
+                    for f in historical_files:
+                        if f not in evidence_map:
+                            evidence_map[f] = []
+                            added += 1
+                    if added:
+                        logger.info("[grounding] Restored %d historical files from session cache", added)
+            except Exception as exc:
+                logger.warning("[grounding] Failed to load session read files: %s", exc)
+
         # Step 3: Extract code snippets from tool results
         code_snippets = self._extract_code_snippets(messages)
         ctx.code_snippet_cache = code_snippets
@@ -112,6 +146,27 @@ class GroundingValidatorTransformer(Transformer):
 
         # Step 7: Build multi-hop evidence graph
         self._build_evidence_graph(ctx, messages, citations)
+
+        # Priority 4: flag stale evidence entries (>30min without verification)
+        _stale_threshold_secs = 1800
+        _now = time.time()
+        for entity, data in ctx.evidence_graph.items():
+            last_verified = data.get("last_verified", _now)
+            age_secs = _now - last_verified
+            age_minutes = int(age_secs / 60)
+            if age_secs > _stale_threshold_secs:
+                ctx.grounding_issues.append(
+                    f"Evidence for '{entity}' stale ({age_minutes}m since last verification)"
+                )
+
+        # Priority 4: persist new evidence back to session cache (fire-and-forget)
+        if ctx.session_id and ctx.evidence_graph:
+            try:
+                asyncio.create_task(
+                    _persist_evidence_graph(ctx.session_id, ctx.evidence_graph, ctx.code_snippet_cache)
+                )
+            except Exception as exc:
+                logger.warning("[grounding] Failed to schedule evidence persistence: %s", exc)
 
         if citations:
             logger.info(
@@ -249,15 +304,20 @@ class GroundingValidatorTransformer(Transformer):
             # Extract entities from file path (class/function names)
             entities = self._extract_entities_from_file(file_path)
 
-            # Add to evidence graph
+            # Add to evidence graph with temporal metadata
+            now = time.time()
             for entity in entities:
                 if entity not in ctx.evidence_graph:
                     ctx.evidence_graph[entity] = {
                         "file": file_path,
                         "related": [],
                         "citations": [],
-                        "code_snippet": ctx.code_snippet_cache.get(file_path, "")
+                        "code_snippet": ctx.code_snippet_cache.get(file_path, ""),
+                        "first_seen": now,
+                        "last_verified": now,
                     }
+                else:
+                    ctx.evidence_graph[entity]["last_verified"] = now
                 ctx.evidence_graph[entity]["citations"].append(citation)
 
         # Link related entities (simple heuristic: same directory)

@@ -20,14 +20,23 @@ model-specific logic across multiple files (stream_quality.py, etc.).
 from __future__ import annotations
 
 import asyncio
+import httpx
+import json
 import logging
 import os
+import re
+from difflib import SequenceMatcher
+from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
-from llm.pipeline import TransformContext
-from utils.quality import score_response as score_response_quality
 
-if TYPE_CHECKING:
-    from llm.transformers.stream_event import accumulate_stream
+from llm.converters import convert_litellm_to_anthropic
+from llm.compressor import append_session_quality, get_session_quality_history
+from llm.pipeline import TransformContext
+from llm.schemas import Message
+from llm.sse import response_to_sse_events, ping as sse_ping
+from llm.transformers.stream_event import accumulate_stream
+from utils.quality import score_response as score_response_quality
+from utils.tool_utils import _CC_WORKFLOW_TOOL_NAMES as _CC_WORKFLOW_TOOLS
 
 if TYPE_CHECKING:
     from config import ProxyConfig
@@ -54,7 +63,6 @@ def _fire_quality_persist(ctx: TransformContext, issues: list[str]) -> None:
 
     async def _persist() -> None:
         try:
-            from llm.compressor import append_session_quality
             await append_session_quality(session_id, ctx.quality_score, stub_delta)
             logger.debug(
                 "[quality-persist] session=%s score=%.2f stub_delta=%d",
@@ -131,8 +139,6 @@ async def _llm_quality_gate(
     Uses the classifier endpoint (DeepSeek-chat) — cheap, fast, no circular deps.
     """
     try:
-        import httpx
-
         prompt = (
             f"Task intent: {intent}\n\n"
             f"Model response (first 800 chars):\n{response_text[:800]}\n\n"
@@ -176,9 +182,12 @@ async def _should_refine(
     intent: str,
     response_text: str,
     cfg_obj: "ProxyConfig",
+    ctx: Optional[TransformContext] = None,
 ) -> bool:
-    """Two-tier refinement decision gate.
+    """Two-tier refinement decision gate with proactive degradation detection.
 
+    Tier 0 — proactive degradation (Priority 3):
+      Rolling quality_history delta < -0.15 over last 6 turns → proactive refine
     Tier 1 — deterministic (0ms):
       score >= quality_threshold  → False (definitely good, skip)
       score <  certainty_floor    → True  (definitely bad, refine)
@@ -187,6 +196,27 @@ async def _should_refine(
 
     Returns True if refinement should proceed.
     """
+    # Tier 0: proactive degradation — catch slow drift before it becomes obvious
+    if ctx is not None and getattr(ctx, "session_id", None):
+        try:
+            quality_scores, _ = await get_session_quality_history(ctx.session_id)
+            if len(quality_scores) >= 6:
+                recent = quality_scores[-3:]
+                earlier = quality_scores[-6:-3]
+                recent_avg = sum(recent) / len(recent)
+                earlier_avg = sum(earlier) / len(earlier)
+                delta_avg = recent_avg - earlier_avg
+                if delta_avg < -0.15:
+                    logger.info(
+                        "[quality] PROACTIVE degradation: delta=%.2f session=%s "
+                        "(recent=%.2f earlier=%.2f) — forcing refinement",
+                        delta_avg, ctx.session_id[:8], recent_avg, earlier_avg,
+                    )
+                    ctx.degradation_count = getattr(ctx, "degradation_count", 0) + 1
+                    return True
+        except Exception as exc:
+            logger.debug("[quality] Proactive degradation check failed: %s", exc)
+
     quality_threshold = cfg_obj.analysis.quality_threshold
     certainty_floor = cfg_obj.analysis.score_certainty_floor
 
@@ -225,13 +255,11 @@ def _build_refinement_feedback(
         stubbed_fns: list[str] = []
         for issue in issues:
             if issue.startswith("stub_implementations("):
-                import re as _re
-                m = _re.search(r"\((\d+)_stubs\)", issue)
+                m = re.search(r"\((\d+)_stubs\)", issue)
                 if m:
                     stub_count = int(m.group(1))
             elif issue.startswith("stubbed_functions("):
-                import re as _re
-                m = _re.search(r"\(([^)]+)\)", issue)
+                m = re.search(r"\(([^)]+)\)", issue)
                 if m:
                     stubbed_fns = m.group(1).split(",")
         if stub_count > 0:
@@ -278,8 +306,7 @@ def _build_refinement_feedback(
             issue_specific.append("- Add (file:line) citations to EVERY claim you make")
         elif "unverified" in issue:
             # H7: model made claims without reading files
-            import re as _re
-            m = _re.search(r"unverified_claims\(([^)]+)\)", issue)
+            m = re.search(r"unverified_claims\(([^)]+)\)", issue)
             if m:
                 claim_count = m.group(1)
                 issue_specific.append(
@@ -293,8 +320,7 @@ def _build_refinement_feedback(
                 )
         elif "shallow" in issue:
             # H6: model mentioned files but didn't read them
-            import re as _re
-            m = _re.search(r"shallow_exploration\(mentioned=(\d+),read=(\d+)\)", issue)
+            m = re.search(r"shallow_exploration\(mentioned=(\d+),read=(\d+)\)", issue)
             if m:
                 mentioned, read = m.group(1), m.group(2)
                 issue_specific.append(
@@ -402,8 +428,6 @@ async def analysis_quality_nonstream(
     """
     # Lazy imports to avoid circular dependency (llm → proxy)
     from proxy.proxy import run_messages
-    from llm.converters import convert_litellm_to_anthropic
-    from llm.schemas import Message
 
     max_refinements = cfg_obj.analysis.max_refinements if ctx.is_analysis else 0
     provider_used = "primary"
@@ -500,14 +524,8 @@ async def analysis_quality_stream(
 
     Yields SSE event strings compatible with StreamingResponse.
     """
-    from llm.sse import response_to_sse_events, ping as sse_ping
-    from llm.schemas import Message
-
     quality_threshold = cfg_obj.analysis.quality_threshold
     max_refinements = cfg_obj.analysis.max_refinements
-
-    # Import here to avoid circular dependency
-    from llm.transformers.stream_event import accumulate_stream
 
     # 1. Accumulate the full first-attempt stream
     text, chunks, tool_names = await accumulate_stream(stream_generator)
@@ -545,7 +563,6 @@ async def analysis_quality_stream(
 
     # 1.6. Skip refinement if response contains CC workflow tools (EnterPlanMode, ExitPlanMode, etc.)
     # Re-requesting could drop these tool calls, breaking CC plan mode / workflow prompts.
-    from utils.tool_utils import _CC_WORKFLOW_TOOL_NAMES as _CC_WORKFLOW_TOOLS
     cc_workflow_hits = [n for n in tool_names if n in _CC_WORKFLOW_TOOLS]
     if cc_workflow_hits:
         logger.info(
@@ -563,16 +580,15 @@ async def analysis_quality_stream(
     ctx.quality_issues = issues
 
     # 3. Two-tier gate: skip refinement if score is good or gate says PASS
-    if max_refinements <= 0 or not await _should_refine(score, issues, ctx.intent, text, cfg_obj):
+    if max_refinements <= 0 or not await _should_refine(score, issues, ctx.intent, text, cfg_obj, ctx=ctx):
         _fire_quality_persist(ctx, issues)
         for chunk in chunks:
             yield chunk
         return
 
     # 4. Quality insufficient — refine via non-streaming re-requests
-    # Lazy import to avoid circular dependency (llm → proxy)
+    # Lazy import: circular dependency (llm → proxy → llm)
     from proxy.proxy import run_messages
-    from llm.converters import convert_litellm_to_anthropic
 
     original_score = score
     logger.info(
@@ -713,8 +729,6 @@ def _build_stream_envelope(
     Compatible with _ensure_request_object() in UniversalToolExtractionTransformer.
     The pipeline normalises any object to SimpleNamespace internally.
     """
-    from types import SimpleNamespace
-
     content = []
     if text.strip():
         content.append(SimpleNamespace(type="text", text=text))
@@ -743,7 +757,6 @@ def _build_stream_envelope(
 
 def _parse_stream_tokens(chunks: list[str]) -> tuple[int, int, str]:
     """Extract input_tokens, output_tokens, stop_reason from buffered SSE chunks."""
-    import json as _json
     input_tokens = 0
     output_tokens = 0
     stop_reason = "end_turn"
@@ -755,8 +768,8 @@ def _parse_stream_tokens(chunks: list[str]) -> tuple[int, int, str]:
             if data_str == "[DONE]":
                 continue
             try:
-                data = _json.loads(data_str)
-            except (ValueError, _json.JSONDecodeError):
+                data = json.loads(data_str)
+            except (ValueError, json.JSONDecodeError):
                 continue
             evt_type = data.get("type", "")
             if evt_type == "message_start":
@@ -785,13 +798,6 @@ async def stream_response_pipeline(
 
     Yields SSE event strings compatible with StreamingResponse.
     """
-    from llm.sse import response_to_sse_events
-    from llm.schemas import Message
-    from llm.pipeline import TransformContext
-
-    # Import here to avoid circular dependency
-    from llm.transformers.stream_event import accumulate_stream
-
     # STEP 1: Buffer the full stream (single async iteration)
     text, chunks, tool_names = await accumulate_stream(stream_generator)
 
@@ -870,7 +876,7 @@ async def stream_response_pipeline(
     ctx.quality_score = quality_score
     ctx.quality_issues = issues
 
-    needs_quality = await _should_refine(quality_score, issues, ctx.intent, text, cfg)
+    needs_quality = await _should_refine(quality_score, issues, ctx.intent, text, cfg, ctx=ctx)
     needs_grounding = (
         ctx.is_analysis
         and cfg.analysis.grounding_refinement_enabled
@@ -891,9 +897,8 @@ async def stream_response_pipeline(
     )
 
     # STEP 6b: FAIL → non-streaming re-request
-    # Lazy import to avoid circular dependency
+    # Lazy import: circular dependency (llm → proxy → llm)
     from proxy.proxy import run_messages
-    from llm.converters import convert_litellm_to_anthropic
 
     feedback = _build_unified_feedback(quality_score, issues, ctx, cfg, request.messages, text)
 
@@ -949,9 +954,6 @@ async def _build_verification_feedback(
     Extracts file:line references from the response, checks if they exist,
     and provides specific feedback with alternatives if wrong.
     """
-    import os
-    import re
-
     feedback = []
 
     file_ref_pattern = r'[\w/.-]+\.\w+:\d+'
@@ -981,8 +983,6 @@ async def _build_verification_feedback(
 
             alternatives = []
             try:
-                from difflib import SequenceMatcher
-
                 candidates = []
                 for root, dirs, files in os.walk(target_path):
                     for f in files:
