@@ -393,7 +393,12 @@ async def run_messages(
             # Run passthrough pipeline (compression) before building body
             await _get_passthrough_pipeline(cfg).process(request_obj, ctx)
 
-            pt = PassthroughClient(cfg.credentials.anthropic_base_url, cfg.credentials.anthropic_api_key, timeout=timeout)
+            pt = PassthroughClient(
+                cfg.credentials.anthropic_base_url,
+                cfg.credentials.anthropic_api_key,
+                timeout=timeout,
+                endpoint_path=cfg.credentials.anthropic_endpoint_path,
+            )
             body = _build_passthrough_body(
                 request_obj, pt_model,
                 ctx=ctx,

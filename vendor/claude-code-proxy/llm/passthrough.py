@@ -71,9 +71,11 @@ def _strip_reasoning_from_text_delta(data_str: str) -> str:
 
 
 class PassthroughClient:
-    def __init__(self, base_url: str, api_key: str, timeout: float = 120.0):
+    def __init__(self, base_url: str, api_key: str, timeout: float = 120.0,
+                 endpoint_path: str = "/v1/messages"):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
+        self._endpoint_path = endpoint_path
         _connect_timeout = float(os.environ.get("PASSTHROUGH_CONNECT_TIMEOUT_S", "30"))
         self._timeout = httpx.Timeout(timeout, connect=_connect_timeout)
         self._headers = {
@@ -82,8 +84,8 @@ class PassthroughClient:
             "content-type": "application/json",
         }
 
-    def _url(self, path: str = "/v1/messages") -> str:
-        return f"{self._base_url}{path}"
+    def _url(self) -> str:
+        return f"{self._base_url}{self._endpoint_path}"
 
     async def create_message(self, body: dict, response_model: str | None = None) -> dict:
         """Non-streaming: POST and return full response.
@@ -176,8 +178,13 @@ class PassthroughClient:
 
                         yield line + "\n"
             except httpx.HTTPStatusError as e:
-                logger.error("[passthrough] stream HTTP %d: %s", e.response.status_code, e.response.text[:500])
-                raise PassthroughError(f"HTTP {e.response.status_code}") from e
+                try:
+                    await e.response.aread()
+                    error_body = e.response.text[:500]
+                except Exception:
+                    error_body = "<unreadable>"
+                logger.error("[passthrough] stream HTTP %d: %s", e.response.status_code, error_body)
+                raise PassthroughError(f"HTTP {e.response.status_code}: {error_body[:200]}") from e
             except httpx.HTTPError as e:
                 logger.error("[passthrough] stream error: %r (cause=%s)", e, e.__cause__)
                 raise PassthroughError(repr(e)) from e

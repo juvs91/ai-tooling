@@ -45,6 +45,7 @@ class ProviderCredentials:
     openai_base_url: Optional[str]
     anthropic_api_key: Optional[str]
     anthropic_base_url: Optional[str]
+    anthropic_endpoint_path: str      # ENV: ANTHROPIC_ENDPOINT_PATH (default: /v1/messages)
     gemini_api_key: Optional[str]
     use_vertex_auth: bool
     vertex_project: str
@@ -351,6 +352,7 @@ def load_config() -> ProxyConfig:
             openai_base_url=_env_or_none("OPENAI_BASE_URL"),
             anthropic_api_key=_env("ANTHROPIC_API_KEY") or None,
             anthropic_base_url=_env_or_none("ANTHROPIC_BASE_URL"),
+            anthropic_endpoint_path=_env("ANTHROPIC_ENDPOINT_PATH", "/v1/messages"),
             gemini_api_key=_env("GEMINI_API_KEY") or None,
             use_vertex_auth=_env("USE_VERTEX_AUTH", "False").lower() == "true",
             vertex_project=_env("VERTEX_PROJECT", "unset"),
