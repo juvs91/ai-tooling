@@ -45,11 +45,24 @@ class ProviderCredentials:
     openai_base_url: Optional[str]
     anthropic_api_key: Optional[str]
     anthropic_base_url: Optional[str]
-    anthropic_endpoint_path: str      # ENV: ANTHROPIC_ENDPOINT_PATH (default: /v1/messages)
-    gemini_api_key: Optional[str]
-    use_vertex_auth: bool
-    vertex_project: str
-    vertex_location: str
+    anthropic_endpoint_path: str = "/v1/messages"  # ENV: ANTHROPIC_ENDPOINT_PATH
+    gemini_api_key: Optional[str] = None
+    use_vertex_auth: bool = False
+    vertex_project: str = ""
+    vertex_location: str = ""
+
+    @property
+    def anthropic_litellm_api_base(self) -> Optional[str]:
+        """Full URL for LiteLLM Anthropic calls.
+
+        Set LITELLM_ANTHROPIC_DISABLE_URL_SUFFIX=true in the profile env so
+        LiteLLM uses this URL as-is instead of appending /v1/messages.
+        For non-standard endpoints (e.g. Kimi /coding/v1/messages), this
+        produces the correct full URL from the two existing env vars.
+        """
+        if not self.anthropic_base_url:
+            return None
+        return self.anthropic_base_url + self.anthropic_endpoint_path
 
 
 @dataclass

@@ -30,8 +30,8 @@ def _inject_credentials(
             litellm_request["api_key"] = creds.gemini_api_key
     else:  # anthropic/ prefix or bare model names
         litellm_request["api_key"] = creds.anthropic_api_key
-        if creds.anthropic_base_url:
-            litellm_request["api_base"] = creds.anthropic_base_url
+        if creds.anthropic_litellm_api_base:
+            litellm_request["api_base"] = creds.anthropic_litellm_api_base
 
 
 class CredentialTransformer(Transformer):

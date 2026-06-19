@@ -334,10 +334,11 @@ class DeferredToolsTransformer(Transformer):
         if not deferred:
             return
 
+        def _tool_name(t):
+            return t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
+
         existing_names: set[str] = {
-            t.get("name")
-            for t in (request.tools or [])
-            if isinstance(t, dict) and t.get("name")
+            n for t in (request.tools or []) if (n := _tool_name(t))
         }
 
         new_defs = [

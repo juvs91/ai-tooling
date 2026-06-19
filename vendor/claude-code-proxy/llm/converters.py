@@ -374,8 +374,13 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_conte
     if anthropic_request.tools and not no_tools:
         is_gemini_model = anthropic_request.model.startswith("gemini/")
         openai_tools = []
+        seen_names: set = set()
         for tool in anthropic_request.tools:
-            openai_tools.append(_convert_tool_cached(to_dict(tool), is_gemini_model))
+            tool_dict = to_dict(tool)
+            name = tool_dict.get("name", "")
+            if name and name not in seen_names:
+                openai_tools.append(_convert_tool_cached(tool_dict, is_gemini_model))
+                seen_names.add(name)
         litellm_request["tools"] = openai_tools
     elif anthropic_request.tools and no_tools:
         # Inject tool definitions as XML prompt in system message
