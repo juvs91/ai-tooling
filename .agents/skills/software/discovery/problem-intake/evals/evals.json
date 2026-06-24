@@ -1,0 +1,137 @@
+{
+  "skill_name": "problem-intake",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "necesito entender cómo funciona el proceso de facturación de pedidos. los clientes se quejan de que a veces les llegan facturas con montos incorrectos pero no sabemos por qué.",
+      "expected_output": "Un Archaeology Brief completo con: (1) intent identificado como 'bug', (2) entry points descubiertos o marcados como TBD si SQUIT no disponible, (3) business question precisa sobre el cálculo de montos en facturación, (4) handoff prompt listo para el software-archeologist.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "has-brief-title",
+          "description": "El output contiene un encabezado '# Archaeology Brief:' con un título descriptivo",
+          "type": "contains",
+          "value": "Archaeology Brief"
+        },
+        {
+          "id": "identifies-bug-intent",
+          "description": "El intent se identifica como 'bug' dado que el usuario reporta montos incorrectos",
+          "type": "contains_any",
+          "value": ["bug", "Bug"]
+        },
+        {
+          "id": "has-entry-points-section",
+          "description": "Incluye una sección de Entry Points con al menos una fila de tabla o nota TBD",
+          "type": "contains",
+          "value": "Entry Points"
+        },
+        {
+          "id": "has-handoff-prompt",
+          "description": "Incluye una sección 'Handoff Prompt' lista para usar con el software-archeologist",
+          "type": "contains",
+          "value": "Handoff Prompt"
+        },
+        {
+          "id": "has-business-question",
+          "description": "La Business Question es una sola oración clara y precisa",
+          "type": "contains",
+          "value": "Business Question"
+        },
+        {
+          "id": "mentions-facturacion",
+          "description": "El brief hace referencia al dominio de facturación/billing",
+          "type": "contains_any",
+          "value": ["facturación", "factura", "billing", "pedido"]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "quiero documentar el proceso de generación de reportes de inventario para migrarlo a dbt. tenemos varios stored procedures que calculan el stock disponible y las mermas pero no sé cuáles son los principales.",
+      "expected_output": "Un Archaeology Brief con: (1) intent identificado como 'migration' o 'documentation', (2) entry points relacionados con inventario/stock/mermas (SQUIT o TBD), (3) scope acotado a reportes de inventario, (4) deliverable incluyendo ADR y mapa de dependencias.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "has-brief-structure",
+          "description": "El output tiene estructura de Archaeology Brief con las secciones principales",
+          "type": "contains",
+          "value": "Archaeology Brief"
+        },
+        {
+          "id": "identifies-migration-or-doc-intent",
+          "description": "El intent se identifica como migration o documentation",
+          "type": "contains_any",
+          "value": ["migration", "documentation", "migración", "documentación"]
+        },
+        {
+          "id": "mentions-dbt-deliverable",
+          "description": "Los deliverables o el contexto menciona dbt o la migración como objetivo",
+          "type": "contains_any",
+          "value": ["dbt", "migración", "migration"]
+        },
+        {
+          "id": "has-scope-section",
+          "description": "Incluye sección de Scope con al menos depth definido",
+          "type": "contains",
+          "value": "Scope"
+        },
+        {
+          "id": "has-handoff-prompt",
+          "description": "Incluye Handoff Prompt listo para usar",
+          "type": "contains",
+          "value": "Handoff Prompt"
+        },
+        {
+          "id": "mentions-inventory-domain",
+          "description": "El brief menciona inventario, stock o mermas",
+          "type": "contains_any",
+          "value": ["inventario", "stock", "merma", "inventory"]
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "hay un bug urgente en producción. los descuentos de clientes VIP no se están aplicando bien en algunos pedidos. ya sé que el problema está en algún lado del proceso de ventas pero no sé exactamente dónde. necesito rastrearlo rápido.",
+      "expected_output": "Un Archaeology Brief de 'bug' con: (1) scope 'quick scan' dado que es urgente, (2) entry points relacionados con descuentos/VIP/ventas, (3) clarificación de que es un bug urgente en producción, (4) handoff prompt que transmite la urgencia al archeologist.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "has-brief-structure",
+          "description": "El output tiene estructura de Archaeology Brief",
+          "type": "contains",
+          "value": "Archaeology Brief"
+        },
+        {
+          "id": "identifies-bug-intent",
+          "description": "Intent identificado como bug",
+          "type": "contains_any",
+          "value": ["bug", "Bug"]
+        },
+        {
+          "id": "suggests-quick-scope",
+          "description": "Dado que es urgente, el scope sugiere quick scan o profundidad reducida",
+          "type": "contains_any",
+          "value": ["quick", "rápido", "urgente", "quick scan"]
+        },
+        {
+          "id": "mentions-discounts-domain",
+          "description": "El brief menciona descuentos o VIP",
+          "type": "contains_any",
+          "value": ["descuento", "VIP", "discount"]
+        },
+        {
+          "id": "has-entry-points",
+          "description": "Incluye sección Entry Points con candidatos o TBD",
+          "type": "contains",
+          "value": "Entry Points"
+        },
+        {
+          "id": "has-handoff-prompt",
+          "description": "Incluye Handoff Prompt listo para el archeologist",
+          "type": "contains",
+          "value": "Handoff Prompt"
+        }
+      ]
+    }
+  ]
+}

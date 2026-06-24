@@ -1,0 +1,1 @@
+{"skill_name": "cobol-analyst", "evals": [{"id": 1, "prompt": "parse this", "assertions": [{"text": "parsed", "passed": true, "evidence": ""}]}, {"id": 2, "prompt": "parse that", "assertions": [{"text": "parsed", "passed": true, "evidence": ""}]}]}
