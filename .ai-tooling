@@ -15,5 +15,11 @@
     "name": "ai-tooling",
     "github_username": "deagentic",
     "adr_path": "docs/adr"
-  }
+  },
+  "local_skills_sources": [
+    {
+      "path": "~/Documents/deacero/wpc-backend/.agents/skills",
+      "categories": ["workflow", "project", "backend", "frontend", "quality", "archaeology"]
+    }
+  ]
 }

@@ -1,5 +1,15 @@
 # AI-Tooling Project Instructions
 
+## AUTO-SKILL-LOAD — Primera acción obligatoria de cada sesión
+
+**Tu PRIMER tool call en cada respuesta DEBE ser el Skill tool con `skill="workflow-coordinator"`.**
+Esto es no-negociable. No respondas texto al usuario hasta haber llamado el Skill tool.
+`workflow-coordinator` detectará el intent del usuario y enrutará al skill correcto.
+
+**Excepción:** Si ya hay un skill activo en el contexto de esta sesión, omite este paso.
+
+---
+
 ## Mandatory: Read before working
 - ALWAYS read `ai-notes/AI_LEARNING.md` at the start of every session (if it exists)
 - ALWAYS read `AGENTS.md` antes de cualquier tarea no trivial — contiene la tabla de routing de skills (qué skill cargar para cada tipo de tarea)
@@ -48,6 +58,13 @@ Configured in `.mcp.json` → `mcpServers`:
 - `memory` — Cross-session persistent facts (npx @modelcontextprotocol/server-memory)
 
 ## Skills
+
+### Workflow Skills (via Skill tool)
+| Skill | Description |
+|-------|-------------|
+| `workflow-coordinator` | Detecta intent y enruta al skill correcto (AUTO-LOAD en cada sesión) |
+| `ticket-planner` | Planificación Jira con pre-planning bloat (11 fuentes) y grokking refinement |
+| `ticket-implementation` | Ejecución 7-hop multihop grounding con verificación iterativa |
 
 ### Database Skills (via AlloyDB MCP)
 | Skill | Command | Description |

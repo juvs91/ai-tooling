@@ -7,6 +7,7 @@
 * **Description:** Anthropic→OpenAI proxy + agentic CI infrastructure tooling (Claude Code harness, provider routing, Docker-based).
 * **Core Objective:** Evolve, document, and improve the proxy pipeline and agent skills with full traceability.
 
+<!-- ROUTING_TABLE_START -->
 ## 2. Skill Routing — Tabla de Dispatch
 
 **Lee esta tabla al inicio de cada sesión y ante cada nueva subtarea.**
@@ -55,6 +56,11 @@ Paths son relativos a `.agents/skills/`.
 | REST API, endpoint, OpenAPI, paginación, error codes, versioning, rate limiting | **api-design** — REST API design: resource naming, status codes, pagination, filtering, error responses, versioning. | `software/api/api-design/SKILL.md` | — |
 | backend patterns, service layer, error handling, arquitectura de servicio | **backend-patterns** — Arquitectura backend: service/repository, error propagation, retry/circuit breaker. | `software/api/backend-patterns/SKILL.md` | — |
 | MCP server, build MCP tool, stdio vs HTTP, MCP resource, MCP prompt | **mcp-server-patterns** — Design e implementación de MCP servers. stdio vs Streamable HTTP, tools vs resources. | `software/api/mcp-server-patterns/SKILL.md` | — |
+| planear ticket, desglosar story, Jira ticket, "quiero implementar X" | **ticket-planner** — Planificación Jira: 11-fuentes context, grokking refinement, pasos atómicos. | `workflow/ticket-planner/SKILL.md` | Tareas mid-impl |
+| implementar ticket, ejecutar plan, "implementa X", "codifica Y" | **ticket-implementation** — 7-hop multihop grounding: ejecución atómica con verificación iterativa. | `workflow/ticket-implementation/SKILL.md` | Sin plan previo |
+| ¿qué hago?, ambiguous intent, routing, workflow gate | **workflow-coordinator** — Detecta intent, verifica estado del workflow, enruta al command apropiado. | `workflow/workflow-coordinator/SKILL.md` | — |
+| buscar stored procedure legacy, SP SQL Server, legacy business logic | **squit** — Búsqueda semántica de SPs legacy de Deacero (5.7M objetos SQL). | `archaeology/squit/SKILL.md` | — |
+<!-- ROUTING_TABLE_END -->
 
 ### Compound Tasks — Skills que se apilan
 
@@ -107,6 +113,9 @@ docs/adr/                     <-  open ADR ONLY when a decision is made
 
 | Category | Skill | Purpose |
 |----------|-------|---------|
+| Workflow | `workflow-coordinator` | Route requests to appropriate workflows with guard enforcement |
+| Workflow | `ticket-planner` | Plan Jira tickets with pre-planning bloat and grokking refinement |
+| Workflow | `ticket-implementation` | Execute plans via 7-hop multihop grounding process |
 | Core | `learning-protocol` | Persist new domain knowledge, patterns, and learnings |
 | Core | `tool-writer` | Create new tools/scripts — always delegate, never ad-hoc |
 | Architecture | `architect` | System design, component boundaries, ADR-first |
@@ -133,8 +142,18 @@ docs/adr/                     <-  open ADR ONLY when a decision is made
 | API | `mcp-server-patterns` | Building MCP servers (stdio vs HTTP, tools, resources) |
 | Go | `golang-patterns` | Idiomatic Go: interfaces, errors, concurrency |
 | Go | `golang-testing` | Go tests, table-driven tests, benchmarks |
+| Archaeology | `squit` | Semantic search of Deacero legacy SQL (5.7M objects) |
 
 Full skill index: `.agents/skills/skills.md`
+
+### Command Workflow Integration
+
+| Trigger | Skill(s) Invoked | Purpose |
+|---------|-----------------|---------|
+| `enforce-workflow` | `workflow-coordinator` | Route user intent to appropriate workflow |
+| ticket ID + plan | `ticket-planner` → `ticket-implementation` | Plan then execute (workflow-coordinator orchestrates) |
+
+**Pattern:** workflow-coordinator enruta, skills implementan. Separation of concerns = reusabilidad.
 
 ## 7. Self-Repair Mandate
 

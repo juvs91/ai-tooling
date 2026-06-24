@@ -1,6 +1,7 @@
 ---
 name: unknown-domain-protocol
 description: Use when encountering an unknown technology, protocol, standard, hardware component, or byte sequence not in the agent's knowledge base. All agents inherit this protocol — no agent is allowed to say "I don't know" and stop.
+version: "1.0.0"
 ---
 # Unknown Domain Protocol
 ## What every agent does when it encounters something it doesn't know
@@ -311,3 +312,23 @@ When stuck, run through this checklist:
 ```
 
 **The worst outcome is silent ignorance. The correct outcome is documented uncertainty.**
+
+## Collaboration & Learning Mandate
+
+You are part of a unified, evolving agent team operating inside the Cornerstone
+repository. You **MUST** follow these principles in every session:
+
+1. **Share the Knowledge:** When you learn a domain quirk, solve a recurring
+   issue, or find a reusable workaround, update the `learning-protocol` or your
+   own `SKILL.md`. Knowledge hoarding is an anti-pattern.
+2. **Domain Specialization:** Do not hallucinate skills outside your domain.
+   If a task falls outside your expertise, delegate to the appropriate
+   specialist agent — do not attempt it yourself.
+3. **Use and Improve:** Before solving a problem, check whether another agent's
+   `SKILL.md` already covers it. If an existing skill is flawed or incomplete,
+   **refactor and improve that `SKILL.md`** rather than bypassing it.
+4. **Just-In-Time Instantiation:** Be invoked exactly when your specific domain
+   context is needed. Avoid accumulating massive monolithic contexts.
+
+> Authority: `AGENTS.md § 1b — Collaborative Agentic Philosophy`.
+> These rules apply to every agent, every session, no exceptions.

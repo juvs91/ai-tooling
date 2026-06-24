@@ -33,6 +33,24 @@
     "description": "Proxy Claude→OpenAI con routing multi-proveedor"
   },
   "skills": {
+    "workflow-coordinator": {
+      "description": "Expert workflow coordinator that detects intent, routes to appropriate workflows, and enforces guard rails",
+      "category": "workflow",
+      "command": ".agents/skills/workflow/workflow-coordinator/SKILL.md",
+      "documentation": ".claude/commands/workflow-coordinator.md"
+    },
+    "ticket-planner": {
+      "description": "Planificación Jira con pre-planning bloat (11 fuentes) y grokking refinement",
+      "category": "workflow",
+      "command": ".agents/skills/workflow/ticket-planner/SKILL.md",
+      "documentation": ".agents/skills/workflow/ticket-planner/SKILL.md"
+    },
+    "ticket-implementation": {
+      "description": "Ejecución 7-hop multihop grounding con verificación iterativa",
+      "category": "workflow",
+      "command": ".agents/skills/workflow/ticket-implementation/SKILL.md",
+      "documentation": ".agents/skills/workflow/ticket-implementation/SKILL.md"
+    },
     "validation-checker": {
       "description": "Validar reglas de negocio (dinamico)",
       "category": "validation",
@@ -134,6 +152,17 @@
           }
         ],
         "description": "Sync agent skills al inicio de cada sesión (throttle 24h)"
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/skill-autoload.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Autoload stateless de workflow-coordinator en cada prompt"
       }
     ]
   },
