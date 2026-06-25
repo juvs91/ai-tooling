@@ -1351,13 +1351,16 @@ async def tracked_stream(
     )
 
     # Post-stream: classifier outcome validation
-    from llm.transformers.quality_refinement import _validate_intent_outcome
-    outcome_correct = _validate_intent_outcome(ctx.intent, text, tool_calls, output_tokens)
-    if outcome_correct:
-        metrics.increment_intent_outcome_correct()
-    else:
-        metrics.increment_intent_outcome_wrong()
-        metrics.record_model_event("classifier", f"outcome_wrong_{ctx.intent}")
+    # Skip during plan mode: model legitimately mixes READ + Write (plan file) →
+    # _validate_intent_outcome("READ") sees Write tool and flags it as wrong (false positive).
+    if not getattr(ctx, 'plan_mode_active', False):
+        from llm.transformers.quality_refinement import _validate_intent_outcome
+        outcome_correct = _validate_intent_outcome(ctx.intent, text, tool_calls, output_tokens)
+        if outcome_correct:
+            metrics.increment_intent_outcome_correct()
+        else:
+            metrics.increment_intent_outcome_wrong()
+            metrics.record_model_event("classifier", f"outcome_wrong_{ctx.intent}")
 
     # Legacy classifier mismatch validation
     if ctx.intent == "CHAT" and len(tool_names) > 3:

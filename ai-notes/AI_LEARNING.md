@@ -2,7 +2,7 @@
 > Aprendizajes iterativos del proyecto. Actualizar despues de cada sesion.
 
 ## Ultima actualizacion
-- Fecha: 2026-03-05
+- Fecha: 2026-06-24
 - Por: claude-sonnet-4-6 + jeguzman
 
 ---
@@ -228,3 +228,56 @@ curl -X POST http://127.0.0.1:8083/v1/messages \
 > - `MEMORY.md.bak-20260302` (memoria completa)
 > - `AI_LEARNING.md.bak-20260302` (aprendizajes completos)
 > Restaurar despues de la prueba limpia.
+
+---
+
+## Session 2026-06-24: GitOps Monorepo + Trunk-Based Development
+
+### What was built
+- `docs/adr/ADR-0007-gitops-monorepo-trunk-based.md` — prerequisito ADR gate
+- `scripts/release.sh` — reescritura completa del script propuesto con 7 bugs corregidos + nuevos comandos (`status`, `add`, `drop`, `promote`, `versions`, `init`, `init-multi`)
+- `CODEOWNERS` — mapping de paths críticos del repo a `@jeguzman`
+- `.agents/skills/infrastructure/gitops-monorepo/SKILL.md` — skill exportable separado de `gitops-expert`
+- `templates/gitops/bitbucket-pipelines.yml.template` — 4 patrones de tag → ambiente
+- `templates/gitops/CODEOWNERS.template` y `.pre-commit-config.yaml.template`
+- `scripts/gitops-init.sh` — bootstrap de 5 pasos para distribuir la estrategia GitOps a otros repos
+
+### Bugs críticos corregidos en release.sh propuesto original
+- `grep -oP` no funciona en macOS/Alpine → POSIX `grep -o | sed` (sin `-P`)
+- `cmd_cherry` solo procesaba el último hotfix (variable sobreescrita en loop) → array + iterar todos en orden ascendente
+- Sort incorrecto para `hotfix.10` vs `hotfix.2` → `sed 's/.*\.//' | sort -n` extrae solo el número final
+- Tags anotados: `git rev-parse tag` devuelve SHA del objeto tag → usar `^{commit}` en todos los `rev-parse`
+- Sin validación de rama duplicada en hotfix → `git rev-parse --verify` antes de `checkout -b`
+- Router pasaba CMD en `$@` → funciones usaban `${2:-}` frágil → `shift` antes del dispatch
+
+### Bugs en gitops-init.sh durante validación
+- `local` fuera de función (en cuerpo principal): `local py_paths="..."` → eliminar `local`, usar asignación simple
+- Lógica de `py_paths` invertida: `[[ -d vendor ]] || py_paths="^src/"` sobreescribía con la condición errónea → invertir a `[[ -d vendor ]] && py_paths="^vendor/"` con prioridad ascendente
+- `sed` multiline en macOS (BSD sed): `s|PLACEHOLDER|${MULTILINE_VAR}|g` falla con "unescaped newline inside substitute pattern" → reemplazar toda la lógica de sed por heredoc directo en bash
+
+### Patrones que funcionan
+- Heredoc en bash para generar archivos con sustituciones multi-línea: `cat > file << EOF` — evita problemas con `sed` en macOS y Alpine
+- Prioridad ascendente para detección de directorios: primero default, luego `projects/`, `src/`, `vendor/` (el más específico último gana)
+- `GITOPS_REMOTE` / `GITOPS_TRUNK_BRANCH` como env vars: permite adopción incremental sin forzar renombrar remotes ni branches
+- `^{commit}` en todos los `git rev-parse` para tags: obligatorio en repos que usan annotated tags (la mayoría)
+- `bash -n script.sh` para syntax check rápido antes de test funcional
+
+### Patrones que fallaron
+- `sed -e "s|PLACEHOLDER|$var|g"` con `$var` multi-línea en macOS: siempre usar heredoc
+- `sort -t'.' -k2,2n` en strings semver como `proyecto@1.4.2-hotfix.1`: no extrae el campo correcto; la solución es `sed 's/.*\.//' | sort -n`
+
+### Exportabilidad del GitOps
+- `sync_skills.sh` solo copia `SKILL.md` — para exportar scripts ejecutables: embeber el script como código en SKILL.md (el agente lo genera en destino con Write)
+- `gitops-init.sh --target <repo> [--skip-precommit] [--dry-run] [--trunk <branch>] [--scope <@org>]` es el bootstrap completo para cualquier repo nuevo
+
+### Dependencias externas requeridas en repos destino
+- `pre-commit` (pip install) — para instalar hooks
+- `ruff` (pip install) — solo stacks Python
+- `npx eslint` / `npx prettier` — solo stacks Node
+- `python tools/check_adr_gate.py` — copiado por el script desde ai-tooling
+
+### Validation results (2026-06-24)
+- Python repo (`vendor/`): ✓ ruff con `files: ^vendor/`, ADR gate con `^(vendor/.*\.py)$`
+- TypeScript repo (`projects/`): ✓ eslint+prettier, sin ruff, ADR gate con `^(projects/.*\.(ts|py|go))$`
+- Multi-stack (`master` trunk): ✓ ruff+eslint+prettier, `no-commit-to-branch: master`
+- CODEOWNERS blocked by config-protection.sh hook → crear en IDE o actualizar el hook

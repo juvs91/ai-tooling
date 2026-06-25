@@ -165,6 +165,9 @@ class IntentEnforcementTransformer(Transformer):
         """READ/ANALYZING intent: Grounding requirements with code snippet verification."""
         return (
             "[INTENT-ENFORCEMENT] READ/ANALYZING mode active:\n"
+            "RULE 0 — ANTI-REREAD (non-negotiable): If you called Read on the same file "
+            "in the last 3 turns, DO NOT read it again. You already have that content. "
+            "Reading the same file repeatedly is a loop — break it and move on to the next file.\n"
             "RULE 1: STOP before analyzing. Execute tool calls FIRST. Read the actual files.\n"
             "RULE 2: Only reference content you have explicitly read. "
             "Never assume file names, paths, or extensions.\n"
@@ -177,7 +180,10 @@ class IntentEnforcementTransformer(Transformer):
             "No citation = no claim. Unverified content = hallucination.\n"
             "CODE VERIFICATION: Include relevant code snippets in your analysis. "
             "For example: 'The function validateToken() checks if the token is expired (auth.py:42):\n"
-            '```python\nif token.expiry < now:\n    raise InvalidTokenError\n```'
+            '```python\nif token.expiry < now:\n    raise InvalidTokenError\n```\n'
+            "PERSISTENCE RULE (ADR-0006): If this is a significant analysis turn, "
+            "save your findings to ai-notes/{name}.md using the Write tool. "
+            "Chat text is lost on restart — Write tool is the only durable output."
         )
 
     _PLAN_NUDGE_THRESHOLD = 8  # nudge after this many consecutive read turns during plan mode
@@ -284,7 +290,10 @@ class IntentEnforcementTransformer(Transformer):
             "[INTENT-ENFORCEMENT] SYNTHESIZING mode active:\n"
             "You have gathered significant information from the codebase. "
             "Now begin writing your comprehensive synthesis.\n"
-            "RULE 1: PRIORITY is producing a written analysis — start writing now.\n"
+            "MANDATORY (ADR-0006): Use the Write tool to save your analysis to "
+            "ai-notes/{descriptive-name}.md BEFORE this turn ends. "
+            "Inline text is lost on session restart — only Write tool persists.\n"
+            "RULE 1: PRIORITY is producing a written analysis — call Write tool NOW.\n"
             "RULE 2: EVERY claim must cite (file.py:line) from files you've read.\n"
             "RULE 3: Include code snippets to support complex claims about behavior.\n"
             "RULE 4: Structure your output: ## Summary → ## Key Findings → ## Recommendations\n"

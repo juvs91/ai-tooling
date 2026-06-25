@@ -167,12 +167,28 @@ _CLASSIFY_PROMPT = (
     "- 'Can you help me?' → CHAT\n"
     "- 'Como funciona esto?' → CHAT\n\n"
     "Message: {message}\n\n"
-    "Respond with ONLY valid JSON (no markdown, no explanation):\n"
-    "{{\"intent\": \"BUILD\", \"confidence\": 0.95}}\n\n"
-    "If the request mixes multiple intents (e.g., \"analyze then implement\"), add:\n"
-    "{{\"intent\": \"READ\", \"confidence\": 0.65, \"secondary\": \"BUILD\"}}\n\n"
-    "confidence: 0.90-1.0 = very clear; 0.70-0.89 = mostly clear; 0.50-0.69 = ambiguous.\n\n"
-    "JSON:"
+    "MANDATORY OUTPUT FORMAT — no exceptions:\n"
+    "You MUST respond with a single JSON object. No markdown fences, no explanation, no extra text.\n"
+    "The response must start with {{ and end with }}. Nothing before or after.\n\n"
+    "REQUIRED fields:\n"
+    "  intent     → one of: READ | SYNTHESIZING | PLAN | BUILD | VERIFY | CHAT\n"
+    "  confidence → float 0.0–1.0 (0.90–1.0=clear, 0.70–0.89=mostly clear, 0.50–0.69=ambiguous)\n"
+    "OPTIONAL field (only when request clearly mixes two intents):\n"
+    "  secondary  → one of the same valid intents\n\n"
+    "SHOT EXAMPLES (input → exact expected output):\n"
+    "  Input: 'arregla el bug de autenticación'\n"
+    "  Output: {{\"intent\": \"BUILD\", \"confidence\": 0.97}}\n\n"
+    "  Input: 'analiza el proxy y explícame cómo funciona el clasificador'\n"
+    "  Output: {{\"intent\": \"READ\", \"confidence\": 0.93}}\n\n"
+    "  Input: 'lee el código y luego implementa el fix'\n"
+    "  Output: {{\"intent\": \"READ\", \"confidence\": 0.72, \"secondary\": \"BUILD\"}}\n\n"
+    "  Input: 'crea un plan de implementación para el nuevo endpoint'\n"
+    "  Output: {{\"intent\": \"PLAN\", \"confidence\": 0.95}}\n\n"
+    "  Input: 'escribe el análisis final con todo lo que encontraste'\n"
+    "  Output: {{\"intent\": \"SYNTHESIZING\", \"confidence\": 0.91}}\n\n"
+    "  Input: 'corre los tests y dime si pasan'\n"
+    "  Output: {{\"intent\": \"VERIFY\", \"confidence\": 0.98}}\n\n"
+    "Now classify. Output ONLY the JSON object, nothing else:\n"
 )
 
 _VALID_INTENTS = {"PLAN", "BUILD", "CHAT", "READ", "SYNTHESIZING", "VERIFY"}
@@ -242,6 +258,7 @@ async def classify_intent(
             "max_tokens": 30,  # was 5 — JSON needs room
             "temperature": 0.0,
             "stream": False,
+            "response_format": {"type": "json_object"},  # ADR-0006: force JSON; DeepSeek wraps in markdown without this
         }
         if api_key:
             kwargs["api_key"] = api_key

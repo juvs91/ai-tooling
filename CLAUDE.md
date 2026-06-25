@@ -23,6 +23,8 @@ Sync automático via `sync_skills.sh` (throttle 24h). Force: `bash .agents/sync_
 ## Guardrails
 - Do NOT guess or fabricate file paths, commands, or outputs
 - Do NOT dump large outputs into chat — write everything to `ai-notes/`
+- Do NOT use MCP tools autonomously. Only call MCP tools when the user explicitly requests it (e.g., "busca en Jira", "consulta la base de datos", "busca en la web"). Nunca invoques MCP tools de forma proactiva sin una petición directa del usuario.
+- Do NOT read the same file more than twice consecutively. Re-reading the same file in a loop is a bug — break it and move on.
 
 ## Feedback Loop
 - At the end of every session, update `ai-notes/AI_LEARNING.md` with:
@@ -49,6 +51,7 @@ Sync automático via `sync_skills.sh` (throttle 24h). Force: `bash .agents/sync_
 Configured in `.mcp.json` → `mcpServers`:
 - `alloydb` — AlloyDB queries (postgres-mcp)
 - `atlassian` — Jira/Confluence (uvx mcp-atlassian)
+- `bitbucket` — Bitbucket PRs/repos (mismo script que atlassian con arg `bitbucket`)
 - `squit` — Legacy SP search (npx mcp-remote)
 - `cloudsql` — CloudSQL wrapper (scripts/cloudsql-mcp.sh)
 - `context7` — Live library/framework docs (npx @upstash/context7-mcp)
