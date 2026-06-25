@@ -1,0 +1,42 @@
+# CODEOWNERS — Template GitOps Monorepo Deacero
+# Ref: ADR-0007-gitops-monorepo-trunk-based.md
+#
+# BITBUCKET: Repository settings > Branch restrictions
+#   → "Require approvals from Code Owners" para hacer este archivo efectivo
+#
+# FORMATO: /path/  @usuario-bitbucket  o  @workspace/grupo
+# Más específico tiene prioridad sobre más general.
+#
+# PERSONALIZAR: reemplazar @equipo-* con los usuarios/grupos reales
+
+# ─── Raíz — regla catch-all ─────────────────────────────────────────────
+*                             @equipo-platform
+
+# ─── Proyectos — ownership por equipo ──────────────────────────────────
+/projects/proyecto-a/         @equipo-proyecto-a
+/projects/proyecto-b/         @equipo-proyecto-b
+/projects/proyecto-c/         @equipo-proyecto-c
+
+# ─── Shared libs — platform team owns, todos los consumers deben aprobar ─
+/shared/libs/auth/            @equipo-platform @equipo-proyecto-a @equipo-proyecto-b
+/shared/libs/logging/         @equipo-platform
+/shared/libs/http-client/     @equipo-platform
+
+# ─── Infraestructura y CI/CD ────────────────────────────────────────────
+/scripts/                     @equipo-platform
+bitbucket-pipelines.yml       @equipo-platform
+docker-compose.yml            @equipo-platform
+/cloud-provider-ymls/         @equipo-platform
+
+# ─── Decisiones de arquitectura — siempre requieren revisión de platform ─
+/docs/adr/                    @equipo-platform
+
+# ─── Seguridad — secrets, config crítica ────────────────────────────────
+.env.example                  @equipo-platform
+.mcp.json                     @equipo-platform
+/templates/                   @equipo-platform
+
+# ─── Agent skills y harness ─────────────────────────────────────────────
+/.agents/                     @equipo-platform
+CLAUDE.md                     @equipo-platform
+AGENTS.md                     @equipo-platform

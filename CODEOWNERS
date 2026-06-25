@@ -1,0 +1,26 @@
+# CODEOWNERS — ai-tooling
+# Bitbucket: Repository settings > Branch restrictions > Require approvals from Code Owners
+#
+# Formato: /path/  @usuario-bitbucket  o  @workspace/grupo
+# Ref: ADR-0007-gitops-monorepo-trunk-based.md
+
+# Proxy y runtime — equipo infra-ai
+/vendor/claude-code-proxy/    @jeguzman
+
+# Agent skills — requieren ADR antes de editar
+/.agents/skills/              @jeguzman
+/.agents/                     @jeguzman
+
+# Scripts de workflow — cambios requieren revisión
+/scripts/                     @jeguzman
+
+# Decisiones de arquitectura — siempre requieren revisión
+/docs/adr/                    @jeguzman
+
+# Templates de AI-tooling
+/templates/                   @jeguzman
+
+# Configuración del harness
+/CLAUDE.md                    @jeguzman
+/AGENTS.md                    @jeguzman
+/.claude/                     @jeguzman

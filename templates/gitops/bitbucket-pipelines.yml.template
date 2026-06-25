@@ -1,0 +1,186 @@
+# bitbucket-pipelines.yml — Template GitOps Monorepo Deacero
+# Ref: ADR-0007-gitops-monorepo-trunk-based.md
+#
+# PERSONALIZAR:
+#   SCOPE_PREFIX  → prefijo de tus proyectos (ej: proyecto-a, order-service)
+#   BUILD_CMD     → comando de build de tu stack (pnpm build, make build, poetry build...)
+#   TEST_CMD      → comando de tests (pnpm test, pytest, go test ./...)
+#   DEPLOY_CMD    → script de deploy (./scripts/deploy.sh, kubectl apply, etc.)
+#
+# REQUISITOS:
+#   - git fetch --unshallow en pipelines que usen merge-base (Bitbucket usa shallow clone)
+#   - Environments configurados en Bitbucket: "Dev", "QA", "Production"
+#   - Tag restrictions en Bitbucket: proteger patrón *@* de borrado/sobreescritura
+
+image: ubuntu:22.04
+
+definitions:
+  steps:
+    - step: &setup-git
+        name: Setup git (unshallow)
+        script:
+          - git fetch --unshallow || true
+          - git fetch origin --tags
+
+    - step: &detect-changes
+        name: Detect changed paths
+        script:
+          - |
+            # Detectar qué proyectos cambiaron en este push
+            CHANGED=$(git diff --name-only origin/main~1 origin/main 2>/dev/null || git diff --name-only HEAD~1 HEAD)
+            echo "CHANGED_PATHS=$CHANGED" >> variables.txt
+            # Exportar flags por proyecto
+            echo "$CHANGED" | grep -q "^projects/proyecto-a/" && echo "BUILD_PROYECTO_A=true" >> variables.txt || echo "BUILD_PROYECTO_A=false" >> variables.txt
+            echo "$CHANGED" | grep -q "^projects/proyecto-b/" && echo "BUILD_PROYECTO_B=true" >> variables.txt || echo "BUILD_PROYECTO_B=false" >> variables.txt
+            echo "$CHANGED" | grep -q "^shared/" && echo "BUILD_SHARED=true" >> variables.txt || echo "BUILD_SHARED=false" >> variables.txt
+            cat variables.txt
+        artifacts:
+          - variables.txt
+
+pipelines:
+
+  # ─── Push a trunk (main) ────────────────────────────────────────────────
+  branches:
+    main:
+      - step: *setup-git
+      - step: *detect-changes
+      - parallel:
+          # Cada proyecto solo se construye si sus paths cambiaron
+          - step:
+              name: Build + Test proyecto-a
+              condition:
+                changesets:
+                  includePaths:
+                    - "projects/proyecto-a/**"
+                    - "shared/libs/**"
+              script:
+                - cd projects/proyecto-a
+                - pnpm install --frozen-lockfile       # ajustar a tu stack
+                - pnpm build
+                - pnpm test
+              services:
+                - docker
+
+          - step:
+              name: Build + Test proyecto-b
+              condition:
+                changesets:
+                  includePaths:
+                    - "projects/proyecto-b/**"
+                    - "shared/libs/**"
+              script:
+                - cd projects/proyecto-b
+                - pnpm install --frozen-lockfile
+                - pnpm build
+                - pnpm test
+
+      # Deploy automático a DEV después de que los builds pasan
+      - parallel:
+          - step:
+              name: Deploy proyecto-a → DEV
+              condition:
+                changesets:
+                  includePaths:
+                    - "projects/proyecto-a/**"
+                    - "shared/libs/**"
+              deployment: Dev
+              script:
+                - ./scripts/deploy.sh proyecto-a dev
+                # El pipeline crea el tag dev automáticamente
+                - git tag "proyecto-a@${BITBUCKET_BUILD_NUMBER}-dev.1" -m "Auto dev build"
+                - git push origin "proyecto-a@${BITBUCKET_BUILD_NUMBER}-dev.1" || true
+
+          - step:
+              name: Deploy proyecto-b → DEV
+              condition:
+                changesets:
+                  includePaths:
+                    - "projects/proyecto-b/**"
+                    - "shared/libs/**"
+              deployment: Dev
+              script:
+                - ./scripts/deploy.sh proyecto-b dev
+
+  # ─── Feature branches ───────────────────────────────────────────────────
+  'feature/*':
+    - step:
+        name: Build + Test (feature branch)
+        script:
+          - git fetch --unshallow || true
+          - echo "building feature branch - no deploy"
+          # Solo build/test, sin deploy
+
+  # ─── Hotfix branches ────────────────────────────────────────────────────
+  'hotfix/**':
+    - step:
+        name: Build + Test (hotfix)
+        script:
+          - git fetch --unshallow || true
+          # Detectar proyecto del hotfix desde el nombre de la rama
+          - PROJECT=$(echo "$BITBUCKET_BRANCH" | cut -d'/' -f2)
+          - cd "projects/$PROJECT"
+          - pnpm install --frozen-lockfile
+          - pnpm build
+          - pnpm test
+
+  # ─── Tags — cada patrón dispara el ambiente correspondiente ─────────────
+  tags:
+    # Tags de DEV: proyecto-a@1.5.0-dev.1
+    '*@*-dev.*':
+      - step:
+          name: Deploy → DEV
+          deployment: Dev
+          script:
+            - echo "Deploying tag $BITBUCKET_TAG to Dev"
+            - PROJECT=$(echo "$BITBUCKET_TAG" | cut -d'@' -f1)
+            - VERSION=$(echo "$BITBUCKET_TAG" | cut -d'@' -f2)
+            - ./scripts/deploy.sh "$PROJECT" dev "$VERSION"
+
+    # Tags de RC/QA: proyecto-a@1.5.0-rc.1
+    '*@*-rc.*':
+      - step:
+          name: Deploy → QA
+          deployment: QA
+          trigger: manual    # gate manual de QA
+          script:
+            - echo "Deploying tag $BITBUCKET_TAG to QA"
+            - PROJECT=$(echo "$BITBUCKET_TAG" | cut -d'@' -f1)
+            - VERSION=$(echo "$BITBUCKET_TAG" | cut -d'@' -f2)
+            - ./scripts/deploy.sh "$PROJECT" qa "$VERSION"
+
+    # Tags de PROD: proyecto-a@1.5.0 (solo dígitos, sin sufijo)
+    # Regex: empieza con letra/guion, contiene @, luego solo N.N.N
+    '*@[0-9]*.[0-9]*.[0-9]*':
+      - step:
+          name: Validate (not hotfix/dev/rc)
+          script:
+            # Rechazar si el tag tiene sufijo dev/rc/hotfix
+            - |
+              if echo "$BITBUCKET_TAG" | grep -qE '\-(dev|rc|hotfix)\.'; then
+                echo "ERROR: este patrón es solo para tags de PROD sin sufijo"
+                exit 1
+              fi
+            - echo "Tag de producción validado: $BITBUCKET_TAG"
+      - step:
+          name: Deploy → PROD
+          deployment: Production
+          trigger: manual    # gate de aprobación humana OBLIGATORIO
+          script:
+            - echo "Deploying tag $BITBUCKET_TAG to Production"
+            - PROJECT=$(echo "$BITBUCKET_TAG" | cut -d'@' -f1)
+            - VERSION=$(echo "$BITBUCKET_TAG" | cut -d'@' -f2)
+            - ./scripts/deploy.sh "$PROJECT" prod "$VERSION"
+            - echo "Production deploy complete: $PROJECT@$VERSION"
+
+    # Tags de hotfix: proyecto-a@1.4.2-hotfix.1
+    '*@*-hotfix.*':
+      - step:
+          name: Deploy hotfix → PROD
+          deployment: Production
+          trigger: manual
+          script:
+            - git fetch --unshallow || true
+            - PROJECT=$(echo "$BITBUCKET_TAG" | cut -d'@' -f1)
+            - VERSION=$(echo "$BITBUCKET_TAG" | cut -d'@' -f2)
+            - ./scripts/deploy.sh "$PROJECT" prod "$VERSION"
+            - echo "RECORDATORIO: ./scripts/release.sh cherry $PROJECT $(echo $VERSION | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')"

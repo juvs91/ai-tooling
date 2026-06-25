@@ -1,0 +1,74 @@
+# .pre-commit-config.yaml — Template GitOps Monorepo Deacero
+# Generado por scripts/gitops-init.sh
+# Ref: ADR-0007-gitops-monorepo-trunk-based.md
+#
+# Activar:
+#   pip install pre-commit
+#   pre-commit install
+#   pre-commit install --hook-type commit-msg
+#
+# Correr manualmente:
+#   pre-commit run --all-files
+#
+# Los hooks de pre-commit/pre-commit-hooks NO viven en tu repo.
+# Se clonan automáticamente en ~/.cache/pre-commit/ al primer uso.
+
+repos:
+  # ── Hooks genéricos ──────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-yaml
+        # Excluir templates que tienen placeholders no válidos en YAML estricto
+        exclude: ^templates/
+      - id: check-toml
+      - id: check-json
+        exclude: ^\.vscode/
+      - id: check-merge-conflict
+      - id: no-commit-to-branch
+        # Bloquea commits directos a trunk — contrato GitOps ADR-0007
+        # Cambiar TRUNK_BRANCH si el proyecto usa master: args: ["--branch", "master"]
+        args: ["--branch", "TRUNK_BRANCH"]
+
+  # ── Calidad de código — STACK_SECTION ────────────────────────────────────
+  # (Esta sección es generada por gitops-init.sh según el stack detectado)
+  # STACK_PLACEHOLDER
+
+  # ── ADR gate — bloquea cambios a rutas críticas sin ADR staged ───────────
+  # Requiere: tools/check_adr_gate.py (copiado por gitops-init.sh)
+  - repo: local
+    hooks:
+      - id: adr-gate
+        name: ADR gate
+        entry: python tools/check_adr_gate.py
+        language: system
+        pass_filenames: false
+        always_run: false
+        files: 'ADR_GATE_PATTERN'
+
+      # Conventional commit — requerido para GitOps changelog automático
+      # Acepta: feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert
+      - id: conventional-commit
+        name: conventional commit
+        entry: >-
+          bash -c '
+          msg=$(cat "$1");
+          pattern="^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)(\(.+\))?(![^:]*)?:";
+          if ! echo "$msg" | grep -qE "$pattern"; then
+            echo "";
+            echo "  ERROR: commit message no sigue Conventional Commits";
+            echo "  Formato: tipo(scope): descripcion";
+            echo "  Tipos: feat fix chore docs style refactor perf test build ci revert";
+            echo "  Ejemplos: feat(auth): agregar refresh token";
+            echo "            chore: actualizar dependencias";
+            echo "  Actual: $msg";
+            echo "";
+            exit 1;
+          fi' --
+        language: system
+        stages: [commit-msg]
+        always_run: true
