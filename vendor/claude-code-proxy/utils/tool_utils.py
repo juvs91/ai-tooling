@@ -15,6 +15,8 @@ from utils.utils import get_tool_name
 # Deferred tools (Claude Code injects these in system prompt, not request.tools)
 # ---------------------------------------------------------------------------
 
+_MCP_TOOL_RE = re.compile(r"^mcp__[^_].+__[^_]")
+
 _DEFERRED_TOOLS_RE = re.compile(
     r'<available-deferred-tools>\s*(.*?)\s*</available-deferred-tools>',
     re.DOTALL,
@@ -36,6 +38,10 @@ _CC_WORKFLOW_TOOL_NAMES: frozenset[str] = frozenset({
     "AskUserQuestion", "CronCreate", "CronDelete", "CronList",
     "EnterWorktree", "ExitWorktree", "TaskOutput", "TaskStop",
     "NotebookEdit", "WebFetch", "WebSearch", "ToolSearch",
+    # MCP resource tools and session management tools present in <system-reminder> deferred blocks
+    "ReadMcpResourceTool", "ListMcpResourcesTool", "ReadMcpResourceDirTool",
+    "Monitor", "SendMessage", "PushNotification", "RemoteTrigger",
+    "ScheduleWakeup", "DesignSync",
 })
 
 
@@ -183,9 +189,13 @@ def validate_tool_name_with_deferred_bypass(name: str, valid_names: set[str]) ->
         return True
     if not name or not isinstance(name, str):
         return False
-    if name.strip() in _CC_WORKFLOW_TOOL_NAMES:
+    clean = name.strip()
+    if clean in _CC_WORKFLOW_TOOL_NAMES:
         return True
-    return name.strip() in valid_names
+    # MCP tools follow the pattern mcp__<server>__<tool> — always legitimate if user configured them
+    if _MCP_TOOL_RE.match(clean):
+        return True
+    return clean in valid_names
 
 
 def get_tool_schema(tool_name: str, tools: List[Dict]) -> Dict | None:
@@ -222,3 +232,31 @@ def get_tool_properties(tool_name: str, tools: List[Dict]) -> Dict:
             schema = tool.get("input_schema", {})
             return schema.get("properties", {})
     return {}
+
+
+def trim_tool_schemas(tools: list, max_desc: int) -> list:
+    """Truncate tool and property descriptions to reduce token overhead.
+
+    Does not remove tools or parameters — only shortens description strings.
+    Safe for all models: functionality is preserved, just less verbose metadata.
+    """
+    if not tools or max_desc <= 0:
+        return tools
+    trimmed = []
+    for tool in tools:
+        t = dict(tool)
+        desc = t.get("description", "")
+        if len(desc) > max_desc:
+            t["description"] = desc[:max_desc] + "…"
+        schema = t.get("input_schema", {})
+        if isinstance(schema, dict) and "properties" in schema:
+            props = {}
+            for k, v in schema["properties"].items():
+                p = dict(v)
+                pd = p.get("description", "")
+                if len(pd) > max_desc:
+                    p["description"] = pd[:max_desc] + "…"
+                props[k] = p
+            t["input_schema"] = {**schema, "properties": props}
+        trimmed.append(t)
+    return trimmed

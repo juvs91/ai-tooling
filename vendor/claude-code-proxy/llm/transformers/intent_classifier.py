@@ -505,6 +505,18 @@ class IntentClassifierTransformer(Transformer):
         # the session cache still says True (stale). This handles the first post-exit turn.
         if plan_mode_active and "ExitPlanMode" in _recent_tools:
             plan_mode_active = False
+        # Signal 4: Implicit ExitPlanMode — CC UI switched from /plan → Autoedit/Bypass.
+        # When Signal 0/3 flags plan_mode_active but CC no longer injects "Plan mode is active"
+        # (Signal 1 absent) AND classifier intent is BUILD or VERIFY, the user has manually
+        # changed the CC UI mode without the model calling ExitPlanMode. Unblock the session.
+        # Guard (BUILD/VERIFY): prevents false-positive during active planning — while the
+        # model is reading/planning, intent is READ/PLAN/CHAT, not BUILD. See ADR-0008.
+        if plan_mode_active and "Plan mode is active" not in _system_text and ctx.intent in ("BUILD", "VERIFY"):
+            plan_mode_active = False
+            logger.info(
+                "[classify] P0_UNLOCK: CC not in /plan mode + intent=%s → implicit ExitPlanMode (ADR-0008)",
+                ctx.intent,
+            )
         # Persist final state every turn: sets on activation, clears on exit.
         ctx.plan_mode_active = plan_mode_active
         if ctx.session_id:

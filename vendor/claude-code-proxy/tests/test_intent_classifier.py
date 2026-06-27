@@ -1805,3 +1805,185 @@ class TestRalphModeDetection:
         ctx = TransformContext()
         assert ctx.ralph_mode is False
 
+
+# ── Signal 4: Implicit ExitPlanMode vía CC UI mode change (ADR-0008) ─────────
+
+class TestSignal4ImplicitExitPlanMode:
+    """Signal 4: when CC UI switches /plan → Autoedit/Bypass, unblock PLAN_LOCK.
+
+    Setup: EnterPlanMode in message history (Signal 0 active) but no
+    "Plan mode is active" in system prompt (Signal 1 absent) + BUILD intent.
+    Expected: plan_mode_active=False, intent=BUILD, phase=EXECUTE.
+    """
+
+    def _make_transformer(self):
+        return IntentClassifierTransformer(_classifier_cfg(), _policy_cfg(), models_differ=False)
+
+    def _make_request(self, text, system="", extra_msgs=None):
+        """Build request with EnterPlanMode in history + optional system prompt."""
+        # History: EnterPlanMode was called (Signal 0 → plan_mode_active=True)
+        history = [
+            {"role": "user", "content": "Diseña la arquitectura del proxy"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "EnterPlanMode"},
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "server.py"}},
+            ]},
+        ]
+        if extra_msgs:
+            history.extend(extra_msgs)
+        history.append({"role": "user", "content": text})
+        return SimpleNamespace(messages=history, tools=None, system=system)
+
+    # ── Core: Signal 4 fires (unblock) ──────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_signal4_fires_build_intent_no_cc_plan_mode(self):
+        """Signal 4: EnterPlanMode in history + no CC /plan + BUILD → plan unlocked."""
+        t = self._make_transformer()
+        ctx = TransformContext()
+        req = self._make_request("Implementa el fix ahora", system="")
+        await t.transform(req, ctx)
+        assert ctx.plan_mode_active is False, "Signal 4 debe limpiar plan_mode_active"
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    @pytest.mark.asyncio
+    async def test_signal4_fires_spanish_implementation(self):
+        """Signal 4: 'arregla el bug' después de salir de /plan → BUILD."""
+        t = self._make_transformer()
+        ctx = TransformContext()
+        req = self._make_request("Arregla el bug de autenticación en server.py", system="")
+        await t.transform(req, ctx)
+        assert ctx.plan_mode_active is False
+        assert ctx.intent == "BUILD"
+
+    @pytest.mark.asyncio
+    async def test_signal4_fires_with_writes_in_history(self):
+        """Signal 4 fires even when plan.md was written (HAS_WRITES from plan file)."""
+        t = self._make_transformer()
+        ctx = TransformContext()
+        # Plan session: model wrote the plan file, then user switches to Autoedit
+        extra = [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Write", "input": {"file_path": "plan.md"}},
+            ]},
+        ]
+        # Use explicit BUILD-only text (avoid "plan" keyword which triggers PLANNING_RE)
+        req = self._make_request("Arregla el bug de autenticación ahora", system="", extra_msgs=extra)
+        await t.transform(req, ctx)
+        assert ctx.plan_mode_active is False
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    # ── Signal 4 does NOT fire (lock stays) ─────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_signal4_blocked_when_cc_still_in_plan_mode(self):
+        """Signal 4 does NOT fire when CC injects 'Plan mode is active' (still in /plan)."""
+        t = self._make_transformer()
+        ctx = TransformContext()
+        # System prompt still has "Plan mode is active" → CC is in /plan mode
+        req = self._make_request(
+            "implementa el fix",
+            system="Plan mode is active. Write your plan to the plan file.",
+        )
+        await t.transform(req, ctx)
+        # P0 PLAN_LOCK should still fire because Signal 1 activates plan_mode_active
+        assert ctx.plan_mode_active is True
+        assert ctx.intent == "PLAN"
+
+    @pytest.mark.asyncio
+    async def test_signal4_blocked_for_plan_intent(self):
+        """Signal 4 does NOT fire for PLAN intent (model still planning, not implementing)."""
+        t = self._make_transformer()
+        ctx = TransformContext()
+        req = self._make_request("Diseña la arquitectura del nuevo módulo", system="")
+        await t.transform(req, ctx)
+        # PLAN intent → P0 PLAN_LOCK fires, plan_mode_active stays True
+        assert ctx.plan_mode_active is True
+        assert ctx.intent == "PLAN"
+
+    @pytest.mark.asyncio
+    async def test_signal4_blocked_for_chat_intent(self):
+        """Signal 4 does NOT fire for CHAT intent (ambiguous, not clear BUILD request)."""
+        t = self._make_transformer()
+        ctx = TransformContext()
+        req = self._make_request("¿Cuántos archivos tiene el proxy?", system="")
+        await t.transform(req, ctx)
+        # CHAT intent → P0 PLAN_LOCK stays
+        assert ctx.plan_mode_active is True
+        assert ctx.intent == "PLAN"
+
+    @pytest.mark.asyncio
+    async def test_signal4_not_needed_when_exit_plan_mode_called(self):
+        """ExitPlanMode in history already clears lock — Signal 4 is a fallback."""
+        t = self._make_transformer()
+        ctx = TransformContext()
+        # History: Enter + Exit plan mode, then user requests implementation
+        history = [
+            {"role": "user", "content": "Diseña la arquitectura"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "EnterPlanMode"},
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "ExitPlanMode"},
+            ]},
+            {"role": "user", "content": "Implementa la solución"},
+        ]
+        req = SimpleNamespace(messages=history, tools=None, system="")
+        await t.transform(req, ctx)
+        # ExitPlanMode clears lock before Signal 4 is even checked
+        assert ctx.plan_mode_active is False
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+
+    # ── Full CC session simulation: /plan → Autoedit → implement ────────────
+
+    @pytest.mark.asyncio
+    async def test_full_session_plan_mode_to_autoedit(self):
+        """Full session: user enters /plan, model plans, user switches to Autoedit, implements.
+
+        Simulates the exact scenario reported for Kimi K2:
+        Turn 1 (CC in /plan): EnterPlanMode called, plan written
+        Turn 2 (CC switched to Autoedit): user says "implementa ahora"
+        Expected: plan_mode_active=False, intent=BUILD, phase=EXECUTE
+        """
+        t = self._make_transformer()
+        ctx = TransformContext()
+
+        # Turn 2 — user switched CC to Autoedit (no "Plan mode is active" in system)
+        history = [
+            # Turn 1: CC in /plan mode (user started planning session)
+            {"role": "user", "content": "Diseña el fix para el P0 PLAN_LOCK"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "EnterPlanMode"},
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "intent_classifier.py"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "r1", "content": "file contents..."},
+            ]},
+            {"role": "assistant", "content": [
+                # Model wrote the plan file but forgot to call ExitPlanMode (Kimi K2 bug)
+                {"type": "tool_use", "name": "Write", "input": {"file_path": "plan.md"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "w1", "content": "ok"},
+            ]},
+            # Turn 2: user switched CC to Autoedit and types implementation request
+            {"role": "user", "content": "Implementa el fix ahora por favor"},
+        ]
+        # No "Plan mode is active" in system — CC is in Autoedit mode
+        req = SimpleNamespace(messages=history, tools=None, system="")
+        await t.transform(req, ctx)
+
+        assert ctx.plan_mode_active is False, (
+            "Signal 4 debe limpiar plan_mode_active cuando CC cambia a Autoedit + intent=BUILD"
+        )
+        assert ctx.intent == "BUILD"
+        assert ctx.phase == "EXECUTE"
+        assert ctx.is_analysis is False
+

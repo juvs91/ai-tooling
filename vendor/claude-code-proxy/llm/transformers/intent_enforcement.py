@@ -156,7 +156,7 @@ class IntentEnforcementTransformer(Transformer):
         elif intent == "SYNTHESIZING":
             return self._get_synthesizing_prompt()
         elif intent == "BUILDING" or intent == "BUILD":
-            return self._get_building_prompt(request=request)
+            return self._get_building_prompt(request=request, ctx=ctx)
         elif intent == "VERIFY":
             return self._get_verify_prompt()
         return ""
@@ -306,7 +306,7 @@ class IntentEnforcementTransformer(Transformer):
             "Include code snippets for any behavioral claims."
         )
 
-    def _get_building_prompt(self, request=None) -> str:
+    def _get_building_prompt(self, request=None, ctx=None) -> str:
         """BUILDING intent: Grounding requirements for code changes + anti-stub mandate."""
         base = (
             "[INTENT-ENFORCEMENT] BUILDING mode active:\n"
@@ -336,8 +336,45 @@ class IntentEnforcementTransformer(Transformer):
             "  [ ] All tests contain at least one assert statement\n"
             "  [ ] All API route handlers process input and return a response\n"
         )
+        # Anti-plan-oscillation: when file changes already exist in history, the model
+        # must NOT call EnterPlanMode — it would revert the entire workflow to plan mode
+        # and discard in-progress implementation work.
+        has_writes = (
+            ctx is not None
+            and getattr(ctx, "history_phase", None) == "HAS_WRITES"
+        )
+        anti_plan = ""
+        if has_writes:
+            anti_plan = (
+                "\nRULE 8 [ANTI-PLAN-OSCILLATION]: File changes are already recorded in "
+                "this session's history. You are in active BUILD execution — DO NOT call "
+                "EnterPlanMode. That tool switches the entire workflow back to planning mode "
+                "and interrupts your implementation. If you hit an obstacle, resolve it "
+                "inline or call AskUserQuestion. Continue building.\n"
+            )
+        # RULE 9: Read before Edit (nuanced — skip if you read/wrote the file this same turn)
+        rule_read = (
+            "\nRULE 9 [READ-BEFORE-EDIT]: Before constructing the old_string for Edit/MultiEdit, "
+            "Read the target file UNLESS you read or wrote it in this same turn. "
+            "Context compression silently alters what you 'remember' a file contains — "
+            "old_string from memory will fail if the file differs. When in doubt: Read first.\n"
+        )
+        # RULE 10: Task state persistence — model writes to ai-notes/ (proxy has no volume mount)
+        rule_state = (
+            "\nRULE 10 [TASK-STATE-FILE]: When you complete a phase or mark 3+ tasks done "
+            "in TodoWrite, append your current state to ai-notes/task-state-$(date +%Y%m%d).md:\n"
+            "cat >> ai-notes/task-state-$(date +%Y%m%d).md << CHECKPOINT\n"
+            ">>>>>>>>$(date -u +%Y-%m-%dT%H:%M:%SZ)>>>>>>>>\n"
+            "Done: [completed tasks]\n"
+            "Current: [active task]\n"
+            "Pending: [remaining]\n"
+            "Files edited: [list]\n"
+            ">>>>>>>>END>>>>>>>>\n"
+            "CHECKPOINT\n"
+            "If context seems compressed or progress is unclear, Read that file first.\n"
+        )
         task_prompt = self._detect_task_type_sub_prompt(request)
-        return base + task_prompt if task_prompt else base
+        return base + anti_plan + rule_read + rule_state + (task_prompt if task_prompt else "")
 
     def _detect_task_type_sub_prompt(self, request=None) -> str:
         """Detect task type from recent messages and return specialized sub-prompt.

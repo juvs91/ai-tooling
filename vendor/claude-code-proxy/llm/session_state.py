@@ -49,13 +49,14 @@ class EntityInfo:
     entity_type: str     # "file" | "table" | "function" | "server" | "other"
     context: str = ""    # short note on why it matters
     first_seen: float = field(default_factory=time.time)
+    modified: bool = False  # True if file was written/edited (not just read)
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "type": self.entity_type, "context": self.context, "first_seen": self.first_seen}
+        return {"name": self.name, "type": self.entity_type, "context": self.context, "first_seen": self.first_seen, "modified": self.modified}
 
     @classmethod
     def from_dict(cls, d: dict) -> "EntityInfo":
-        return cls(name=d["name"], entity_type=d.get("type", "other"), context=d.get("context", ""), first_seen=d.get("first_seen", 0.0))
+        return cls(name=d["name"], entity_type=d.get("type", "other"), context=d.get("context", ""), first_seen=d.get("first_seen", 0.0), modified=d.get("modified", False))
 
 
 @dataclass
@@ -73,10 +74,26 @@ class DecisionInfo:
 
 
 @dataclass
+class TodoItem:
+    content: str
+    status: str      # "pending" | "in_progress" | "completed"
+    priority: str = "medium"
+    id: str = ""
+
+    def to_dict(self) -> dict:
+        return {"content": self.content, "status": self.status, "priority": self.priority, "id": self.id}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TodoItem":
+        return cls(content=d.get("content", ""), status=d.get("status", "pending"), priority=d.get("priority", "medium"), id=d.get("id", ""))
+
+
+@dataclass
 class SessionState:
     entities: dict[str, EntityInfo] = field(default_factory=dict)
     decisions: list[DecisionInfo] = field(default_factory=list)
     checkpoints: dict[str, CheckpointInfo] = field(default_factory=dict)
+    todos: list[TodoItem] = field(default_factory=list)
     total_turns: int = 0
     total_compressions: int = 0
     start_time: float = field(default_factory=time.time)
@@ -87,6 +104,7 @@ class SessionState:
             "entities": {k: v.to_dict() for k, v in self.entities.items()},
             "decisions": [d.to_dict() for d in self.decisions],
             "checkpoints": {k: v.to_dict() for k, v in self.checkpoints.items()},
+            "todos": [t.to_dict() for t in self.todos],
             "total_turns": self.total_turns,
             "total_compressions": self.total_compressions,
             "start_time": self.start_time,
@@ -99,6 +117,7 @@ class SessionState:
             entities={k: EntityInfo.from_dict(v) for k, v in d.get("entities", {}).items()},
             decisions=[DecisionInfo.from_dict(x) for x in d.get("decisions", [])],
             checkpoints={k: CheckpointInfo.from_dict(v) for k, v in d.get("checkpoints", {}).items()},
+            todos=[TodoItem.from_dict(t) for t in d.get("todos", [])],
             total_turns=d.get("total_turns", 0),
             total_compressions=d.get("total_compressions", 0),
             start_time=d.get("start_time", 0.0),
@@ -137,6 +156,20 @@ def extract_session_state(messages: list[dict], existing: Optional[SessionState]
     for turn_idx, msg in enumerate(messages):
         role = msg.get("role", "")
         content = msg.get("content", "")
+        # Scan tool_use blocks for Edit/Write BEFORE text conversion (tool_use has no "text" field)
+        if role == "assistant" and isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                if block.get("name") not in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+                    continue
+                inp = block.get("input") or {}
+                fp = inp.get("file_path", "") if isinstance(inp, dict) else ""
+                if fp:
+                    if fp not in state.entities:
+                        state.entities[fp] = EntityInfo(name=fp, entity_type="file", modified=True)
+                    else:
+                        state.entities[fp].modified = True
         if isinstance(content, list):
             content = " ".join(
                 b.get("text", "") if isinstance(b, dict) else str(b)
@@ -181,6 +214,38 @@ def extract_session_state(messages: list[dict], existing: Optional[SessionState]
     return state
 
 
+def extract_todo_state(messages: list) -> list[TodoItem]:
+    """Scan messages in reverse for the most recent TodoWrite tool_use block.
+
+    TodoWrite always emits the COMPLETE current todo list, so only the last
+    invocation matters. Must scan full history including recent_messages (not
+    just old_messages) to capture todos written after the last compression.
+    """
+    for msg in reversed(messages):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+        if role != "assistant" or not isinstance(content, list):
+            continue
+        for block in content:
+            btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+            name = block.get("name") if isinstance(block, dict) else getattr(block, "name", None)
+            if btype != "tool_use" or name != "TodoWrite":
+                continue
+            inp = block.get("input") if isinstance(block, dict) else getattr(block, "input", None)
+            todos_raw = (inp or {}).get("todos", []) if isinstance(inp, dict) else []
+            return [
+                TodoItem(
+                    content=t.get("content", ""),
+                    status=t.get("status", "pending"),
+                    priority=t.get("priority", "medium"),
+                    id=t.get("id", ""),
+                )
+                for t in todos_raw
+                if isinstance(t, dict) and t.get("content")
+            ]
+    return []
+
+
 def inject_state_into_system_prompt(system_content: str, state: SessionState) -> str:
     """
     Append a PRESERVED_STATE block to the system prompt.
@@ -188,7 +253,7 @@ def inject_state_into_system_prompt(system_content: str, state: SessionState) ->
     Generates a compact, human-readable state summary that helps the model
     avoid re-deriving information that was established in compressed turns.
     """
-    if not state.checkpoints and not state.decisions and not state.entities:
+    if not state.checkpoints and not state.decisions and not state.entities and not state.todos:
         return system_content
 
     lines = ["\n\n--- PRESERVED_STATE ---"]
@@ -203,18 +268,38 @@ def inject_state_into_system_prompt(system_content: str, state: SessionState) ->
             if cp.completed_tasks:
                 lines.append(f"    completed: {len(cp.completed_tasks)} tasks")
 
+    if state.todos:
+        done    = [t for t in state.todos if t.status == "completed"]
+        in_prog = [t for t in state.todos if t.status == "in_progress"]
+        pending = [t for t in state.todos if t.status == "pending"]
+        lines.append("## Active Tasks")
+        for t in in_prog:
+            lines.append(f"  🔄 IN_PROGRESS: {t.content}")
+        for t in pending[:5]:
+            lines.append(f"  ⏳ PENDING: {t.content}")
+        if len(pending) > 5:
+            lines.append(f"  ... and {len(pending) - 5} more pending")
+        for t in done[-3:]:
+            lines.append(f"  ✅ DONE: {t.content}")
+
     if state.decisions:
         lines.append("## Key Decisions")
         for d in state.decisions[-10:]:
             lines.append(f"  • {d.summary}")
 
     if state.entities:
-        file_paths = [name for name, e in state.entities.items() if e.entity_type == "file"]
-        if file_paths:
-            lines.append(f"## Files Encountered ({len(file_paths)} total)")
-            lines.append(f"  {', '.join(file_paths[:15])}")
-            if len(file_paths) > 15:
-                lines.append(f"  ... and {len(file_paths) - 15} more")
+        modified_paths = [name for name, e in state.entities.items() if e.entity_type == "file" and e.modified]
+        read_only_paths = [name for name, e in state.entities.items() if e.entity_type == "file" and not e.modified]
+        if modified_paths:
+            lines.append(f"## Files Modified ({len(modified_paths)} total)")
+            lines.append(f"  ✏️ {', '.join(modified_paths[:10])}")
+            if len(modified_paths) > 10:
+                lines.append(f"  ... and {len(modified_paths) - 10} more")
+        if read_only_paths:
+            lines.append(f"## Files Read ({len(read_only_paths)} total)")
+            lines.append(f"  {', '.join(read_only_paths[:5])}")
+            if len(read_only_paths) > 5:
+                lines.append(f"  ... and {len(read_only_paths) - 5} more")
 
     lines.append(f"## Session Info")
     lines.append(f"  compressions={state.total_compressions}, turns_processed={state.total_turns}")

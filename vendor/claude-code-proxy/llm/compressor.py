@@ -27,7 +27,7 @@ import litellm
 from litellm import token_counter
 from utils.metrics import metrics
 from utils.utils import count_tokens_accurate  # toksum integration
-from llm.session_state import extract_session_state, inject_state_into_system_prompt, SessionState
+from llm.session_state import extract_session_state, inject_state_into_system_prompt, SessionState, extract_todo_state
 
 
 _MAX_SESSION_STATE_ENTITIES = 150  # cap entities per session to bound session_state size
@@ -261,11 +261,12 @@ _COMPRESS_PROMPT = (
     "You are a conversation summarizer. Summarize the following conversation context concisely.\n\n"
     "RULES:\n"
     "- PRESERVE: file paths, tool names, function names, error messages, key decisions, code snippets\n"
+    "- PRESERVE: which tasks were completed and which are still pending\n"
+    "- PRESERVE: which files were modified (Edit/Write) vs only read\n"
     "- REMOVE: verbose tool outputs, repetitive explanations, intermediate reasoning\n"
     "- Keep the summary under 2000 tokens\n"
-    "- Use bullet points for clarity\n"
-    "- Include any unresolved issues or pending tasks\n\n"
-    "Conversation to summarize:\n{conversation}\n\n"
+    "- Structure: '## Completed Work' → '## Pending Work' → '## Files Modified' → '## Key Decisions'\n"
+    "\nConversation to summarize:\n{conversation}\n\n"
     "Concise summary:"
 )
 
@@ -497,11 +498,16 @@ async def _apply_preserved_state(
     messages: list[dict],
     session_id: str,
     source_messages: list[dict],
+    full_messages: list[dict] | None = None,
 ) -> list[dict]:
     """Extract structured state from source_messages and inject into system prompt.
 
     Merges with any previously persisted state so checkpoint history accumulates
     across multiple compression boundaries (not just the current one).
+
+    full_messages: complete history (old + recent) for TodoWrite scan — recent_messages
+    are not included in source_messages (old_messages only), so the last TodoWrite
+    call is often invisible to extract_session_state without this parameter.
     """
     try:
         async with _state_lock:
@@ -510,6 +516,11 @@ async def _apply_preserved_state(
         existing = SessionState.from_dict(existing_raw) if existing_raw else None
 
         state = extract_session_state(source_messages, existing)
+
+        if full_messages:
+            todo_items = extract_todo_state(full_messages)
+            if todo_items:
+                state.todos = todo_items
 
         async with _state_lock:
             entry = _session_cache.get(session_id)
@@ -675,7 +686,7 @@ async def compress_messages_if_needed(
 
     if cached_summary is not None:
         compressed = _reassemble_with_summary(system_msg, cached_summary, recent_messages)
-        compressed = await _apply_preserved_state(compressed, effective_session_id, old_messages)
+        compressed = await _apply_preserved_state(compressed, effective_session_id, old_messages, full_messages=messages)
         new_tokens = count_tokens_accurate(compressed, model=target_model)
         print(f"[compress] Success (cached): {estimated_tokens} → {new_tokens} tokens "
               f"(saved {estimated_tokens - new_tokens})")
@@ -695,7 +706,7 @@ async def compress_messages_if_needed(
         await update_session(effective_session_id, summary, len(old_messages))
         # Reassemble with summary
         merged = _reassemble_with_summary(system_msg, summary, recent_messages)
-        merged = await _apply_preserved_state(merged, effective_session_id, old_messages)
+        merged = await _apply_preserved_state(merged, effective_session_id, old_messages, full_messages=messages)
 
         # Step 5: Enforce token budget
         merged = _trim_by_token_budget(merged, max_tokens, target_model)

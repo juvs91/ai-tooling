@@ -154,6 +154,8 @@ class PolicyConfig:
     guard_system: str = ""         # loaded from GUARDRAILS_FILE or default
     grounding_validation_enabled: bool = True  # ENV: GROUNDING_VALIDATION_ENABLED (default: True)
     multihop_grounding_enabled: bool = True   # ENV: MULTIHOP_GROUNDING_ENABLED (default: True)
+    tool_exclude_raw: str = ""       # ENV: TOOL_EXCLUDE — comma-sep prefix patterns (e.g. mcp__playwright__*)
+    tool_schema_max_desc: int = 200  # ENV: TOOL_SCHEMA_MAX_DESC — max chars per description (0=off)
 
 
 @dataclass
@@ -416,6 +418,8 @@ def load_config() -> ProxyConfig:
             strip_reasoning=_env_stripped("STRIP_REASONING", "0") == "1",
             guard_system=_load_guard_system(),
             grounding_validation_enabled=_env_stripped("GROUNDING_VALIDATION_ENABLED", "1") == "1",
+            tool_exclude_raw=_env_stripped("TOOL_EXCLUDE", ""),
+            tool_schema_max_desc=int(_env("TOOL_SCHEMA_MAX_DESC", "200")),
         ),
         analysis=AnalysisConfig(
             model=analysis_model,
