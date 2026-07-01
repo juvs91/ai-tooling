@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os as _os
 import re
 import time
 from typing import Any
 
 from llm.pipeline import Transformer, TransformContext
-from utils.utils import bget
+from utils.utils import bget, ensure_system_note
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,23 @@ logger = logging.getLogger(__name__)
 _CITATION_PATTERN = re.compile(r'[\[\(]([\w/.-]+\.\w+:\d+)[\)\]]')
 # Extract file path from citation
 _FILE_FROM_CITATION = re.compile(r'([\w/.-]+\.\w+):\d+')
+
+# Tools that write to files — their targets must have been read first
+_WRITE_TOOL_NAMES = frozenset({"Edit", "MultiEdit", "Write"})
+
+
+def _extract_edit_paths(response_content: list) -> set:
+    """Return paths of existing files targeted by Write/Edit/MultiEdit tool calls."""
+    return {
+        path
+        for block in (response_content or [])
+        if isinstance(block, dict)
+        and block.get("type") == "tool_use"
+        and block.get("name") in _WRITE_TOOL_NAMES
+        and (path := (block.get("input") or {}).get("file_path", ""))
+        # New file creation (Write to non-existent path) needs no prior Read
+        and not (block["name"] == "Write" and not _os.path.exists(path))
+    }
 
 # Claim pattern: sentence with citation
 # Matches: "The function X does Y (file.py:123)" - claims with citations
@@ -72,23 +90,13 @@ class GroundingValidatorTransformer(Transformer):
         if not self.enabled:
             return
 
-        # Get response text
-        response_text = self._extract_response_text(request)
-        if not response_text:
-            logger.debug("[grounding] No response text to validate")
-            return
-
-        # Get conversation messages (for tool results)
+        # Get conversation messages (needed for evidence_map and pre-edit check)
         messages = getattr(request, "messages", [])
         if not messages:
             logger.debug("[grounding] No messages in request")
             return
 
-        # Step 1: Extract citations from response
-        citations = self._extract_citations(response_text)
-        logger.info("[grounding] Found %d citations in response", len(citations))
-
-        # Step 2: Get evidence from tool results
+        # Step 2: Get evidence from tool results (needed before Step 2.5)
         evidence_map = self._build_evidence_map(messages)
         logger.info("[grounding] Found evidence for %d unique files", len(evidence_map))
 
@@ -107,6 +115,28 @@ class GroundingValidatorTransformer(Transformer):
                         logger.info("[grounding] Restored %d historical files from session cache", added)
             except Exception as exc:
                 logger.warning("[grounding] Failed to load session read files: %s", exc)
+
+        # Step 2.5: Pre-edit read check — runs even for tool-only responses
+        # response_content is at request.content (request IS the response in this pipeline)
+        unread_edits = _extract_edit_paths(getattr(request, "content", None) or []) - set(evidence_map)
+        if unread_edits:
+            ensure_system_note(
+                ctx,
+                f"[grounding-warn] Editing without prior Read: {', '.join(sorted(unread_edits))}\n"
+                "Read the file first — editing unread files risks replacing real code with hallucinated content.",
+            )
+            ctx.unread_edit_files = list(unread_edits)
+            logger.warning("[grounding] Unread edit targets: %s", unread_edits)
+
+        # Get response text (citation validation requires text — tool-only responses skip below)
+        response_text = self._extract_response_text(request)
+        if not response_text:
+            logger.debug("[grounding] No response text to validate (tool-only response)")
+            return
+
+        # Step 1: Extract citations from response
+        citations = self._extract_citations(response_text)
+        logger.info("[grounding] Found %d citations in response", len(citations))
 
         # Step 3: Extract code snippets from tool results
         code_snippets = self._extract_code_snippets(messages)

@@ -29,7 +29,7 @@ def _plan_mode_active_from_history(messages: list) -> bool:
     subsequent ExitPlanMode. This handles the case where CC failed to inject
     its system reminder on the current turn.
     """
-    recent = messages[-60:] if len(messages) > 60 else messages
+    recent = messages[-120:] if len(messages) > 120 else messages
     found_enter = False
     for msg in recent:
         if bget(msg, "role") != "assistant":

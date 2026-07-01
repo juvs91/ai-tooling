@@ -70,11 +70,16 @@ cfg = load_config()
 # Suppress LiteLLM's red "Provider List" / "Give Feedback" banners on unknown models
 litellm.suppress_debug_info = True
 
-# Skip LLM classifier when all models are identical (no routing benefit)
-_models_differ = (
+# Activate LLM classifier when routing models differ OR when CLASSIFIER_MODEL is explicitly
+# configured. The original check compared only routing models, silently skipping the classifier
+# for single-model configs (e.g. Kimi K2: BIG=SMALL=BUILDING=kimi-k2). But intent enforcement
+# (plan mode, read mode) depends on accurate classification regardless of routing uniformity.
+# If the operator configured CLASSIFIER_MODEL, they intend accurate classification. ADR-0010.
+_routing_differs = (
     cfg.routing.big_model != cfg.routing.small_model
     or cfg.routing.building_model != cfg.routing.big_model
 )
+_models_differ = _routing_differs or bool(cfg.classifier.model and cfg.classifier.api_key)
 
 # Build the request pipeline once at startup (transformers 1-5: Anthropic-format)
 _request_pipeline = build_request_pipeline(cfg, _models_differ)
@@ -91,14 +96,10 @@ if cfg.classifier.model and not cfg.classifier.api_key:
         cfg.classifier.model,
     )
 if cfg.classifier.model and _models_differ:
+    _reason = "routing models differ" if _routing_differs else "CLASSIFIER_MODEL explicitly configured"
     logger.info(
-        "[startup] Intent classifier: model=%s base=%s timeout=%.1fs",
-        cfg.classifier.model, cfg.classifier.base_url or "(default)", cfg.classifier.timeout,
-    )
-elif cfg.classifier.model and not _models_differ:
-    logger.info(
-        "[startup] Intent classifier: SKIPPED (all models identical: %s) — using regex fallback",
-        cfg.routing.big_model,
+        "[startup] Intent classifier: model=%s base=%s timeout=%.1fs (%s)",
+        cfg.classifier.model, cfg.classifier.base_url or "(default)", cfg.classifier.timeout, _reason,
     )
 else:
     logger.info("[startup] Intent classifier: regex fallback (CLASSIFIER_MODEL not set)")
@@ -304,6 +305,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                     is_stream=True, is_analysis=ctx.is_analysis,
                     phase=ctx.phase,
                     cost_usd=0.0,
+                    session_id=ctx.session_id or "",
                 ))
                 metrics.record_model_event(request.model, "request")
                 return StreamingResponse(stream_gen, media_type="text/event-stream")
@@ -330,6 +332,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                     is_stream=False, is_analysis=ctx.is_analysis,
                     phase=ctx.phase,
                     quality_score=1.0,
+                    session_id=ctx.session_id or "",
                 ))
                 metrics.record_model_event(request.model, "request")
                 return out
@@ -378,6 +381,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                 is_stream=True, is_analysis=ctx.is_analysis,
                 phase=ctx.phase,
                 cost_usd=0.0,  # updated post-stream via _tracked_stream
+                session_id=ctx.session_id or "",
             ))
             metrics.record_model_event(request.model, "request")
             return StreamingResponse(
@@ -441,6 +445,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
             refinement_attempts=ctx.refinement_attempt,
             quality_score=ctx.quality_score,
             cost_usd=req_cost,
+            session_id=ctx.session_id or "",
         ))
         metrics.record_model_event(request.model, "request")
         has_tools = any(
@@ -596,3 +601,32 @@ async def get_stats():
 async def get_logs(n: int = 50):
     """Recent request logs (up to 200). Use ?n=100 to control count."""
     return metrics.get_recent(min(n, 200))
+
+
+@app.get("/api/sessions")
+async def list_sessions(limit: int = 20):
+    """List recent sessions with summary stats. Use ?limit=N to control count."""
+    return metrics.get_sessions_summary(limit=min(limit, 100))
+
+
+@app.get("/api/session/{session_id}/telemetry")
+async def get_session_telemetry(session_id: str):
+    """Full request timeline and summary stats for a specific session."""
+    data = metrics.get_session_telemetry(session_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+    return data
+
+
+@app.get("/api/session/{session_id}/plan-events")
+async def get_plan_events(session_id: str):
+    """Return plan mode activation/deactivation audit trail for a session.
+
+    Useful for diagnosing plan mode oscillation: shows which signal activated/deactivated
+    plan mode and whether Signal 4 was blocked (proxy-initiated guard). ADR-0010.
+    """
+    from llm.compressor import get_session_plan_mode, get_session_plan_mode_source, get_session_plan_mode_events
+    active = await get_session_plan_mode(session_id)
+    source = await get_session_plan_mode_source(session_id)
+    events = await get_session_plan_mode_events(session_id)
+    return {"session_id": session_id, "plan_mode_active": active, "plan_mode_source": source, "events": events}

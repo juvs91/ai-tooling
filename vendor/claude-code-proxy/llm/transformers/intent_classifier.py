@@ -20,7 +20,12 @@ from config import ClassifierConfig, PolicyConfig
 from utils.metrics import metrics
 from utils.utils import bget
 from llm.converters import _system_to_text
-from llm.compressor import get_session_plan_mode, set_session_plan_mode
+from llm.compressor import (
+    get_session_plan_mode,
+    set_session_plan_mode,
+    get_session_plan_mode_source,
+    set_session_plan_mode_source,
+)
 
 
 WRITE_TOOLS = frozenset({"Write", "Edit", "NotebookEdit"})
@@ -120,12 +125,12 @@ def _plan_mode_active(messages: list) -> bool:
 
     Duplicated from intent_enforcement._plan_mode_active_from_history() to avoid
     circular imports between sibling transformer modules. Both must stay in sync
-    if the scan logic changes. Window=60 matches _exit_plan_already_called() in
+    if the scan logic changes. Window=120 matches _exit_plan_already_called() in
     deferred_tools.py.
-    Plan sessions with many file reads easily exceed 20 messages; 60 gives
-    sufficient coverage for typical planning sessions.
+    Plan sessions with many file reads easily exceed 20 messages; 120 gives
+    sufficient coverage for typical planning sessions without relying on session cache.
     """
-    recent = messages[-60:] if len(messages) > 60 else messages
+    recent = messages[-120:] if len(messages) > 120 else messages
     found_enter = False
     for msg in recent:
         if bget(msg, "role") != "assistant":
@@ -192,7 +197,7 @@ def _resolve_primary_overrides(
     # Window=60 matches _plan_mode_active() / _exit_plan_already_called() so that
     # ExitPlanMode detection is consistent with plan mode detection across long sessions.
     if not _is_explicit_analysis and ctx_intent != "BUILD":
-        _recent_all = _get_recent_all_tools(messages, window=60)
+        _recent_all = _get_recent_all_tools(messages, window=120)
         if "ExitPlanMode" in _recent_all:
             return _IntentOverride("G", "BUILD", "EXECUTE", "NONE", False, 0)
 
@@ -403,6 +408,12 @@ class IntentClassifierTransformer(Transformer):
                 f"{unique_files} unique files read.{repeat_note}{pivot_note}"
             )
 
+        # Inject plan session context so the LLM classifier avoids misclassifying
+        # natural plan-session language (e.g., "hay un error") as BUILD. ADR-0010.
+        _cached_plan_active = await get_session_plan_mode(ctx.session_id) if ctx.session_id else False
+        if _plan_mode_active(messages) or _cached_plan_active:
+            tool_context += " [PLAN SESSION ACTIVE: do NOT classify as BUILD/VERIFY unless ExitPlanMode was already called]"
+
         # Step 3: Text classification with enriched context (LLM or regex)
         if self._cls.model and self._models_differ:
             _intent, _confidence, _secondary = await classify_intent(
@@ -469,15 +480,18 @@ class IntentClassifierTransformer(Transformer):
         # Compute plan mode once here — ctx.plan_mode_active is the authoritative signal
         # for all downstream transformers (intent_enforcement, deferred_tools, etc.).
         plan_mode_active = _plan_mode_active(messages)
+        _system_text = _system_to_text(getattr(request, "system", None))
+        _signal1_active = False
+        _activation_signal = "0" if plan_mode_active else None  # track which signal activated
+
         if not plan_mode_active:
             # Signal 1: CC system prompt explicitly says "Plan mode is active".
             # This fires when /plan is used but the user's message text would otherwise
             # classify as CHAT or BUILD (e.g., a short reply mid-plan-session).
-            _system_text = _system_to_text(getattr(request, "system", None))
             if "Plan mode is active" in _system_text:
                 plan_mode_active = True
-        else:
-            _system_text = _system_to_text(getattr(request, "system", None))
+                _signal1_active = True
+                _activation_signal = "1"
 
         # Ralph mode: Ralph injects PROXY_SESSION_MODE: ralph via --append-system-prompt.
         # No headers, no files — the system prompt is the only in-band channel through CC.
@@ -485,7 +499,7 @@ class IntentClassifierTransformer(Transformer):
             ctx.ralph_mode = True
             logger.info("[classify] RALPH_MODE detected via system prompt marker")
         # Pre-compute recent tools — reused by Signal 2 guard and ExitPlanMode override.
-        _recent_tools = _get_recent_all_tools(messages, window=60)
+        _recent_tools = _get_recent_all_tools(messages, window=120)
         if not plan_mode_active and ctx.intent == "PLAN" and history_phase != "HAS_WRITES":
             # Signal 2: Classifier detected PLAN intent. Activate from the FIRST turn
             # even before EnterPlanMode is called, so the first turn is not unprotected.
@@ -495,32 +509,65 @@ class IntentClassifierTransformer(Transformer):
             #     not re-enter plan mode even though it matches PLANNING_RE.
             if "ExitPlanMode" not in _recent_tools:
                 plan_mode_active = True
+                _activation_signal = "2"
         # Signal 3: Session cache — persists plan mode state across history truncation
         # and proxy restarts. Provides unlimited coverage for model-initiated plan mode
         # (not bound by the 60-message Signal 0 window). Only fires when session_id is
         # available (always set from X-Session-ID header for real CC sessions).
         if not plan_mode_active and ctx.session_id:
             plan_mode_active = await get_session_plan_mode(ctx.session_id)
+            if plan_mode_active:
+                _activation_signal = "3"
         # ExitPlanMode override: if called in recent history, always force False even if
         # the session cache still says True (stale). This handles the first post-exit turn.
         if plan_mode_active and "ExitPlanMode" in _recent_tools:
             plan_mode_active = False
+            _activation_signal = None
         # Signal 4: Implicit ExitPlanMode — CC UI switched from /plan → Autoedit/Bypass.
-        # When Signal 0/3 flags plan_mode_active but CC no longer injects "Plan mode is active"
-        # (Signal 1 absent) AND classifier intent is BUILD or VERIFY, the user has manually
-        # changed the CC UI mode without the model calling ExitPlanMode. Unblock the session.
-        # Guard (BUILD/VERIFY): prevents false-positive during active planning — while the
-        # model is reading/planning, intent is READ/PLAN/CHAT, not BUILD. See ADR-0008.
+        # Fires ONLY for CC-initiated plan mode (plan_mode_source == "cc"). For proxy-initiated
+        # plan mode ("proxy") this would always fire (Signal 1 is never present), causing
+        # false-positive exits and periodic oscillation. See ADR-0008, ADR-0010.
+        _pm_source: str | None = None
+        if ctx.session_id:
+            _pm_source = await get_session_plan_mode_source(ctx.session_id)
         if plan_mode_active and "Plan mode is active" not in _system_text and ctx.intent in ("BUILD", "VERIFY"):
-            plan_mode_active = False
-            logger.info(
-                "[classify] P0_UNLOCK: CC not in /plan mode + intent=%s → implicit ExitPlanMode (ADR-0008)",
-                ctx.intent,
-            )
-        # Persist final state every turn: sets on activation, clears on exit.
+            if _pm_source == "cc":
+                plan_mode_active = False
+                _activation_signal = None
+                logger.info(
+                    "[classify] P0_UNLOCK: CC not in /plan mode + intent=%s + source=cc → implicit ExitPlanMode (ADR-0008)",
+                    ctx.intent,
+                )
+            else:
+                logger.debug(
+                    "[classify] Signal 4 blocked: source=%s (proxy-initiated, requires explicit ExitPlanMode — ADR-0010)",
+                    _pm_source,
+                )
+
+        # ── Source tracking (ADR-0010): set on activation, clear on exit ─────────────────
+        # Source ("cc"/"proxy") controls whether Signal 4 can fire in future turns.
+        if ctx.session_id and plan_mode_active:
+            if _pm_source is None:
+                # Source not in cache (new session or proxy restart). Infer from this turn:
+                # Signal 1 active → CC-initiated; anything else → proxy-initiated.
+                _pm_source = "cc" if _signal1_active else "proxy"
+                await set_session_plan_mode_source(ctx.session_id, _pm_source)
+                logger.debug("[classify] plan_mode_source inferred as '%s' (cache was empty)", _pm_source)
+            elif _signal1_active and _pm_source != "cc":
+                # Signal 1 observed on a session previously marked "proxy" — upgrade to "cc".
+                await set_session_plan_mode_source(ctx.session_id, "cc")
+                _pm_source = "cc"
+
+        # Persist final state every turn: sets on activation (with source), clears on exit.
         ctx.plan_mode_active = plan_mode_active
         if ctx.session_id:
-            await set_session_plan_mode(ctx.session_id, plan_mode_active)
+            _source_to_persist = _pm_source if plan_mode_active else None
+            await set_session_plan_mode(
+                ctx.session_id,
+                plan_mode_active,
+                source=_source_to_persist,
+                signal=_activation_signal or "exit",
+            )
 
         # _resolve_primary_overrides() evaluates all conditions in explicit order
         # and returns on first match — no hidden elif coupling.

@@ -24,6 +24,7 @@ class RequestLog:
     refinement_attempts: int = 0
     quality_score: float = 1.0
     cost_usd: float = 0.0
+    session_id: str = ""
     error: str | None = None
 
 
@@ -82,10 +83,18 @@ class ProxyMetrics:
         # Classifier outcome accuracy: did the response behavior match the classified intent?
         self.intent_outcome_correct: int = 0
         self.intent_outcome_wrong: int = 0
+        # Per-session request index
+        self._session_index: dict[str, deque] = {}
+        self._session_last_seen: dict[str, float] = {}
 
     def record(self, log: RequestLog):
         with self._lock:
             self._logs.append(log)
+            if log.session_id:
+                if log.session_id not in self._session_index:
+                    self._session_index[log.session_id] = deque(maxlen=100)
+                self._session_index[log.session_id].append(log)
+                self._session_last_seen[log.session_id] = time.time()
             self.total_requests += 1
             self.total_input_tokens += log.input_tokens
             self.total_output_tokens += log.output_tokens
@@ -339,6 +348,92 @@ class ProxyMetrics:
                 "sample_size": len(q_scores),
                 "trend": trend,
             }
+
+
+    def get_session_telemetry(self, session_id: str) -> dict | None:
+        with self._lock:
+            if session_id not in self._session_index:
+                return None
+            logs = list(self._session_index[session_id])
+            if not logs:
+                return None
+
+            intents: dict[str, int] = {}
+            phases: dict[str, int] = {}
+            models_used: dict[str, int] = {}
+            total_input = 0
+            total_output = 0
+            total_cost = 0.0
+            errors = 0
+            fallbacks = 0
+
+            for log in logs:
+                intents[log.intent] = intents.get(log.intent, 0) + 1
+                phases[log.phase] = phases.get(log.phase, 0) + 1
+                model_key = log.model_used.split("/")[-1] if "/" in log.model_used else log.model_used
+                models_used[model_key] = models_used.get(model_key, 0) + 1
+                total_input += log.input_tokens
+                total_output += log.output_tokens
+                total_cost += log.cost_usd
+                if log.error:
+                    errors += 1
+                if log.is_fallback:
+                    fallbacks += 1
+
+            first_ts = logs[0].timestamp
+            last_ts = logs[-1].timestamp
+            duration_s = 0
+            try:
+                from datetime import datetime
+                t0 = datetime.fromisoformat(first_ts)
+                t1 = datetime.fromisoformat(last_ts)
+                duration_s = int((t1 - t0).total_seconds())
+            except Exception:
+                pass
+
+            return {
+                "session_id": session_id,
+                "first_request": first_ts,
+                "last_request": last_ts,
+                "duration_s": duration_s,
+                "request_count": len(logs),
+                "total_input_tokens": total_input,
+                "total_output_tokens": total_output,
+                "total_cost_usd": round(total_cost, 6),
+                "errors": errors,
+                "fallbacks": fallbacks,
+                "intents": intents,
+                "phases": phases,
+                "models_used": models_used,
+                "requests": [asdict(log) for log in logs],
+            }
+
+    def get_sessions_summary(self, limit: int = 20) -> list[dict]:
+        with self._lock:
+            sessions = []
+            for sid, logs_deque in self._session_index.items():
+                logs = list(logs_deque)
+                if not logs:
+                    continue
+                sessions.append({
+                    "session_id": sid,
+                    "request_count": len(logs),
+                    "first_request": logs[0].timestamp,
+                    "last_request": logs[-1].timestamp,
+                    "total_cost_usd": round(sum(log.cost_usd for log in logs), 6),
+                    "errors": sum(1 for log in logs if log.error),
+                })
+            sessions.sort(key=lambda s: s["last_request"], reverse=True)
+            return sessions[:limit]
+
+    def evict_old_sessions(self, max_age_s: int = 7200) -> int:
+        cutoff = time.time() - max_age_s
+        with self._lock:
+            stale = [sid for sid, last in self._session_last_seen.items() if last < cutoff]
+            for sid in stale:
+                self._session_index.pop(sid, None)
+                self._session_last_seen.pop(sid, None)
+            return len(stale)
 
 
 # Singleton

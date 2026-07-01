@@ -84,6 +84,11 @@ class _CompressionCache:
     # Plan mode state — persists across history truncation and proxy restarts.
     # Set True on first EnterPlanMode/PLAN-intent turn; cleared on ExitPlanMode.
     plan_mode_active: bool = False
+    # Origin of the current plan session: "cc" (CC /plan UI) or "proxy" (enforcement-initiated).
+    # Used by Signal 4 to prevent false-positive exits on proxy-initiated plans. See ADR-0010.
+    plan_mode_source: str | None = None
+    # Audit trail for plan mode activations/deactivations this session.
+    plan_mode_events: list[dict] = field(default_factory=list)
 
     # Quality feedback loop (Item 4) — proxy-internal session history.
     # Used by intent_enforcement.py to escalate enforcement when quality is consistently low.
@@ -144,6 +149,8 @@ def _save_session_cache_to_disk() -> None:
                 "citation_history": c.citation_history[-_MAX_CITATION_HISTORY:],
                 "deferred_tool_names": c.deferred_tool_names,
                 "plan_mode_active": c.plan_mode_active,
+                "plan_mode_source": c.plan_mode_source,
+                "plan_mode_events": c.plan_mode_events[-50:],  # cap at 50 events
                 "quality_scores": c.quality_scores,
                 "session_stub_count": c.session_stub_count,
                 "session_state": ss,
@@ -187,6 +194,8 @@ def _load_session_cache_from_disk() -> None:
                 citation_history=entry.get("citation_history", []),
                 deferred_tool_names=entry.get("deferred_tool_names", []),
                 plan_mode_active=entry.get("plan_mode_active", False),
+                plan_modee_source=entry.get("plan_mode_source"),
+                plan_mode_events=entry.get("plan_mode_events", []),
                 quality_scores=entry.get("quality_scores", []),
                 session_stub_count=entry.get("session_stub_count", 0),
                 session_state=entry.get("session_state"),
@@ -215,19 +224,79 @@ async def get_session_plan_mode(session_id: str) -> bool:
     return False
 
 
-async def set_session_plan_mode(session_id: str, active: bool) -> None:
-    """Persist plan_mode_active into the session cache for this session."""
+async def set_session_plan_mode(
+    session_id: str,
+    active: bool,
+    source: str | None = None,
+    signal: str = "?",
+) -> None:
+    """Persist plan_mode_active into the session cache for this session.
+
+    Args:
+        session_id: The session identifier.
+        active: True to activate plan mode, False to deactivate.
+        source: Origin of activation — "cc" (CC /plan UI) or "proxy" (enforcement).
+                Only used when active=True to set plan_mode_source.
+                When active=False, plan_mode_source is reset to None.
+        signal: Label identifying which signal triggered this change (for audit trail).
+    """
     async with _state_lock:
         entry = _session_cache.get(session_id)
         if entry is not None:
+            prev = entry.plan_mode_active
             entry.plan_mode_active = active
+            if active and source:
+                entry.plan_mode_source = source
+            elif not active:
+                entry.plan_mode_source = None
+            if prev != active:
+                action = "enter" if active else "exit"
+                entry.plan_mode_events.append({
+                    "turn": len(entry.plan_mode_events),  # event index (not message count)
+                    "action": action,
+                    "signal": signal,
+                })
         else:
             _session_cache[session_id] = _CompressionCache(
                 session_id=session_id,
                 timestamp=time.time(),
                 plan_mode_active=active,
+                plan_mode_source=source if active else None,
+                plan_mode_events=[{"turn": 0, "action": "enter" if active else "exit", "signal": signal}],
             )
         _save_session_cache_to_disk()
+
+
+async def get_session_plan_mode_source(session_id: str) -> str | None:
+    """Return the plan_mode_source ("cc", "proxy", or None) for a session."""
+    async with _state_lock:
+        entry = _session_cache.get(session_id)
+        if entry is not None and time.time() - entry.timestamp < _SESSION_TTL:
+            return entry.plan_mode_source
+    return None
+
+
+async def set_session_plan_mode_source(session_id: str, source: str | None) -> None:
+    """Update only plan_mode_source without changing plan_mode_active."""
+    async with _state_lock:
+        entry = _session_cache.get(session_id)
+        if entry is not None:
+            entry.plan_mode_source = source
+        else:
+            _session_cache[session_id] = _CompressionCache(
+                session_id=session_id,
+                timestamp=time.time(),
+                plan_mode_source=source,
+            )
+
+
+async def get_session_plan_mode_events(session_id: str) -> list[dict]:
+    """Return the plan_mode_events audit trail for a session."""
+    async with _state_lock:
+        entry = _session_cache.get(session_id)
+        if entry is not None and time.time() - entry.timestamp < _SESSION_TTL:
+            return list(entry.plan_mode_events)
+    return []
 
 
 async def get_session_quality_history(session_id: str) -> tuple[list[float], int]:
@@ -1060,6 +1129,10 @@ async def cleanup_expired_sessions() -> None:
                 _save_session_cache_to_disk()
         else:
             pass
+
+    evicted = metrics.evict_old_sessions()
+    if evicted:
+        print(f"[session] Evicted {evicted} stale telemetry sessions from metrics index")
 
 
 async def get_session_deferred_tools(session_id: str) -> list[str]:

@@ -65,7 +65,7 @@ def _compute_deferred_session_id(messages: list) -> str | None:
 
 
 
-def _exit_plan_already_called(messages: list, window: int = 60) -> bool:
+def _exit_plan_already_called(messages: list, window: int = 120) -> bool:
     """Return True if ExitPlanMode was already called in recent assistant history.
 
     Used to decide whether to strip plan-mode tools from the session cache.
@@ -73,8 +73,8 @@ def _exit_plan_already_called(messages: list, window: int = 60) -> bool:
     stay available even during READ/ANALYZING intermediate turns of a multi-turn
     plan session (where the model explores files before writing the final plan).
 
-    Window=60 matches _plan_mode_active() in intent_classifier.py.
-    Plan sessions with many file reads easily exceed 20 messages; 60 gives
+    Window=120 matches _plan_mode_active() in intent_classifier.py.
+    Plan sessions with many file reads easily exceed 20 messages; 120 gives
     sufficient coverage for typical planning sessions.
     """
     count = 0
@@ -252,6 +252,10 @@ _PLAN_ONLY_TOOLS: frozenset[str] = frozenset({"EnterPlanMode", "ExitPlanMode"})
 _PLAN_DEFAULT_TOOLS: frozenset[str] = frozenset({"AskUserQuestion", "TodoWrite"})
 
 
+def _tool_name(t) -> str | None:
+    return t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
+
+
 class DeferredToolsTransformer(Transformer):
     """Inject <available-deferred-tools> from system prompt into request.tools.
 
@@ -305,20 +309,21 @@ class DeferredToolsTransformer(Transformer):
                     )
 
         # ── Step 4: PLAN phase guarantee ──────────────────────────────────────
-        # Always ensure plan-mode tools are available when plan mode is active,
-        # even if session cache is empty (brand-new session, first turn).
+        # Ensure plan-mode tools are available when plan mode is genuinely active.
         # _PLAN_DEFAULT_TOOLS (AskUserQuestion, TodoWrite) are also guaranteed
         # because some CC project configs never include them in
         # <available-deferred-tools> (RC-8).
         #
         # ctx.plan_mode_active is the single authoritative signal, set by
-        # IntentClassifierTransformer (which runs before this transformer).
-        # It uses Signals 0-3 (history scan + CC system prompt + intent + session
-        # cache) for unlimited coverage across sessions of any length.
-        # ctx.phase == "PLAN" is kept as a belt-and-suspenders fallback for the
-        # very first turn before the classifier has run.
-        _phase_is_plan = ctx.phase == "PLAN"
-        if _phase_is_plan or ctx.plan_mode_active:
+        # IntentClassifierTransformer (which always runs before this transformer
+        # in build_request_pipeline). Signals 0-3 give unlimited coverage across
+        # sessions of any length.
+        #
+        # NOTE: do NOT use ctx.phase == "PLAN" as a fallback here. SYNTHESIZING
+        # intent maps to phase=PLAN and would inject EnterPlanMode during BUILD
+        # sessions (after 6+ consecutive reads), causing plan mode re-entry when
+        # plan_mode_active=False. ADR-0011.
+        if ctx.plan_mode_active:
             deferred_set = set(deferred)
             extras = [
                 n for n in (*_PLAN_ONLY_TOOLS, *_PLAN_DEFAULT_TOOLS)
@@ -328,14 +333,29 @@ class DeferredToolsTransformer(Transformer):
                 deferred = list(deferred) + extras
                 _source = _source or "plan_guarantee"
                 logger.debug(
-                    "[deferred-tools] plan_guarantee: added %s", extras
+                    "[deferred-tools] plan_guarantee (plan_mode_active): added %s", extras
+                )
+
+        # ── Final gate: strip plan-mode controls from request.tools ──────────
+        # CC sends EnterPlanMode/ExitPlanMode in request.tools for some project
+        # configurations, regardless of what DeferredTools injects (Steps 1-4).
+        # Strip them unconditionally when not in plan mode so Kimi can't call them.
+        # Gate: keep when plan_mode_active=True (need ExitPlanMode) or intent=PLAN
+        # (entering plan mode). Strip for BUILD/READ/CHAT/VERIFY/SYNTHESIZING. ADR-0012.
+        _gate_active = not ctx.plan_mode_active and ctx.intent not in ("PLAN",)
+        if _gate_active and request.tools:
+            _before = list(request.tools)
+            request.tools = [t for t in _before if _tool_name(t) not in _PLAN_ONLY_TOOLS]
+            _stripped = [_tool_name(t) for t in _before if _tool_name(t) in _PLAN_ONLY_TOOLS]
+            if _stripped:
+                logger.info(
+                    "[deferred-tools] final-gate: stripped %d plan-only tool(s) "
+                    "(intent=%s): %s",
+                    len(_stripped), ctx.intent, ", ".join(n for n in _stripped if n),
                 )
 
         if not deferred:
             return
-
-        def _tool_name(t):
-            return t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
 
         existing_names: set[str] = {
             n for t in (request.tools or []) if (n := _tool_name(t))
