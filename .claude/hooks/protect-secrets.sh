@@ -17,9 +17,10 @@ FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 
 # 1. Proteger archivos trackeados por git (no gitignored)
 #    git check-ignore -q retorna 0 si el archivo ES ignorado, 1 si NO lo es
-FILE_DIR=$(dirname "$FILE_PATH")
-FILE_BASE=$(basename "$FILE_PATH")
-if ! git -C "$FILE_DIR" check-ignore -q "$FILE_BASE" 2>/dev/null; then
+#    Usa REPO_ROOT + ruta relativa para evitar fallos con rutas absolutas
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
+REL_PATH="${FILE_PATH#$REPO_ROOT/}"
+if ! git -C "$REPO_ROOT" check-ignore -q "$REL_PATH" 2>/dev/null; then
   # El archivo NO está gitignored → verificar si el contenido tiene secrets
   CONTENT=$(echo "$INPUT" | jq -r '.tool_input.content // .tool_input.new_string // empty')
   # Matches literal secrets: alphanumeric/symbol values 20+ chars, NOT variable refs ($VAR, "${VAR}")

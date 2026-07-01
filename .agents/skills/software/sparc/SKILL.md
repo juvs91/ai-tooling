@@ -103,7 +103,7 @@ Implement, test, and close.
 
 ---
 
-## Integration with Cornerstone Workflow
+## Integration with ai-tooling Workflow
 
 ```
 User Request
@@ -122,6 +122,6 @@ User Request
 ## Best Practices
 1. Never skip Specification — vague requirements cause wasted implementation.
 2. Never start Architecture before Pseudocode — missing the algorithm wastes design effort.
-3. ADR-first is non-negotiable for Phase 3 (Cornerstone universal rule).
+3. ADR-first is non-negotiable for Phase 3 (ai-tooling universal rule).
 4. Use memory-first at the start of each phase: `retrieve_memory` for prior patterns.
 5. Store successful SPARC patterns: `store_memory(namespace="sparc-patterns")`.

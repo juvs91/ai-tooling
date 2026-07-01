@@ -1,14 +1,39 @@
 #!/bin/bash
-# block-dangerous.sh — PreToolUse hook para Bash
+# block-dangerous.sh — PreToolUse hook (cualquier tool, incluyendo Bash)
 # Exit 0 = permitir, Exit 2 = bloquear (stderr = razón)
 #
-# Claude Code pasa JSON por stdin con la estructura:
-#   { "tool_name": "Bash", "tool_input": { "command": "..." } }
+# Claude Code pasa JSON por stdin:
+#   { "tool_name": "...", "tool_input": { ... } }
 
 INPUT=$(cat)
+TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+TOOL_INPUT=$(echo "$INPUT" | jq -c '.tool_input // {}')
 
-# Si no hay comando (tool_input vacío), permitir
+# ── Sección 1: Parámetros destructivos en cualquier tool ─────────────────
+# Bloquea cualquier herramienta que tenga parámetros con valor true
+# que indiquen operación destructiva irreversible.
+# Extensible: agrega entradas al array DANGEROUS_PARAMS sin tocar el resto.
+# jq -r (raw): evita comillas JSON en output; sin -r, join(", ") retorna
+# '"discard_changes"' (con comillas) y [ -n ] siempre sería true.
+DANGEROUS_PARAMS='["discard_changes","force_delete","wipe_data","purge","drop_all"]'
+
+blocked=$(echo "$TOOL_INPUT" | jq -r --argjson params "$DANGEROUS_PARAMS" '
+  to_entries
+  | map(select(
+      (.key as $k | $params | index($k) != null)
+      and .value == true
+    ))
+  | map(.key)
+  | join(", ")
+')
+
+if [ -n "$blocked" ]; then
+  echo "BLOCKED: '$TOOL' con parámetros destructivos ($blocked=true) — confirmar manualmente si requerido" >&2
+  exit 2
+fi
+
+# Si no hay comando Bash, ya no hay más reglas que aplicar
 [ -z "$COMMAND" ] && exit 0
 
 # ── Reglas de bloqueo ──────────────────────────────────────────────

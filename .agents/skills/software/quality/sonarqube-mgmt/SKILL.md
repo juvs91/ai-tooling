@@ -1,6 +1,6 @@
 ---
 name: sonarqube-mgmt
-description: Manage SonarQube issues, review vulnerabilities, and automate code quality improvements. Use this when the user asks to review, fix, or monitor SonarQube metrics for a project like Cornerstone.
+description: Manage SonarQube issues, review vulnerabilities, and automate code quality improvements. Use this when the user asks to review, fix, or monitor SonarQube metrics for a project like ai-tooling.
 ---
 
 # SonarQube Management Skill
@@ -10,10 +10,10 @@ This skill allows you to interact with the SonarQube Web API to fetch, review, a
 ## Core Workflows
 
 ### 1. Reviewing Project Issues
-To get a summary of open issues for a project (e.g., `DAGENTIC-CornerStone`):
+To get a summary of open issues for a project (e.g., `DAGENTIC-ai-tooling`):
 
 ```bash
-python scripts/sonarqube_client.py search --project DAGENTIC-CornerStone
+python scripts/sonarqube_client.py search --project DAGENTIC-ai-tooling
 ```
 
 ### 2. Fixing Specific File Issues
@@ -21,7 +21,7 @@ If you need to fix issues in a specific file:
 
 1.  **Fetch issues** for that file:
     ```bash
-    python scripts/sonarqube_client.py search --component DAGENTIC-CornerStone:path/to/file.py
+    python scripts/sonarqube_client.py search --component DAGENTIC-ai-tooling:path/to/file.py
     ```
 2.  **Read the file** content.
 3.  **Consult** [references/fix_patterns.md](references/fix_patterns.md) for recommended fix patterns.

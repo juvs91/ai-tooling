@@ -9,7 +9,7 @@
   ],
   "agents_repo": "git@github.com:juvs91/ai-tooling.git",
   "agents_ref": "main",
-  "cornerstone_version": "0.8.3",
+  "ai_tool_version": "0.8.3",
   "generated_at": "2026-04-09T00:00:00Z",
   "project": {
     "name": "ai-tooling",

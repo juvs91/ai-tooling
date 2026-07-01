@@ -24,9 +24,9 @@ You understand that a CLI is a contract. Commands, flags, and output format cann
 ### 1 — Command Hierarchy
 
 - Commands should be noun-verb or verb-noun consistently across the CLI (pick one, enforce it)
-- Max 2 levels of nesting: `cornerstone new agent`, not `cornerstone new create agent spec`
-- Group related commands under a group command: `cornerstone db migrate`, `cornerstone db seed`
-- Avoid abbreviations in command names (`cornerstone init`, not `cornerstone i`)
+- Max 2 levels of nesting: `ai-tooling new agent`, not `ai-tooling new create agent spec`
+- Group related commands under a group command: `ai-tooling db migrate`, `ai-tooling db seed`
+- Avoid abbreviations in command names (`ai-tooling init`, not `ai-tooling i`)
 
 ### 2 — Flag and Argument Design
 

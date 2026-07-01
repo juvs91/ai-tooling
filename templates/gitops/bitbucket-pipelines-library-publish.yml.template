@@ -1,0 +1,227 @@
+# bitbucket-pipelines.yml — Template GitOps Monorepo Publicación de Librerías
+# Ref: ADR-0007-gitops-monorepo-trunk-based.md
+#
+# CASO DE USO: Monorepo con librerías (Python / TypeScript / Go) publicadas
+# a GCP Artifact Registry via Workload Identity Federation (OIDC).
+#
+# VARIABLES DE REPOSITORIO (Settings → Repository variables):
+#   WIF_PROVIDER  — projects/PROJECT_NUM/locations/global/workloadIdentityPools/POOL/providers/PROVIDER
+#   GCP_DEPLOY_SA — sa-name@gcp-project.iam.gserviceaccount.com
+#   GCP_PROJECT   — gcp-project-id
+#
+# CONVENCIÓN DE TAGS:
+#   python/v1.2.3     → publica python/<nombre> con versión 1.2.3
+#   typescript/v1.2.3 → publica typescript/<nombre> con versión 1.2.3
+#   go/v1.2.3         → publica go/<nombre> con versión 1.2.3
+#
+# VERSIONADO DEV (branches dev/main):
+#   Versión base del pyproject.toml/package.json/VERSION + .dev.<BUILD_NUMBER>
+#
+# REQUISITOS:
+#   - OIDC habilitado en cada step que publique (oidc: true)
+#   - Makefile con targets: setup, lint, test, publish en cada paquete
+#   - Para Go: archivo VERSION en go/<nombre>/
+#   - Registries configurados en GCP Artifact Registry (PyPI, npm, Go module proxy)
+
+definitions:
+  scripts:
+    # Autenticación WIF con GCP — reutilizable en todos los steps de publicación
+    - &gcp-auth |
+      echo "${BITBUCKET_STEP_OIDC_TOKEN}" > /tmp/bb_oidc_token
+      gcloud iam workload-identity-pools create-cred-config "$WIF_PROVIDER" \
+        --service-account="$GCP_DEPLOY_SA" \
+        --credential-source-file=/tmp/bb_oidc_token \
+        --credential-source-type=text \
+        --output-file=/tmp/wif_cred.json
+      gcloud auth login --cred-file=/tmp/wif_cred.json --quiet
+
+    - &install-make "apt-get update --quiet && apt-get install -y make --quiet"
+
+    - &go-publish-setup |
+        apk add --no-cache go make
+        gcloud components install package-go-module --quiet
+        cd go/auth
+        go mod download
+
+  steps:
+    # ── python/<nombre> ───────────────────────────────────────────────────────
+    - step: &python-test
+        name: Test python/auth
+        image: python:3.11-slim
+        caches: [pip]
+        condition:
+          changesets:
+            includePaths: ["python/auth/**", "bitbucket-pipelines.yml"]
+        script:
+          - *install-make
+          - cd python/auth
+          - make setup
+          - make lint
+          - make test
+
+    - step: &python-publish-dev
+        name: Publish python/auth (dev)
+        image: google/cloud-sdk:slim
+        oidc: true
+        condition:
+          changesets:
+            includePaths: ["python/auth/**"]
+        script:
+          - *gcp-auth
+          - apt-get install -y make python3 python3-pip --quiet
+          - cd python/auth
+          - make setup
+          - CURRENT_VERSION=$(grep -m 1 "^version" pyproject.toml | cut -d'"' -f2)
+          - sed -i "s/version = \"$CURRENT_VERSION\"/version = \"$CURRENT_VERSION.dev$BITBUCKET_BUILD_NUMBER\"/" pyproject.toml
+          - make publish
+
+    - step: &python-publish-tag
+        name: Publish python/auth
+        image: google/cloud-sdk:slim
+        oidc: true
+        script:
+          - *gcp-auth
+          - apt-get install -y make python3 python3-pip --quiet
+          - cd python/auth
+          - make setup
+          - VERSION="${BITBUCKET_TAG#python/v}"
+          - sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+          - make publish
+
+    # ── typescript/<nombre> ───────────────────────────────────────────────────
+    - step: &typescript-test
+        name: Test typescript/auth
+        image: node:20-slim
+        condition:
+          changesets:
+            includePaths: ["typescript/auth/**", "bitbucket-pipelines.yml"]
+        script:
+          - *install-make
+          - cd typescript/auth
+          - make setup
+          - make lint
+          - make test
+
+    - step: &typescript-publish-dev
+        name: Publish typescript/auth (dev)
+        image: google/cloud-sdk:slim
+        oidc: true
+        condition:
+          changesets:
+            includePaths: ["typescript/auth/**"]
+        script:
+          - *gcp-auth
+          - curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y make nodejs --quiet
+          - TOKEN=$(gcloud auth print-access-token)
+          - npm config set @deacero:registry https://us-central1-npm.pkg.dev/$GCP_PROJECT/dea-comm-npm/
+          - npm config set "//us-central1-npm.pkg.dev/$GCP_PROJECT/dea-comm-npm/:_authToken" "$TOKEN"
+          - cd typescript/auth
+          - make setup
+          - CURRENT_VERSION=$(node -p "require('./package.json').version")
+          - npm version "${CURRENT_VERSION}-dev.${BITBUCKET_BUILD_NUMBER}" --no-git-tag-version
+          - make publish
+
+    - step: &typescript-publish-tag
+        name: Publish typescript/auth
+        image: google/cloud-sdk:slim
+        oidc: true
+        script:
+          - *gcp-auth
+          - curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y make nodejs --quiet
+          - TOKEN=$(gcloud auth print-access-token)
+          - npm config set @deacero:registry https://us-central1-npm.pkg.dev/$GCP_PROJECT/dea-comm-npm/
+          - npm config set "//us-central1-npm.pkg.dev/$GCP_PROJECT/dea-comm-npm/:_authToken" "$TOKEN"
+          - cd typescript/auth
+          - make setup
+          - VERSION="${BITBUCKET_TAG#typescript/v}"
+          - npm version "$VERSION" --no-git-tag-version
+          - make publish
+
+    # ── go/<nombre> ───────────────────────────────────────────────────────────
+    - step: &go-test
+        name: Test go/auth
+        image: golang:1.22
+        condition:
+          changesets:
+            includePaths: ["go/auth/**", "bitbucket-pipelines.yml"]
+        script:
+          - *install-make
+          - cd go/auth
+          - make setup
+          - make lint
+          - make test
+
+    - step: &go-publish-dev
+        name: Publish go/auth (dev)
+        image: gcr.io/google.com/cloudsdktool/google-cloud-cli:alpine
+        oidc: true
+        condition:
+          changesets:
+            includePaths: ["go/auth/**"]
+        script:
+          - *gcp-auth
+          - *go-publish-setup
+          - VERSION="v$(cat VERSION)-dev.${BITBUCKET_BUILD_NUMBER}" make publish
+
+    - step: &go-publish-tag
+        name: Publish go/auth
+        image: gcr.io/google.com/cloudsdktool/google-cloud-cli:alpine
+        oidc: true
+        script:
+          - *gcp-auth
+          - *go-publish-setup
+          - VERSION="${BITBUCKET_TAG#go/}" make publish
+
+pipelines:
+  custom:
+    # Ejecutar todos los tests manualmente (sin publicar)
+    test-all:
+      - step: *python-test
+      - step: *typescript-test
+      - step: *go-test
+
+    # Publicar dev de todos los paquetes ignorando changesets
+    publish-all-dev:
+      - step:
+          <<: *python-publish-dev
+          condition: ~
+      - step:
+          <<: *typescript-publish-dev
+          condition: ~
+      - step:
+          <<: *go-publish-dev
+          condition: ~
+
+  # Tags por paquete → publica la versión correspondiente
+  tags:
+    'python/v*':
+      - step: *python-publish-tag
+    'typescript/v*':
+      - step: *typescript-publish-tag
+    'go/v*':
+      - step: *go-publish-tag
+
+  # PRs → solo tests, sin publicar
+  pull-requests:
+    "**":
+      - step: *python-test
+      - step: *typescript-test
+      - step: *go-test
+
+  # Branches dev y main → tests + publicación dev (con changesets para eficiencia)
+  branches:
+    dev:
+      - step: *python-test
+      - step: *typescript-test
+      - step: *go-test
+      - step: *python-publish-dev
+      - step: *typescript-publish-dev
+      - step: *go-publish-dev
+
+    main:
+      - step: *python-test
+      - step: *typescript-test
+      - step: *go-test
+      - step: *python-publish-dev
+      - step: *typescript-publish-dev
+      - step: *go-publish-dev

@@ -96,6 +96,30 @@ fi
 AGENTS_REPO="${AGENTS_REPO:-$AGENTS_REPO_DEFAULT}"
 AGENTS_REF="${AGENTS_REF:-$AGENTS_REF_DEFAULT}"
 
+# ── Local path override (local first, remote fallback) ────────────────────────
+# Si .ai-tooling define local_path y ese directorio existe con .agents/skills/
+# → copia directamente sin git clone (fast-path). Si no existe → remote fallback.
+_LOCAL_SKILLS_SRC=""
+if [[ -f "$MARKER" ]] && command -v jq &>/dev/null; then
+  _LP_RAW=$(jq -r '.local_path // empty' "$MARKER" 2>/dev/null | sed "s|^~|$HOME|")
+  if [[ -n "$_LP_RAW" ]]; then
+    if [[ -d "$_LP_RAW/.agents/skills" ]]; then
+      echo "[sync] local_path found: $_LP_RAW — will copy directly (no git clone)" >&2
+      _LOCAL_SKILLS_SRC="$_LP_RAW/.agents/skills"
+    else
+      echo "[sync] local_path not found ($_LP_RAW) — falling back to remote: $AGENTS_REPO@$AGENTS_REF" >&2
+    fi
+  fi
+fi
+
+# Leer agents_categories aquí (antes del fast-path que las necesita)
+AGENTS_CATEGORIES=()
+if [[ -f "$MARKER" ]] && command -v jq &>/dev/null; then
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && AGENTS_CATEGORIES+=("$line")
+  done < <(jq -r '.agents_categories[]? // empty' "$MARKER")
+fi
+
 # Si no hay capabilities, usar "common" como mínimo
 if [[ ${#CAPABILITIES[@]} -eq 0 ]]; then
   CAPABILITIES=("common")
@@ -135,6 +159,39 @@ if [[ -d "$CACHE_DIR/.git" ]]; then
     echo "[sync] Actualizando remote: $current_remote → $AGENTS_REPO" >&2
     git -C "$CACHE_DIR" remote set-url origin "$AGENTS_REPO" 2>/dev/null || true
   fi
+fi
+
+# ── Fast-path: local_path directo (sin git clone) ────────────────────────────
+# Cuando local_path está disponible: copia directa, respeta agents_categories,
+# escribe timestamp y termina — nunca entra al bloque de git clone/remote.
+if [[ -n "$_LOCAL_SKILLS_SRC" ]]; then
+  echo "[sync] repo (local): $_LOCAL_SKILLS_SRC" >&2
+  echo "[sync] capabilities filter: ${AGENTS_CATEGORIES[*]:-<all>}" >&2
+  mkdir -p "$SKILLS_DIR"
+  _copy_local_skill() {
+    local src_base="$1" skill_src_dir rel dest
+    while IFS= read -r -d '' skill_md; do
+      skill_src_dir=$(dirname "$skill_md")
+      rel="${skill_src_dir#$_LOCAL_SKILLS_SRC/}"  # relativo a raíz de skills, no a la categoría
+      dest="$SKILLS_DIR/$rel"
+      mkdir -p "$dest"
+      cp -r "$skill_src_dir/." "$dest/"
+      COUNT=$(( COUNT + 1 ))
+    done < <(find "$src_base" -name "SKILL.md" -print0 2>/dev/null)
+  }
+  COUNT=0
+  if [[ ${#AGENTS_CATEGORIES[@]} -eq 0 ]]; then
+    _copy_local_skill "$_LOCAL_SKILLS_SRC"
+  else
+    for _cat in "${AGENTS_CATEGORIES[@]}"; do
+      [[ -d "$_LOCAL_SKILLS_SRC/$_cat" ]] && _copy_local_skill "$_LOCAL_SKILLS_SRC/$_cat"
+    done
+  fi
+  echo "[sync] Copied $COUNT skill(s) from local path" >&2
+  mkdir -p "$(dirname "$LAST_SYNC")"
+  date -u +"%Y-%m-%dT%H:%M:%SZ" > "$LAST_SYNC"
+  echo "[sync] Done. Skills up to date." >&2
+  exit 0
 fi
 
 # ── Clone o fetch ──────────────────────────────────────────────────────────────
@@ -271,14 +328,6 @@ if $HAS_LAYERED_STRUCTURE; then
 elif $HAS_FLAT_STRUCTURE; then
   # ── Copia flat con resolución de conflictos via soul.md ───────────────────
   FLAT_SRC="$CACHE_DIR/.agents/skills"
-
-  # Leer categorías opcionales desde .ai-tooling (campo agents_categories)
-  AGENTS_CATEGORIES=()
-  if [[ -f "$MARKER" ]] && command -v jq &>/dev/null; then
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && AGENTS_CATEGORIES+=("$line")
-    done < <(jq -r '.agents_categories[]? // empty' "$MARKER")
-  fi
 
   COUNT=0
   _copy_flat() {

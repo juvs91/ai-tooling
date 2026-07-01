@@ -28,7 +28,7 @@
     {
       "id": 2,
       "prompt": "Generate a cost report for the last 30 days grouped by model.",
-      "expected_output": "Agent invokes `cornerstone report cost --group-by model` or calls GET /v1/summary. Does NOT attempt to read local files for cost data.",
+      "expected_output": "Agent invokes `ai-tooling report cost --group-by model` or calls GET /v1/summary. Does NOT attempt to read local files for cost data.",
       "assertions": [
         {
           "text": "Agent uses CLI or HTTP API, not local file reads",

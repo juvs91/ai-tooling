@@ -119,6 +119,17 @@
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/block-dangerous.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Block destructive params in any tool call (discard_changes, force_delete, etc.)"
+      },
+      {
         "matcher": "Bash",
         "hooks": [
           {

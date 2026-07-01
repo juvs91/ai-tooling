@@ -46,7 +46,7 @@ if not is_telemetry_enabled():
 | A tool in `tools/` is executed | `tool.executed` | `@tool_span` decorator or explicit call |
 | A new ADR, skill, domain doc, or tool is created | `knowledge.created` | `track_knowledge_created()` |
 | An existing skill, ADR, or domain doc is read/used | `knowledge.used` | `track_knowledge_used()` |
-| User asks for cost/usage report | — | Use `cornerstone report` CLI or `GET /v1/summary` |
+| User asks for cost/usage report | — | Use `ai-tooling report` CLI or `GET /v1/summary` |
 
 ## Emitting Events
 
@@ -100,13 +100,13 @@ track_knowledge_used(kind="skill", path=".agents/skills/software/discovery/softw
 
 ```bash
 # Summary (last 30 days)
-cornerstone report summary --url $AGENTIC_TELEMETRY_URL
+ai-tooling report summary --url $AGENTIC_TELEMETRY_URL
 
 # Cost by model
-cornerstone report cost --url $AGENTIC_TELEMETRY_URL --group-by model
+ai-tooling report cost --url $AGENTIC_TELEMETRY_URL --group-by model
 
 # Recent events
-cornerstone report events --url $AGENTIC_TELEMETRY_URL --event-type skill.invoked --limit 20
+ai-tooling report events --url $AGENTIC_TELEMETRY_URL --event-type skill.invoked --limit 20
 ```
 
 Or directly via HTTP:
@@ -133,7 +133,7 @@ provider = get_provider("gemini-2.0-flash")
 
 ## Collaboration & Learning Mandate
 
-You are part of a unified, evolving agent team operating inside the Cornerstone
+You are part of a unified, evolving agent team operating inside the ai-tooling
 repository. You **MUST** follow these principles in every session:
 
 1. **Share the Knowledge:** When you learn a domain quirk, solve a recurring

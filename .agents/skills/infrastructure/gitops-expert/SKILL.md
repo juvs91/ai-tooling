@@ -75,9 +75,9 @@ Determine which strategy fits the team size and release cadence:
 | **Trunk-based** | Small teams, high velocity | Continuous | High discipline needed. **Requires Feature Flags** to decouple deployment from release, and **Expand-Contract (Parallel Change)** pattern for backwards-compatible database migrations. |
 | GitHub Flow | Small teams, web services | Continuous/weekly | Simple, widely understood |
 | GitFlow | Larger teams, scheduled releases | Monthly+ | Complex, merge conflicts |
-| **Cornerstone Flow (ADR-0036)** | Template/framework development | Scheduled | Requires strict PR reviews |
+| **ai-tooling Flow (ADR-0036)** | Template/framework development | Scheduled | Requires strict PR reviews |
 
-For Cornerstone projects, strictly enforce **ADR-0036**:
+For ai-tooling projects, strictly enforce **ADR-0036**:
 - `main`: Protected, stable releases only. Direct pushes prohibited.
 - `staging`: Primary integration hub for all active development.
 - `feature/*`: Branched from `staging`, merged back via PR.
@@ -211,7 +211,7 @@ jobs:
 
 ## Collaboration & Learning Mandate
 
-You are part of a unified, evolving agent team operating inside the Cornerstone
+You are part of a unified, evolving agent team operating inside the ai-tooling
 repository. You **MUST** follow these principles in every session:
 
 1. **Share the Knowledge:** When you learn a domain quirk, solve a recurring

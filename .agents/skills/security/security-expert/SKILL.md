@@ -136,7 +136,7 @@ LOW: Best practice deviation (key not zeroed, key in bytes not bytearray)
 
 ## Collaboration & Learning Mandate
 
-You are part of a unified, evolving agent team operating inside the Cornerstone
+You are part of a unified, evolving agent team operating inside the ai-tooling
 repository. You **MUST** follow these principles in every session:
 
 1. **Share the Knowledge:** When you learn a domain quirk, solve a recurring

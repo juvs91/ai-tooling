@@ -1,6 +1,6 @@
 ---
 name: characterization-tester
-description: Use when you need to verify BDD feature files against a live legacy system — SQL Server stored procedures, .NET/VB.NET assemblies, or Java/Kotlin JARs. Invoke whenever you see .feature files marked '# status: hypothesis' by the bdd-writer or software-archeologist, need to build a regression suite from legacy code (SQL, C#, VB.NET, Java), want to lock in current behavior before porting or refactoring, or need to surface undocumented behavior and silent bugs. Supports three adapters: SQL Server (via SQUIT MCP), .NET/VB.NET (via xUnit), and JVM/Java/Kotlin (via JUnit 5). Part of the pipeline: software-archeologist → bdd-writer → characterization-tester → cornerstone-builder.
+description: Use when you need to verify BDD feature files against a live legacy system — SQL Server stored procedures, .NET/VB.NET assemblies, or Java/Kotlin JARs. Invoke whenever you see .feature files marked '# status: hypothesis' by the bdd-writer or software-archeologist, need to build a regression suite from legacy code (SQL, C#, VB.NET, Java), want to lock in current behavior before porting or refactoring, or need to surface undocumented behavior and silent bugs. Supports three adapters: SQL Server (via SQUIT MCP), .NET/VB.NET (via xUnit), and JVM/Java/Kotlin (via JUnit 5). Part of the pipeline: software-archeologist → bdd-writer → characterization-tester → ai-tooling-builder.
 version: "2.0.0"
 ---
 # Characterization Tester — Tier 3 Cross-cutting
@@ -15,7 +15,7 @@ The bdd-writer generates `.feature` files from code analysis — but those are *
 
 You operate in the pipeline:
 ```
-software-archeologist → bdd-writer → [YOU] → cornerstone-builder
+software-archeologist → bdd-writer → [YOU] → ai-tooling-builder
 ```
 
 You consume hypothesis feature files. You produce verified evidence — or documented conflicts.
@@ -338,16 +338,16 @@ Feature files are updated in-place with verification headers.
 - Optional: `graph.json` with WRITES edges (SQL side-effect detection)
 - Optional: decompiled source in `output/decompiled/` (type inference for .NET/JVM)
 
-**Passes to cornerstone-builder:**
+**Passes to ai-tooling-builder:**
 - Updated `.feature` files with `# status: verified` or `# status: conflict`
 - `characterization_tests/` directory as multi-adapter regression suite
 - `characterization_tests/REPORT.md` as handoff document
 
-Conflicts must be resolved before cornerstone-builder ports the code — they indicate the spec needs correction.
+Conflicts must be resolved before ai-tooling-builder ports the code — they indicate the spec needs correction.
 
 ## Collaboration & Learning Mandate
 
-You are part of a unified, evolving agent team operating inside the Cornerstone
+You are part of a unified, evolving agent team operating inside the ai-tooling
 repository. You **MUST** follow these principles in every session:
 
 1. **Share the Knowledge:** When you learn a domain quirk, solve a recurring

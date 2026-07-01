@@ -15,7 +15,7 @@ source: "Adapted from ruvnet/ruflo — ADR-0038"
 
 When multiple sub-agents work in parallel, they can drift — producing contradictory designs,
 duplicate code, or conflicting decisions. This skill defines the **coordination contract** that
-prevents drift in Cornerstone swarms.
+prevents drift in ai-tooling swarms.
 
 ## When to Trigger
 - 2+ agents working on the same codebase simultaneously
@@ -48,7 +48,7 @@ Orchestrator (Queen)
 
 ### 2. Consensus — Raft-Style (Leader + Quorum)
 
-Cornerstone uses an informal raft contract:
+ai-tooling uses an informal raft contract:
 
 | Role | Responsibility |
 |------|---------------|
@@ -110,7 +110,7 @@ Never wait for one agent to finish before spawning another if they are independe
 
 ---
 
-## Integration with Cornerstone Orchestrator
+## Integration with ai-tooling Orchestrator
 
 The `core/orchestrator` skill already implements the memory-first pattern. This skill adds the
 **anti-drift contract** on top:
@@ -126,6 +126,6 @@ Orchestrator.start()
 ```
 
 ## References
-- Cornerstone Orchestrator: `.agents/skills/core/orchestrator/SKILL.md`
+- ai-tooling Orchestrator: `.agents/skills/core/orchestrator/SKILL.md`
 - ADR-0038: Ruflo-Inspired Agentic Infrastructure Integration
 - ADR-0019: Swarm E2E Evaluations
