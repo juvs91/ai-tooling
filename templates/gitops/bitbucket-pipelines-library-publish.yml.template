@@ -208,20 +208,19 @@ pipelines:
       - step: *typescript-test
       - step: *go-test
 
-  # Branches dev y main → tests + publicación dev (con changesets para eficiencia)
+  # Branches dev y main
   branches:
+    # dev → test + publish por stack (interleaved: cada lib es independiente)
     dev:
       - step: *python-test
-      - step: *typescript-test
-      - step: *go-test
       - step: *python-publish-dev
+      - step: *typescript-test
       - step: *typescript-publish-dev
+      - step: *go-test
       - step: *go-publish-dev
 
+    # main → solo quality gate; librerías se publican únicamente via tag explícito
     main:
       - step: *python-test
       - step: *typescript-test
       - step: *go-test
-      - step: *python-publish-dev
-      - step: *typescript-publish-dev
-      - step: *go-publish-dev

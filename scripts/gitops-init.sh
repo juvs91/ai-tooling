@@ -348,7 +348,7 @@ PYTHON
         name: prettier
         entry: npx prettier --write
         language: system
-        types_or: [javascript, jsx, ts, tsx, json, yaml, markdown]
+        types_or: [javascript, jsx, ts, tsx, json, markdown]
 NODE
     fi
 
@@ -367,9 +367,10 @@ NODE
 
       - id: golangci-lint
         name: golangci-lint
-        entry: golangci-lint run --fix
+        entry: bash -c 'find . -name go.mod -not -path "./.git/*" -exec dirname {} \; | xargs -I{} sh -c "cd \"{}\" && golangci-lint run --fix"'
         language: system
-        types: [go]
+        pass_filenames: false
+        files: '\.go$'
 GOLANG
     fi
 

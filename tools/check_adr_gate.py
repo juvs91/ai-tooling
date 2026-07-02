@@ -14,6 +14,7 @@ Uso (CI / pre-commit):
       --new-files     "docs/adr/ADR-0002-new-decision.md" \\
       --commit-message "feat: add transformer"
 """
+
 from __future__ import annotations
 
 import argparse
@@ -47,6 +48,7 @@ BYPASS_LOG = ".adr-gate-bypasses.log"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _normalise(path: str) -> str:
     """Forward-slash, sin ./ ni / al inicio. Rechaza traversal."""
@@ -98,6 +100,7 @@ def _record_bypass(reason: str, guarded: list[str], msg: str) -> None:
 # Core gate logic
 # ---------------------------------------------------------------------------
 
+
 def run_gate(
     changed_files: list[str],
     new_files: list[str],
@@ -142,7 +145,8 @@ def run_gate(
         return 0
 
     changed_list = "\n".join(f"  - {f}" for f in guarded_changed)
-    print(f"""
+    print(
+        f"""
 ADR-GATE FALLÓ: se modificaron rutas guardadas sin un nuevo ADR.
 
 Archivos modificados:
@@ -156,13 +160,15 @@ Pasos requeridos:
   5. Haz commit del ADR junto con el código
 
 Arreglo trivial: agrega [skip-adr] al commit message.
-""".strip())
+""".strip()
+    )
     return 1
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -184,12 +190,14 @@ def main() -> None:
 
     new_files = _split_file_list(args.new_files) if args.new_files.strip() else []
 
-    sys.exit(run_gate(
-        changed_files=changed_files,
-        new_files=new_files,
-        commit_message=args.commit_message,
-        skip_flag=args.skip_adr,
-    ))
+    sys.exit(
+        run_gate(
+            changed_files=changed_files,
+            new_files=new_files,
+            commit_message=args.commit_message,
+            skip_flag=args.skip_adr,
+        )
+    )
 
 
 if __name__ == "__main__":
