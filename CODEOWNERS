@@ -5,22 +5,22 @@
 # Ref: ADR-0007-gitops-monorepo-trunk-based.md
 
 # Proxy y runtime — equipo infra-ai
-/vendor/claude-code-proxy/    @jeguzman
+/vendor/claude-code-proxy/    @juveguz91
 
 # Agent skills — requieren ADR antes de editar
-/.agents/skills/              @jeguzman
-/.agents/                     @jeguzman
+/.agents/skills/              @juveguz91
+/.agents/                     @juveguz91
 
 # Scripts de workflow — cambios requieren revisión
-/scripts/                     @jeguzman
+/scripts/                     @juveguz91
 
 # Decisiones de arquitectura — siempre requieren revisión
-/docs/adr/                    @jeguzman
+/docs/adr/                    @juveguz91
 
 # Templates de AI-tooling
-/templates/                   @jeguzman
+/templates/                   @juveguz91
 
 # Configuración del harness
-/CLAUDE.md                    @jeguzman
-/AGENTS.md                    @jeguzman
-/.claude/                     @jeguzman
+/CLAUDE.md                    @juveguz91
+/AGENTS.md                    @juveguz91
+/.claude/                     @juveguz91

@@ -15,7 +15,7 @@ triggers:
 ---
 # GitOps Monorepo — Deacero
 
-Ref: `docs/adr/ADR-0007-gitops-monorepo-trunk-based.md`
+Ref: `docs/adr/ADR-0007-gitops-monorepo-trunk-based.md` | `docs/adr/ADR-0008-worktree-gitops-integration.md`
 
 > **Diferencia con `gitops-expert`:** ese skill cubre principios genéricos GitOps/IaC.
 > Este skill es la implementación **Deacero-específica**: trunk-based + sparse checkout + `tag = versión en prod por proyecto`.
@@ -411,3 +411,67 @@ export GITOPS_SCOPE="@mi-empresa"   # si el scope es diferente a @deacero
 | Sparse activo + `work` a otro proyecto | dir no visible → `no existe` | Corregido: usa `git ls-tree` para verificar existencia |
 | `project-map` con `.` (raíz) | `work` en cone mode incluye solo top-level | Esperado: usar `expand` si necesitas todo el árbol |
 | `core.hooksPath` ya seteado | `pre-commit install` rechaza instalar | `git config --unset-all core.hooksPath` y reintentar |
+
+---
+
+## Worktrees — Trabajo Paralelo de Ramas (ADR-0008)
+
+**Problema que resuelve:** trabajar en dos ramas simultáneamente sin `git stash` ni perder contexto.
+
+**No reemplaza sparse checkout** — son ortogonales: sparse controla qué archivos ves, worktree controla qué rama tienes activa en paralelo.
+
+### Cuándo usar worktrees
+
+| Caso | Comando |
+|------|---------|
+| Hotfix urgente con feature en progreso | `worktree add-branch` desde el tag de prod |
+| `integration/*` > 2 días junto a trabajo en trunk | `worktree add-branch` desde trunk |
+| Revisar una rama sin alterar tu working tree | `worktree add` |
+
+### Flujo completo: hotfix con worktree
+
+```bash
+# Estás trabajando en feature/pagos-v2, llega hotfix urgente
+./scripts/release.sh worktree add-branch hotfix/backend/fix-auth ../wt-fix-auth backend@1.4.2
+
+# Trabajas en el hotfix SIN tocar tu working tree actual
+cd ../wt-fix-auth
+vim backend/auth.py
+git commit -m "fix(backend): corrige validación de token"
+git push origin hotfix/backend/fix-auth
+
+# Limpias el worktree al terminar
+cd ..
+./scripts/release.sh worktree rm wt-fix-auth
+
+# Cherry-pick al trunk (flujo normal)
+./scripts/release.sh cherry backend 1.4.2
+```
+
+### Ritual de limpieza
+
+```bash
+./scripts/release.sh status           # muestra worktrees activos + huérfanos
+./scripts/release.sh worktree clean   # candidatos a limpiar (ramas ya mergeadas)
+./scripts/release.sh worktree prune   # limpia refs de dirs borrados manualmente
+```
+
+### Worktrees en workflows multi-agente
+
+El Workflow tool de Claude Code soporta `isolation: 'worktree'` para agentes paralelos que escriben archivos — cada agente opera en su propio worktree temporal y el harness lo limpia al terminar:
+
+```javascript
+await parallel(subtasks.map(t => () =>
+  agent(t.prompt, { isolation: 'worktree' })
+))
+```
+
+El hook `.claude/hooks/worktree-isolation-gate.sh` (nuevo, ADR-0008) advierte si detecta `parallel(agent())` sin `isolation: 'worktree'`.
+
+### Reglas de disciplina
+
+1. **Nunca `rm -rf <worktree-dir>`** — usar `./scripts/release.sh worktree rm <path>` o `git worktree remove <path>`
+   El hook `block-dangerous.sh` bloquea `rm -rf` sobre worktrees activos registrados.
+2. Revisar `release.sh status` diariamente — incluye worktrees activos y huérfanos.
+3. Máx. 3-4 worktrees simultáneos — más indica trabajo estancado.
+4. Si se borró accidentalmente con `rm -rf`: correr `./scripts/release.sh worktree prune` para limpiar refs huérfanas.

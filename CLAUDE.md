@@ -116,10 +116,11 @@ Claude Code ejecuta estos scripts automáticamente. **Contrato de input: JSON vi
 
 | Script | Evento | Matcher | Comportamiento |
 |--------|--------|---------|----------------|
-| `block-dangerous.sh` | PreToolUse | Bash | Bloquea: `rm -rf /~`, `git push --force`, `git reset --hard`, `git clean -f` |
+| `block-dangerous.sh` | PreToolUse | Bash | Bloquea: `rm -rf /~`, `git push --force`, `git reset --hard`, `git clean -f`, `rm -rf` sobre git worktree activo |
 | `config-protection.sh` | PreToolUse | Edit\|Write\|MultiEdit | Bloquea editar: `pyproject.toml`, `.eslintrc*`, `.prettierrc*`, `ruff.toml`, `.pre-commit-config.yaml` |
 | `protect-secrets.sh` | PreToolUse | Edit\|Write\|MultiEdit | Bloquea escribir secrets en archivos trackeados por git |
 | `quality-gate.sh` | PostToolUse (async) | Edit\|Write\|MultiEdit | Corre `ruff check` en `.py` modificados (solo avisa) |
+| `worktree-isolation-gate.sh` | PreToolUse | Workflow | Advierte si `parallel(agent())` no usa `isolation: 'worktree'` (solo avisa, no bloquea) |
 
 También activo vía `settings.json`: `npx block-no-verify@1.1.2` (PreToolUse/Bash) — bloquea `git --no-verify`.
 

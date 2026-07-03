@@ -150,6 +150,17 @@
           }
         ],
         "description": "ADR Gate: bloquea edits a vendor/ y .agents/ sin ADR staged"
+      },
+      {
+        "matcher": "Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/worktree-isolation-gate.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Worktree isolation gate: advierte si parallel(agent()) no usa isolation: 'worktree'"
       }
     ],
     "UserPromptSubmit": [

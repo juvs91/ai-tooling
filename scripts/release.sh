@@ -244,6 +244,19 @@ cmd_status() {
   else
     info "checkout completo (sin sparse)"
   fi
+
+  echo ""
+  info "worktrees:"
+  git worktree list
+
+  local prunable
+  prunable=$(git worktree prune --dry-run 2>&1)
+  if [[ -n "$prunable" ]]; then
+    echo ""
+    warn "worktrees huérfanos (directorio ya no existe en disco):"
+    echo "$prunable" | sed 's/^/  /'
+    warn "limpiar con: ./scripts/release.sh worktree prune"
+  fi
 }
 
 cmd_add() {
@@ -619,6 +632,85 @@ cmd_versions() {
   echo ""
 }
 
+# ── worktree management (Ref: ADR-0008) ───────────────────────────────────
+
+cmd_worktree() {
+  local sub="${1:-list}"
+  shift || true
+
+  case "$sub" in
+    list)
+      git worktree list
+      ;;
+
+    add)
+      local branch="${1:-}"
+      require_arg "$branch" "rama requerida\n  uso: release.sh worktree add <rama> [<path>]"
+      local wt_path="${2:-../${branch//\//-}}"
+      git worktree add "$wt_path" "$branch"
+      ok "worktree creado en: $wt_path"
+      ;;
+
+    add-branch)
+      local branch="${1:-}"
+      require_arg "$branch" "nueva rama requerida\n  uso: release.sh worktree add-branch <rama> [<path>] [<base>]"
+      local wt_path="${2:-../${branch//\//-}}"
+      local base="${3:-$(trunk_branch)}"
+      git worktree add "$wt_path" -b "$branch" "$base"
+      ok "worktree creado en: $wt_path (desde $base)"
+      ;;
+
+    rm|remove)
+      local wt_path="${1:-}"
+      require_arg "$wt_path" "path del worktree requerido\n  uso: release.sh worktree rm <path>"
+      git worktree remove "$wt_path"
+      ok "worktree eliminado: $wt_path"
+      ;;
+
+    prune)
+      git worktree prune --verbose
+      ok "prune completado"
+      ;;
+
+    clean)
+      local trunk; trunk=$(trunk_branch)
+      local remote; remote=$(resolve_remote)
+      git fetch "$remote" "$trunk" --quiet 2>/dev/null || true
+
+      info "candidatos a limpiar (ramas ya mergeadas a $trunk):"
+      local found=0
+      while IFS= read -r line; do
+        local wt_path wt_branch
+        wt_path=$(echo "$line" | awk '{print $1}')
+        wt_branch=$(echo "$line" | grep -oE '\[[^]]+\]' | tr -d '[]')
+        [[ -z "$wt_branch" ]] && continue
+        git rev-parse "$wt_branch" &>/dev/null || continue
+        if git merge-base --is-ancestor "$wt_branch" "$remote/$trunk" 2>/dev/null; then
+          warn "  $wt_path  [$wt_branch]"
+          found=1
+        fi
+      done < <(git worktree list | tail -n +2)
+
+      [[ $found -eq 0 ]] && ok "ningún candidato"
+      info "para eliminar: ./scripts/release.sh worktree rm <path>"
+      info "para limpiar refs: ./scripts/release.sh worktree prune"
+      ;;
+
+    *)
+      cat <<'EOF'
+Uso: release.sh worktree <subcomando>
+
+  list                                  listar worktrees activos
+  add        <rama> [<path>]            checkout de rama existente en nuevo worktree
+  add-branch <nueva> [<path>] [<base>]  nueva rama + worktree (base default: trunk)
+  rm         <path>                     eliminar worktree (NO usar rm -rf)
+  prune                                 limpiar refs de worktrees borrados manualmente
+  clean                                 mostrar worktrees con rama ya mergeada al trunk
+EOF
+      ;;
+  esac
+}
+
 # ── router ─────────────────────────────────────────────────────────────────
 
 # Shift el CMD para que las funciones reciban argumentos desde $1
@@ -635,6 +727,7 @@ case "$CMD" in
   sync)       cmd_sync ;;
   tag)        cmd_tag "$@" ;;
   hotfix)     cmd_hotfix "$@" ;;
+  worktree)   cmd_worktree "$@" ;;
   cherry)     cmd_cherry "$@" ;;
   check)      cmd_check "$@" ;;
   promote)    cmd_promote "$@" ;;
@@ -647,11 +740,19 @@ Uso: release.sh <comando> [args]
   work    <proy> [proy-b...]   configurar sparse checkout
   expand                       checkout completo (emergencias)
   sync                         rebase diario contra trunk
-  status                       estado actual: remote, trunk, sparse paths
+  status                       estado actual: remote, trunk, sparse paths, worktrees
   add     <path|proyecto>      agregar path al sparse set actual
   drop    <path|proyecto>      quitar path del sparse set
   init    <proyecto>           alias de work (un proyecto)
   init-multi <proy...>         alias de work (multi-proyecto)
+
+  WORKTREES (ADR-0008)
+  worktree list                         listar worktrees activos
+  worktree add        <rama> [<path>]   checkout de rama existente en worktree
+  worktree add-branch <rama> [<path>]   nueva rama + worktree desde trunk
+  worktree rm         <path>            eliminar worktree (no usar rm -rf)
+  worktree prune                        limpiar refs de worktrees borrados
+  worktree clean                        mostrar worktrees con rama ya mergeada
 
   RELEASES
   tag     <proyecto> <1.4.2>            crear tag de release desde trunk
