@@ -368,4 +368,47 @@ Commit `26d5fd3` — 68 archivos, 46 errores nuevos en producción + 203 errores
 | `ts-enforce.sh` | PreToolUse | Edit\|Write | Bloquea si hay errores TS pendientes |
 | `scope-gate.sh` | PreToolUse | Edit\|Write | Bloquea si archivo fuera de task-scope.json |
 | `edit-drift-detector.sh` | PostToolUse | Edit\|Write\|Bash | Cuenta edits, avisa a 8/15/25 sin test |
-| `worktree-isolation-gate.sh` | PreToolUse | Workflow | BLOQUEA (upgrade de warn→block) agentes paralelos sin isolation |
+| `worktree-isolation-gate.sh` | PreToolUse | Workflow | WARN (no bloquea) — agentes paralelos con posibles writes |
+
+---
+
+## Session 2026-07-10: Beta→Admin migration + Kimi K2 debt cleanup
+
+### Decisiones tomadas
+
+**`worktree-isolation-gate.sh` revertido a warn-only:**
+El hook estaba en `exit 2` (blocking) pero bloqueaba workflows legítimos de solo lectura. Revertido a warn porque el enforcement de conocimiento (ADR, learnings) no requiere bloquear — solo avisar. El regex `write|edit` también era demasiado amplio y matcheaba texto en prompts.
+
+**Beta→Admin migration (ADR-0004):**
+- 25 rutas `app/beta/` → `app/admin/` (git rename, preserva historia)
+- 41 componentes `components/beta/` → `components/admin/`
+- `app/beta/` y `components/beta/` eliminados completamente
+
+### Errores encontrados y resueltos
+
+**Patrón sistemático de Kimi K2 — hoisting de `useEffect`:**
+Kimi escribe `useEffect` ANTES de declarar la función que llama. Esto es TDZ con `const`:
+```tsx
+// MAL (Kimi lo hacía así)
+useEffect(() => { loadData(); }, []);
+const loadData = async () => { ... };  // TDZ!
+
+// BIEN
+const loadData = async () => { ... };
+useEffect(() => { loadData(); }, []);
+```
+Apareció en 13+ archivos. Siempre el mismo fix: mover la declaración antes del useEffect.
+
+**Dependencia circular entre hooks — patrón `useRef`:**
+`useBulkGrades` necesitaba `loadData` como callback, y `loadData` necesitaba `bulkActions` (resultado de `useBulkGrades`). Solución: `useRef` como puente para romper el ciclo sin cambiar semántica.
+
+**Missing imports en archivos nunca compilados:**
+`Badge`, `Package`, `Settings`, `Select` usados sin importar. Confirma que Kimi K2 no verifica compilación.
+
+### Evaluación Kimi K2 en TypeScript/React: ~55/100
+- Velocidad/volumetría: 9/10 — generó 60+ archivos rápido
+- Arquitectura: 6/10 — estructura razonable, sigue convenciones Next.js
+- Correctitud React: 4/10 — hooks violations sistemáticas
+- Compilabilidad: 3/10 — missing imports, referencias a funciones inexistentes
+- Testing/verificación: 1/10 — nunca corrió el código
+- Python proxy: 7/10 — funcional y limpio

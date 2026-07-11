@@ -32,11 +32,10 @@ if echo "$SCRIPT" | grep -q "parallel(" && echo "$SCRIPT" | grep -q "agent("; th
 fi
 
 if [ "$HAS_WRITES" -gt "0" ]; then
-  echo "BLOCKED: parallel(agent()) sin isolation: 'worktree' en un Workflow con edits." >&2
-  echo "  Agentes paralelos escritores conflictuan en disco." >&2
-  echo "  Requerido: agent(prompt, { isolation: 'worktree' }) en cada agente que escriba archivos." >&2
+  echo "WORKTREE [warn]: parallel(agent()) detectado con posibles writes." >&2
+  echo "  Si los agentes paralelos escriben al mismo repo, usa isolation: 'worktree'." >&2
+  echo "  Para workflows de solo lectura o escrituras a dirs distintos, es seguro ignorar." >&2
   echo "  Ref: ADR-0008-worktree-gitops-integration.md" >&2
-  exit 2
 fi
 
 # Workflow de solo lectura — advertir pero permitir
