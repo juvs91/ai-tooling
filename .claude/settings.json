@@ -160,7 +160,53 @@
             "timeout": 5
           }
         ],
-        "description": "Worktree isolation gate: advierte si parallel(agent()) no usa isolation: 'worktree'"
+        "description": "Worktree isolation gate: bloquea parallel(agent()) sin isolation: 'worktree' cuando hay escrituras"
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/quality-enforce.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Quality enforce: bloquea edits a código si hay errores pendientes en .claude/quality-state/ (genérico, any language)"
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/scope-gate.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Scope gate: bloquea edits fuera del scope definido en .claude/task-scope.json"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/ts-quality-gate.sh",
+            "timeout": 30
+          }
+        ],
+        "description": "TS quality gate: corre tsc tras edits de *.ts/*.tsx, guarda estado para ts-enforce.sh"
+      },
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/edit-drift-detector.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Drift detector: rastrea edits vs test runs, advierte a 8/15/25 edits sin verificación"
       }
     ],
     "UserPromptSubmit": [

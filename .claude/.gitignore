@@ -1,1 +1,5 @@
 sessions/
+quality-state/
+quality-events.log
+drift-state/
+task-scope.json

@@ -1,4 +1,8 @@
 #!/bin/bash
+# distributable: true
+# event: PreToolUse
+# matcher: Bash
+# timeout: 10
 # block-dangerous.sh — PreToolUse hook (cualquier tool, incluyendo Bash)
 # Exit 0 = permitir, Exit 2 = bloquear (stderr = razón)
 #

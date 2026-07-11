@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# distributable: true
+# event: PostToolUse
+# matcher: Edit|Write|MultiEdit
+# timeout: 15
+# async: true
 # Runs ruff linter on modified Python files after edits.
 # Async — does not block Claude, just surfaces warnings.
 

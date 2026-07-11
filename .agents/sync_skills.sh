@@ -27,8 +27,8 @@ LAST_SYNC="$REPO_ROOT/.agents/.last_sync"
 CACHE_DIR="$REPO_ROOT/.agents/_repo"
 SKILLS_DIR="$REPO_ROOT/.agents/skills"
 
-AGENTS_REPO_DEFAULT="git@github.com:juvs91/ai-tooling.git"
-AGENTS_REF_DEFAULT="master"
+AGENTS_REPO_DEFAULT="${AGENTS_REPO_DEFAULT:-git@github.com:juvs91/ai-tooling.git}"
+AGENTS_REF_DEFAULT="${AGENTS_REF_DEFAULT:-master}"
 
 FORCE="${1:-}"
 

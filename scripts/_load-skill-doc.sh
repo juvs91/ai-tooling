@@ -1,4 +1,5 @@
 #!/bin/bash
+# distributable: true
 # Loader de documentación de skills dinámicos
 # Usage: ./scripts/_load-skill-doc.sh <skill-name>
 #

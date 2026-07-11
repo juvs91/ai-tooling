@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# distributable: true
+# event: PostToolUse
+# matcher: Edit|Write|MultiEdit
+# timeout: 15
 # verify-implementation.sh — PostToolUse hook
 # Scans newly written/edited Python files for unimplemented stub functions.
 # Advisory only (exit 0 always) — output is shown to Claude as context.

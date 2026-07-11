@@ -2,7 +2,7 @@
 > Aprendizajes iterativos del proyecto. Actualizar despues de cada sesion.
 
 ## Ultima actualizacion
-- Fecha: 2026-06-24
+- Fecha: 2026-07-10
 - Por: claude-sonnet-4-6 + jeguzman
 
 ---
@@ -281,3 +281,91 @@ curl -X POST http://127.0.0.1:8083/v1/messages \
 - TypeScript repo (`projects/`): ✓ eslint+prettier, sin ruff, ADR gate con `^(projects/.*\.(ts|py|go))$`
 - Multi-stack (`master` trunk): ✓ ruff+eslint+prettier, `no-commit-to-branch: master`
 - CODEOWNERS blocked by config-protection.sh hook → crear en IDE o actualizar el hook
+
+---
+
+## Session 2026-07-09/10: Kimi K2 (Moonshot AI) — Análisis Post-Mortem
+
+### Sesión analizada
+`ahora-exhaustivamente-analizame-toda-glistening-sprout` en `school-system`, rama `docs/migrate-to-ai-notes`.  
+Commit `26d5fd3` — 68 archivos, 46 errores nuevos en producción + 203 errores TS en tests.
+
+---
+
+### [K2-001] Tool calls con constraints oneOf violados
+
+**Observado:** Kimi K2 generó `EnterWorktree(path="...", name="...")` — viola oneOf constraint (solo se permite uno de los dos parámetros, no ambos). Claude Code rechazó el tool call.
+
+**Consecuencia:** Kimi cayó al fallback de `sed -i` sin worktree isolation, edits en disco sin coordinación.
+
+**Fix (no resoluble con hooks):** Ejemplos negativos explícitos en system prompt. Es comportamiento del modelo.
+
+**Patrón para futuros modelos:** Si un modelo genera tool calls inválidos repetidamente para la misma operación, es señal de que no entiende el schema — intervenir antes de que haga fallback destructivo.
+
+---
+
+### [K2-002] `sed -i 's/jest/vi/g'` destruye tipos TypeScript
+
+**Observado:** Kimi ejecutó `sed -i '' 's/jest/vi/g'` en masa sobre 9 archivos de test, convirtiendo `jest.Mock` → `vi.Mock`. Resultado: 203 errores `TS2503: Cannot find namespace 'vi'`.
+
+**Causa raíz técnica:** `vi.Mock` en posición de tipo requiere que `vi` sea un namespace TypeScript, no una constante. Incluso con `"types": ["vitest/globals"]` en tsconfig, `vi` se declara como `let vi: VitestUtils` — una constante, no un namespace.
+
+**Fix real:** Agregar `import { vi, type Mock } from "vitest"` a cada test file y reemplazar `vi.Mock` con `Mock` en posiciones de tipo. La opción `"types": ["vitest/globals"]` en tsconfig.json es INSUFICIENTE para uso como namespace.
+
+**Hook implementado:** `ts-quality-gate.sh` (PostToolUse) + `ts-enforce.sh` (PreToolUse) — bloquea siguiente edit TS si hay errores pendientes.
+
+---
+
+### [K2-003] Drift de scope: 68 archivos cuando scope era 3-5
+
+**Observado:** Tarea era refactorizar tests (jest→vi). Kimi editó 68 archivos incluyendo 29 archivos de producción fuera del scope.
+
+**Errores producidos en producción:**
+- `SortAscending` (no existe en lucide-react) → reemplazar con `ArrowUpDown`
+- Imports faltantes: `Separator`, `Dialog`, `DialogContent`, `DialogHeader`, `DialogTitle`
+- `updated_at` en FinalGrade (campo no existe, es `modified_at`)
+- `Student` exportado desde `@/lib/types/grades` (no existe, está en `models`)
+- Inicializaciones de estado con `{}` en lugar de `[]`
+- `SelectTrigger size="sm"` prop inválida
+
+**Hook implementado:** `scope-gate.sh` — bloquea edits fuera del scope definido en `.claude/task-scope.json`. El modelo actualiza el scope dinámicamente por subtarea.
+
+**Protocolo en CLAUDE.md:** Antes de editar, crear `.claude/task-scope.json`. Actualizar `current_step` al avanzar. Eliminar al completar.
+
+---
+
+### [K2-004] Sin verificación TypeScript post-edit durante toda la sesión
+
+**Observado:** Kimi no corrió `npx tsc --noEmit` en ningún momento. Los 46 errores de producción habrían sido detectables después del primer archivo editado.
+
+**Hook implementado:** `edit-drift-detector.sh` — rastrea edits desde el último test run. Avisa en 8, 15, y 25+ edits sin verificación. Emite quality checkpoint al detectar test run.
+
+**Patrón:** Sin enforcement externo, Kimi (y modelos similares) optimizan para "cantidad de archivos procesados" en lugar de "calidad del resultado".
+
+---
+
+### [K2-005] Evaluación general de Kimi K2
+
+| Dimensión | Sin hooks | Con hooks (estimado) |
+|-----------|-----------|----------------------|
+| Tareas técnicas complejas | 7/10 | 8/10 |
+| Disciplina TypeScript | 2/10 | 7/10 |
+| Respeto de scope | 3/10 | 7/10 |
+| Verificación post-edit | 0/10 | 7/10 (forzado) |
+| Tool calls correctas | 7/10 | 7/10 (hooks no ayudan con schema) |
+
+**Conclusión:** Kimi K2 executa bien las tareas técnicas cuando las hace, pero tiene drift sistemático sin enforcement. El sistema de hooks compensa los gaps de disciplina. Score sin hooks: ~4/10. Con hooks: ~7.5/10.
+
+**Backend no tocado:** Commit `d09cedf` (Jul 6, 112 archivos .py) fue 100% cosmético — Black/PEP8 reformatting. Zero cambios de lógica. Kimi K2 NO modificó el backend en ningún momento de la sesión.
+
+---
+
+### Hooks anti-drift implementados (2026-07-10)
+
+| Hook | Tipo | Matcher | Acción |
+|------|------|---------|--------|
+| `ts-quality-gate.sh` | PostToolUse | Edit\|Write | Corre tsc, guarda estado de errores |
+| `ts-enforce.sh` | PreToolUse | Edit\|Write | Bloquea si hay errores TS pendientes |
+| `scope-gate.sh` | PreToolUse | Edit\|Write | Bloquea si archivo fuera de task-scope.json |
+| `edit-drift-detector.sh` | PostToolUse | Edit\|Write\|Bash | Cuenta edits, avisa a 8/15/25 sin test |
+| `worktree-isolation-gate.sh` | PreToolUse | Workflow | BLOQUEA (upgrade de warn→block) agentes paralelos sin isolation |

@@ -1,4 +1,8 @@
 #!/bin/bash
+# distributable: true
+# event: PreToolUse
+# matcher: Edit|Write|MultiEdit
+# timeout: 10
 # protect-secrets.sh — PreToolUse hook para Edit/Write/MultiEdit
 # Bloquea escritura de secrets en archivos trackeados por git.
 #

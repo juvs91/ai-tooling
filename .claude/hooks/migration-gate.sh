@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# distributable: true
+# event: PostToolUse
+# matcher: Edit|Write|MultiEdit
+# timeout: 10
 # migration-gate.sh — PostToolUse hook
 # Fires when a SQLAlchemy model file is edited, reminding Claude to run Alembic.
 # Advisory only (exit 0 always) — output is shown to Claude as context.

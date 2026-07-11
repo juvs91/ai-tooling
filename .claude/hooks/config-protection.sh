@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# distributable: true
+# event: PreToolUse
+# matcher: Edit|Write|MultiEdit
+# timeout: 10
 # Blocks accidental edits to linter/formatter/CI config files.
 # Steers agent to fix code instead of weakening configs.
 #

@@ -1,4 +1,8 @@
 #!/bin/bash
+# distributable: true
+# event: PreToolUse
+# matcher: Workflow
+# timeout: 5
 # worktree-isolation-gate.sh — PreToolUse hook (Workflow tool)
 # Ref: ADR-0008-worktree-gitops-integration.md
 #
@@ -14,12 +18,31 @@ TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
 SCRIPT=$(echo "$INPUT" | jq -r '.tool_input.script // empty')
 [ -z "$SCRIPT" ] && exit 0
 
-if echo "$SCRIPT" | grep -q "parallel(" \
-   && echo "$SCRIPT" | grep -q "agent(" \
-   && ! echo "$SCRIPT" | grep -q "isolation.*worktree"; then
-  echo "WORKTREE: parallel(agent()) sin isolation: 'worktree' detectado." >&2
-  echo "  Agentes escritores paralelos pueden conflictuar en disco." >&2
-  echo "  Considera: agent(prompt, { isolation: 'worktree' }) para los que escriben archivos." >&2
+HAS_WRITES=0
+if echo "$SCRIPT" | grep -qE "isolation.*worktree"; then
+  # Ya tiene isolation — permitir siempre
+  exit 0
+fi
+
+if echo "$SCRIPT" | grep -q "parallel(" && echo "$SCRIPT" | grep -q "agent("; then
+  # Detecta si algún agente en el script puede escribir archivos
+  if echo "$SCRIPT" | grep -qE "Edit|Write|isolation|worktree|write|edit"; then
+    HAS_WRITES=1
+  fi
+fi
+
+if [ "$HAS_WRITES" -gt "0" ]; then
+  echo "BLOCKED: parallel(agent()) sin isolation: 'worktree' en un Workflow con edits." >&2
+  echo "  Agentes paralelos escritores conflictuan en disco." >&2
+  echo "  Requerido: agent(prompt, { isolation: 'worktree' }) en cada agente que escriba archivos." >&2
+  echo "  Ref: ADR-0008-worktree-gitops-integration.md" >&2
+  exit 2
+fi
+
+# Workflow de solo lectura — advertir pero permitir
+if echo "$SCRIPT" | grep -q "parallel(" && echo "$SCRIPT" | grep -q "agent("; then
+  echo "WORKTREE [warn]: parallel(agent()) sin isolation: 'worktree' detectado." >&2
+  echo "  Si los agentes escriben archivos, agrega isolation: 'worktree' para evitar conflictos." >&2
 fi
 
 exit 0
