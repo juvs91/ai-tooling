@@ -152,7 +152,7 @@
         "description": "ADR Gate: bloquea edits a vendor/ y .agents/ sin ADR staged"
       },
       {
-        "matcher": "Workflow",
+        "matcher": "Workflow|Agent",
         "hooks": [
           {
             "type": "command",
@@ -160,7 +160,29 @@
             "timeout": 5
           }
         ],
-        "description": "Worktree isolation gate: bloquea parallel(agent()) sin isolation: 'worktree' cuando hay escrituras"
+        "description": "Worktree isolation gate: advierte parallel(agent()) sin isolation: 'worktree'; redirige Agent→Workflow para paralelismo aislado"
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/config-protection.sh",
+            "timeout": 10
+          }
+        ],
+        "description": "Config protection: bloquea edits a pyproject.toml (secciones tool.*), ruff.toml, .eslintrc*, .prettierrc*, .pre-commit-config.yaml"
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/protect-secrets.sh",
+            "timeout": 10
+          }
+        ],
+        "description": "Secret protection: bloquea escritura de API keys, tokens y passwords en archivos trackeados por git"
       },
       {
         "matcher": "Edit|Write",
@@ -198,6 +220,28 @@
         "description": "TS quality gate: corre tsc tras edits de *.ts/*.tsx, guarda estado para ts-enforce.sh"
       },
       {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/migration-gate.sh",
+            "timeout": 10
+          }
+        ],
+        "description": "Migration gate: avisa cuando se edita un modelo SQLAlchemy sin correr alembic revision"
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/verify-implementation.sh",
+            "timeout": 15
+          }
+        ],
+        "description": "Verify implementation: detecta funciones stub (pass/TODO/NotImplemented) en archivos Python editados"
+      },
+      {
         "matcher": "Edit|Write|Bash",
         "hooks": [
           {
@@ -231,6 +275,17 @@
           }
         ],
         "description": "Autoload stateless de workflow-coordinator en cada prompt"
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/plan-mode-gate.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Inyecta mandato de plan mode una vez por sesión"
       }
     ]
   },

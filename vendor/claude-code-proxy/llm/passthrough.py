@@ -193,3 +193,53 @@ class PassthroughClient:
     def metrics(self) -> PassthroughMetrics:
         """Access metrics collected during the last stream_message() call."""
         return getattr(self, "_metrics", PassthroughMetrics())
+
+
+async def try_structural_correction(
+    pt: PassthroughClient,
+    body: dict,
+    malformed_response: object,
+    original_model: str,
+) -> object | None:
+    """One-shot retry: ask the provider to fix its malformed tool_use blocks.
+
+    Appends the malformed response as an assistant turn, then a user correction
+    prompt with few-shot native Anthropic format examples. Returns the corrected
+    response object, or None if the retry call itself fails.
+
+    Called only when structural issues are detected in the response pipeline and
+    ctx.refinement_attempt == 0 (caps at one retry to avoid loops).
+
+    Ref: ADR-0016-native-tool-use-structural-validation.md
+    """
+    from llm.transformers.structural_tool_validator import build_correction_prompt, pop_malformed_blocks
+
+    malformed_blocks = pop_malformed_blocks()
+    if not malformed_blocks:
+        return None
+
+    raw_content = getattr(malformed_response, "content", [])
+    if isinstance(raw_content, list):
+        serialized = [
+            b if isinstance(b, dict)
+            else (b.dict() if hasattr(b, "dict") else {"type": "text", "text": str(b)})
+            for b in raw_content
+        ]
+    else:
+        serialized = [{"type": "text", "text": str(raw_content)}]
+
+    correction_body = {
+        **body,
+        "messages": list(body.get("messages", [])) + [
+            {"role": "assistant", "content": serialized},
+            {"role": "user",      "content": build_correction_prompt(malformed_blocks)},
+        ],
+    }
+
+    try:
+        corrected = await pt.create_message(correction_body, response_model=original_model)
+        logger.info("[structural-correction] retry succeeded for %d block(s)", len(malformed_blocks))
+        return corrected
+    except Exception as exc:
+        logger.warning("[structural-correction] retry call failed: %s", exc)
+        return None

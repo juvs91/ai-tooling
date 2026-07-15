@@ -103,6 +103,8 @@ class ClassifierConfig:
     api_key: str
     base_url: Optional[str]
     timeout: float                 # default: 3.0
+    max_consecutive_errors: int    # ENV: CLASSIFIER_MAX_CONSECUTIVE_ERRORS (default: 3)
+    circuit_reset_seconds: float   # ENV: CLASSIFIER_CIRCUIT_RESET_SECONDS (default: 60.0)
 
 
 @dataclass
@@ -222,6 +224,7 @@ class ProxyConfig:
     session_cost_warning: float = 3.0   # ENV: SESSION_COST_WARNING_USD
     session_cost_limit: float = 5.0     # ENV: SESSION_COST_LIMIT_USD
     fallback_providers: list[ProviderConfig] = field(default_factory=list)
+    max_concurrent_per_provider: int = 5  # ENV: MAX_CONCURRENT_PER_PROVIDER
 
 
 # ── Loaders ──
@@ -390,6 +393,8 @@ def load_config() -> ProxyConfig:
             api_key=classifier_api_key,
             base_url=classifier_base_url,
             timeout=float(_env("CLASSIFIER_TIMEOUT", "3.0")),
+            max_consecutive_errors=int(_env("CLASSIFIER_MAX_CONSECUTIVE_ERRORS", "3")),
+            circuit_reset_seconds=float(_env("CLASSIFIER_CIRCUIT_RESET_SECONDS", "60.0")),
         ),
         compressor=CompressorConfig(
             model=comp_model,
@@ -465,4 +470,5 @@ def load_config() -> ProxyConfig:
         session_cost_warning=float(_env("SESSION_COST_WARNING_USD", "3.0")),
         session_cost_limit=float(_env("SESSION_COST_LIMIT_USD", "5.0")),
         fallback_providers=_load_fallback_providers(),
+        max_concurrent_per_provider=int(_env("MAX_CONCURRENT_PER_PROVIDER", "5")),
     )

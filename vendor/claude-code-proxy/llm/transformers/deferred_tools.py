@@ -237,6 +237,18 @@ _CC_TOOL_DESCRIPTIONS: dict[str, str] = {
         "Pass 'url' (string) and 'prompt' (string — what to extract from the page). "
         'Example: {"url":"https://example.com/docs","prompt":"Extract the API reference"}'
     ),
+    "EnterWorktree": (
+        "Enter or create an isolated git worktree for parallel work. "
+        "CRITICAL — use ONLY ONE of 'path' OR 'name', NEVER both simultaneously (oneOf constraint). "
+        "WRONG (will be rejected): "
+        '{"path": "/absolute/path", "name": "session-name"} '
+        "← passing both fields violates the schema. "
+        "RIGHT: "
+        '{"path": "/absolute/path/to/worktree"} '
+        "to enter/create a worktree at a specific path, OR "
+        '{"name": "session-name"} '
+        "to create/reuse a worktree identified by name."
+    ),
 }
 
 # Tools that should only be injected during PLAN phase.

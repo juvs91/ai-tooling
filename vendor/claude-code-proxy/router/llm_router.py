@@ -3,10 +3,75 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any, Optional
 
 import litellm
 from utils.metrics import metrics
+
+
+class _ClassifierCircuitBreaker:
+    """In-memory circuit breaker for the LLM intent classifier.
+
+    Prevents hammering an exhausted API key after N consecutive errors.
+    States: CLOSED (normal) → OPEN (skip LLM) → HALF-OPEN (one probe) → CLOSED.
+
+    ADR-0017: classifier-circuit-breaker.md
+    """
+
+    __slots__ = ("_max_errors", "_reset_seconds", "_consecutive_errors", "_open_since")
+
+    def __init__(self, max_errors: int = 3, reset_seconds: float = 60.0) -> None:
+        self._max_errors = max_errors
+        self._reset_seconds = reset_seconds
+        self._consecutive_errors = 0
+        self._open_since: float | None = None
+
+    def is_open(self) -> bool:
+        if self._open_since is None:
+            return False
+        elapsed = time.monotonic() - self._open_since
+        if elapsed >= self._reset_seconds:
+            # Transition to HALF-OPEN: reset so next call is a live probe
+            self._open_since = None
+            return False
+        return True
+
+    def record_success(self) -> None:
+        if self._consecutive_errors > 0 or self._open_since is not None:
+            import logging
+            logging.getLogger(__name__).info(
+                "[classifier-circuit] CLOSED after successful LLM call (was %d errors)",
+                self._consecutive_errors,
+            )
+        self._consecutive_errors = 0
+        self._open_since = None
+
+    def record_error(self) -> None:
+        import logging
+        _log = logging.getLogger(__name__)
+        self._consecutive_errors += 1
+        if self._consecutive_errors >= self._max_errors and self._open_since is None:
+            self._open_since = time.monotonic()
+            _log.warning(
+                "[classifier-circuit] OPEN after %d consecutive errors — regex-only for %.0fs",
+                self._consecutive_errors, self._reset_seconds,
+            )
+        else:
+            _log.info(
+                "[classifier-circuit] error %d/%d — circuit still CLOSED",
+                self._consecutive_errors, self._max_errors,
+            )
+
+
+_circuit_breaker: _ClassifierCircuitBreaker | None = None
+
+
+def _get_circuit_breaker(max_errors: int = 3, reset_seconds: float = 60.0) -> _ClassifierCircuitBreaker:
+    global _circuit_breaker
+    if _circuit_breaker is None:
+        _circuit_breaker = _ClassifierCircuitBreaker(max_errors, reset_seconds)
+    return _circuit_breaker
 
 PLANNING_RE = re.compile(
     r"\b("
@@ -236,15 +301,28 @@ async def classify_intent(
     api_base: Optional[str] = None,
     timeout_s: float = 3.0,
     tool_context: str = "",
+    max_consecutive_errors: int = 3,
+    circuit_reset_seconds: float = 60.0,
 ) -> tuple[str, float, str | None]:
     """
     Classify user intent using a cheap LLM call.
     Returns: (intent, confidence, secondary_intent).
     Falls back to regex on any error or timeout.
     Tool context (recent tools used) is included in prompt for holistic routing.
+
+    Circuit breaker: after max_consecutive_errors API failures, skips LLM calls for
+    circuit_reset_seconds before retrying. Prevents hammering an exhausted API key.
+    ADR-0017: classifier-circuit-breaker.md
     """
     if not text or not text.strip():
         return "CHAT", 1.0, None
+
+    cb = _get_circuit_breaker(max_consecutive_errors, circuit_reset_seconds)
+    if cb.is_open():
+        import logging
+        logging.getLogger(__name__).info("[classifier-circuit] OPEN — skipping LLM, using regex")
+        metrics.classifier_regex_fallback += 1
+        return _regex_fallback_intent(text), 0.5, None
 
     # Truncate to keep classifier fast but with enough context
     truncated = text[:1000]
@@ -286,6 +364,7 @@ async def classify_intent(
                 secondary = None
             if intent in _VALID_INTENTS:
                 metrics.classifier_llm_success += 1
+                cb.record_success()
                 return intent, confidence, secondary
         except (json.JSONDecodeError, ValueError, AttributeError, KeyError):
             pass  # fallback to word extraction
@@ -295,6 +374,7 @@ async def classify_intent(
             cleaned = word.strip(".,;:!?\"'")
             if cleaned in _VALID_INTENTS:
                 metrics.classifier_llm_success += 1
+                cb.record_success()
                 return cleaned, 0.8, None
 
         # LLM responded but not a valid category
@@ -304,6 +384,7 @@ async def classify_intent(
     except (asyncio.TimeoutError, Exception) as e:
         print(f"[classify_intent] fallback to regex: {type(e).__name__}: {e}")
         metrics.classifier_regex_fallback += 1
+        cb.record_error()
         return _regex_fallback_intent(text), 0.5, None
 
 def content_to_rough_text(content: Any) -> str:

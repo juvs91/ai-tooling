@@ -25,6 +25,10 @@ import logging
 from typing import Any
 
 from llm.pipeline import Transformer, TransformContext
+from llm.transformers.structural_tool_validator import (
+    apply_structural_validation,
+    record_malformed_block,
+)
 from utils.utils import bget
 
 logger = logging.getLogger(__name__)
@@ -294,6 +298,19 @@ class ToolCallValidatorTransformer(Transformer):
             if bget(block, "type") != "tool_use":
                 continue
             tool_name = bget(block, "name")
+
+            # Structural: applies to ALL tool_use blocks before tool-specific correction
+            struct_corrections = apply_structural_validation(block)
+            if struct_corrections:
+                logger.warning(
+                    "[tool-call-validator] %s: structural: %s",
+                    tool_name, "; ".join(struct_corrections),
+                )
+                record_malformed_block(block, struct_corrections)
+                ctx.quality_issues.append(f"structural:{tool_name}")
+                total_corrections += len(struct_corrections)
+
+            # Tool-specific: only the 7 deferred tools
             corrector = _CORRECTORS.get(tool_name)
             if corrector:
                 total_corrections += self._apply_correction(block, tool_name, corrector)

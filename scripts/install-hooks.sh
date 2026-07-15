@@ -60,8 +60,10 @@ echo ""
 
 PRE_FILE=$(mktemp)
 POST_FILE=$(mktemp)
+UPS_FILE=$(mktemp)
 echo "[]" > "$PRE_FILE"
 echo "[]" > "$POST_FILE"
+echo "[]" > "$UPS_FILE"
 
 for f in "$HOOKS_SOURCE"/*.sh; do
     [ -f "$f" ] || continue
@@ -74,7 +76,7 @@ for f in "$HOOKS_SOURCE"/*.sh; do
     is_async=false
     grep -q "^# async: true" "$f" && is_async=true
 
-    [ -z "$event" ] || [ -z "$matcher" ] || [ -z "$timeout_val" ] && continue
+    [ -z "$event" ] || [ -z "$timeout_val" ] && continue
 
     cmd_path='"$CLAUDE_PROJECT_DIR"/.claude/hooks/'"$name"
 
@@ -98,15 +100,19 @@ for f in "$HOOKS_SOURCE"/*.sh; do
     elif [ "$event" = "PostToolUse" ]; then
         tmp=$(mktemp)
         jq --argjson entry "$hook_json" '. + [$entry]' "$POST_FILE" > "$tmp" && mv "$tmp" "$POST_FILE"
+    elif [ "$event" = "UserPromptSubmit" ]; then
+        tmp=$(mktemp)
+        jq --argjson entry "$hook_json" '. + [$entry]' "$UPS_FILE" > "$tmp" && mv "$tmp" "$UPS_FILE"
     fi
 done
 
 HOOKS_JSON=$(jq -n \
     --slurpfile pre "$PRE_FILE" \
     --slurpfile post "$POST_FILE" \
-    '{PreToolUse: $pre[0], PostToolUse: $post[0]}')
+    --slurpfile ups "$UPS_FILE" \
+    '{PreToolUse: $pre[0], PostToolUse: $post[0], UserPromptSubmit: $ups[0]}')
 
-rm -f "$PRE_FILE" "$POST_FILE"
+rm -f "$PRE_FILE" "$POST_FILE" "$UPS_FILE"
 
 # ── 3. Actualizar settings.local.json ─────────────────────────────────────────
 TMP_FILE="${SETTINGS_FILE}.tmp.$$"
@@ -133,6 +139,10 @@ jq -r '.hooks.PreToolUse[].hooks[].command' "$SETTINGS_FILE" 2>/dev/null | sed '
 echo ""
 echo "PostToolUse hooks registrados:"
 jq -r '.hooks.PostToolUse[].hooks[].command' "$SETTINGS_FILE" 2>/dev/null | sed 's|"$CLAUDE_PROJECT_DIR"/||'
+
+echo ""
+echo "UserPromptSubmit hooks registrados:"
+jq -r '.hooks.UserPromptSubmit[].hooks[].command' "$SETTINGS_FILE" 2>/dev/null | sed 's|"$CLAUDE_PROJECT_DIR"/||'
 
 echo ""
 echo "Prueba rápida de block-dangerous (debe salir exit 2 = bloqueado):"

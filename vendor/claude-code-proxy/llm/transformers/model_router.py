@@ -66,8 +66,15 @@ class ModelRouterTransformer(Transformer):
 
         # Phase-aware analysis routing (replaces unconditional ANALYSIS UPGRADE)
         if ctx.analysis_phase == "SYNTHESIZING" and self._analysis and self._analysis.model:
-            # Only use expensive reasoning model for final synthesis
-            request.model = self._analysis.model
+            # Only use expensive reasoning model for final synthesis.
+            # Guard: if ANALYSIS_MODEL is bare (no provider prefix), apply the preferred
+            # provider prefix so passthrough detection works with PASSTHROUGH_REQUIRE_PREFIX=1.
+            # Without this, bare "kimi-k2" bypasses passthrough → falls to LiteLLM → fails.
+            _am = self._analysis.model
+            from router.model_mapper import has_provider_prefix
+            request.model = _am if has_provider_prefix(_am) else build_model_name(
+                self._routing.preferred_provider, _am
+            )
             if self._analysis.max_tokens:
                 request.max_tokens = self._analysis.max_tokens
             if self._analysis.context_window > 0:

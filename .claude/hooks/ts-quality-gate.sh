@@ -41,4 +41,23 @@ else
     echo "$TIMESTAMP | ts | 0 errors | $RELATIVE | FIXED" >> "$AUDIT_LOG" 2>/dev/null || true
 fi
 
+# React hooks ordering heuristic — tsx files only, warning only (never blocks)
+# Kimi K2 K2-005: systematically writes useEffect before the const fn it calls.
+# tsc/eslint don't catch this (closure executes after render, not a true TDZ).
+case "$FILE" in *.tsx)
+    FIRST_USEF_LINE=$(grep -n "useEffect(" "$FILE" 2>/dev/null | head -1 | cut -d: -f1)
+    if [ -n "$FIRST_USEF_LINE" ]; then
+        # Any `const <identifier> = (async )?` pattern on a line AFTER the first useEffect
+        LATE_CONSTS=$(awk "NR>$FIRST_USEF_LINE && /const [a-zA-Z_][a-zA-Z0-9_]* = (async )?/" "$FILE" \
+            2>/dev/null | head -3)
+        if [ -n "$LATE_CONSTS" ]; then
+            echo "⚠️  [react-order] $(basename "$FILE"): functions declared AFTER useEffect — move them ABOVE." >&2
+            echo "$LATE_CONSTS" >&2
+            echo "   Pattern: declare 'const fn = () => {}' BEFORE any useEffect that calls fn." >&2
+            echo "$TIMESTAMP | react-order | late-const-after-usef | $RELATIVE" >> "$AUDIT_LOG" 2>/dev/null || true
+        fi
+    fi
+    ;;
+esac
+
 exit 0  # PostToolUse siempre exit 0

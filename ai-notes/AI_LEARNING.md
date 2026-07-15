@@ -372,6 +372,66 @@ Commit `26d5fd3` — 68 archivos, 46 errores nuevos en producción + 203 errores
 
 ---
 
+## Session 2026-07-14/15: Kimi K2 proxy — ANALYSIS_MODEL fix + hybrid routing
+
+### Root cause investigado y resuelto
+
+**Bug: `ANALYSIS_MODEL=kimi-k2` (bare) + `PASSTHROUGH_REQUIRE_PREFIX=1` → 3 síntomas**
+
+Con `PASSTHROUGH_REQUIRE_PREFIX=1`, `_is_passthrough_compatible("kimi-k2")` retorna `False`  
+(sin prefijo `anthropic/`). Caía a LiteLLM → BadRequestError → fallback DeepSeek.
+
+**Tres síntomas simultáneos explicados:**
+1. `BadRequestError: LLM Provider NOT provided. model=kimi-k2` — LiteLLM no reconoce nombre bare
+2. `analysis_thinking (generic fallback)` — `build_litellm_pipeline` tiene `analysis_thinking` param; passthrough NO
+3. `analysis_refinements: 0` — DeepSeek retorna stream → early-return en `stream_response_pipeline` → `ctx.refinement_attempt` nunca se incrementa
+
+**Fix inmediato:** `ANALYSIS_MODEL=anthropic/kimi-k2` en `cloud.kimi-coding.env`  
+**Fix hardening:** Guard en `model_router.py:68-77` — si `analysis.model` es bare, aplica `build_model_name(preferred_provider, model)` automáticamente  
+**ADR:** `docs/adr/ADR-0021-analysis-model-provider-prefix.md`
+
+### Routing híbrido: DeepSeek primary + Kimi K2 para SYNTHESIZING
+
+**Configuración final en `cloud.kimi-coding.env`:**
+```
+PREFERRED_PROVIDER=openai          # DeepSeek para tareas regulares
+BIG_MODEL=deepseek-chat            # (era kimi-k2)
+SMALL_MODEL=deepseek-chat          # (era kimi-k2)
+BUILDING_MODEL=deepseek-chat       # (era kimi-k2)
+ANALYSIS_MODEL=anthropic/kimi-k2   # Kimi K2 solo para SYNTHESIZING (reasoning)
+MODEL_CONTEXT_WINDOW=65536         # DeepSeek-chat 64K (era 131072 Kimi)
+ANALYSIS_CONTEXT_WINDOW=131072     # Kimi mantiene 128K para síntesis
+ANALYSIS_MAX_REFINEMENTS=1         # explícito (era default)
+STREAM_BUFFER_QUALITY=1            # explícito (era default)
+GROUNDING_REFINEMENT=1             # explícito (era default)
+```
+
+**Por qué funciona:** `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` (Kimi key) siguen presentes.  
+El passthrough los usa directamente cuando `model=anthropic/kimi-k2`. `ANALYSIS_API_KEY` NO  
+es necesario — `CredentialTransformer` solo aplica en LiteLLM pipeline, no en passthrough.
+
+**Startup log de confirmación:**
+```
+provider: openai  big: deepseek-chat  small: deepseek-chat  building: deepseek-chat
+[startup] Analysis: model=anthropic/kimi-k2 refinements=1
+[startup] Passthrough: AUTO (anthropic endpoints → https://api.kimi.com)
+```
+
+### Lecciones clave
+
+- **`docker restart` no recarga env vars** — usar `docker compose up -d --force-recreate`
+- **Python code + env vars**: env changes solo necesitan `--force-recreate`; Python changes necesitan `docker compose build` (kimi-coding stack no tiene bind mount)
+- **`PASSTHROUGH_REQUIRE_PREFIX=1` es estricto** — cualquier modelo sin `proveedor/modelo` cae a LiteLLM. Si LiteLLM tampoco lo conoce → BadRequestError. Siempre incluir prefijo explícito.
+- **`analysis_thinking (generic fallback)`** en los logs = la request de SYNTHESIZING fue a LiteLLM, no a passthrough. Es la señal de diagnóstico.
+- **`analysis_refinements: 0`** = el refinement loop nunca completó. Causas posibles: fallback retorna stream, ANALYSIS_MODEL no tiene prefijo, o ANALYSIS_API_KEY vacío en LiteLLM path.
+
+### ts-quality-gate.sh: bug en grep detectado
+
+`grep -n "useEffect"` matcheaba la línea de import `import React, { useEffect }`, haciendo  
+`FIRST_USEF_LINE=1` → falsos positivos en todas las constantes. Fix: `grep -n "useEffect("` (con paréntesis).
+
+---
+
 ## Session 2026-07-10: Beta→Admin migration + Kimi K2 debt cleanup
 
 ### Decisiones tomadas

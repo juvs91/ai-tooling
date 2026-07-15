@@ -423,6 +423,8 @@ class IntentClassifierTransformer(Transformer):
                 api_base=self._cls.base_url,
                 timeout_s=self._cls.timeout,
                 tool_context=tool_context,
+                max_consecutive_errors=self._cls.max_consecutive_errors,
+                circuit_reset_seconds=self._cls.circuit_reset_seconds,
             )
             ctx.intent = _intent
             ctx.intent_confidence = _confidence

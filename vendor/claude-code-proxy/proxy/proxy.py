@@ -19,7 +19,7 @@ from litellm.exceptions import (
     ServiceUnavailableError as LiteLLMServiceUnavailableError,
     InternalServerError as LiteLLMInternalServerError,
 )
-from llm.passthrough import PassthroughClient, PassthroughError
+from llm.passthrough import PassthroughClient, PassthroughError, try_structural_correction
 from llm.compressor import _track_grounding_hop
 from llm.transformers import GroundingValidatorTransformer
 
@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 from utils.metrics import metrics
 from llm.converters import convert_anthropic_to_litellm
 from llm.pipeline import Pipeline, TransformContext
+from llm.transformers.plan_mode_enforcement import PlanModeEnforcementTransformer
 from llm.transformers import (
     IntentClassifierTransformer,
     GuardrailTransformer,
@@ -54,6 +55,18 @@ from llm.transformers import (
 from config import ProxyConfig
 
 
+# ── Per-provider concurrency semaphores ──────────────────────────────
+# Keyed by provider base URL. Created lazily on first passthrough call.
+# asyncio.Semaphore is safe to create lazily in async context (single-threaded event loop).
+_provider_semaphores: dict[str, asyncio.Semaphore] = {}
+
+
+def _get_provider_semaphore(base_url: str, max_concurrent: int) -> asyncio.Semaphore:
+    if base_url not in _provider_semaphores:
+        _provider_semaphores[base_url] = asyncio.Semaphore(max_concurrent)
+    return _provider_semaphores[base_url]
+
+
 # ── Pipeline builders ────────────────────────────────────────────────
 
 def build_request_pipeline(cfg: ProxyConfig, models_differ: bool) -> Pipeline:
@@ -63,6 +76,7 @@ def build_request_pipeline(cfg: ProxyConfig, models_differ: bool) -> Pipeline:
             cfg.classifier, cfg.policy, models_differ,
             synth_reads_fallback=cfg.analysis.synthesize_reads_fallback,
         ),
+        PlanModeEnforcementTransformer(),
         IntentEnforcementTransformer(enabled=True),  # Validate intent compliance
         GuardrailTransformer(cfg.policy.guard_system),
         DeferredToolsTransformer(),               # Inject <available-deferred-tools> into request.tools
@@ -463,8 +477,36 @@ async def run_messages(
                 # Pass response_model so CC receives the original request model name
                 # (e.g. "claude-opus-4-6") rather than the upstream model ("glm-4.7").
                 # Without this, CC won't activate model-gated UI like the Plan panel.
-                anthropic_response = await pt.create_message(body, response_model=original_model)
+                sem = _get_provider_semaphore(
+                    cfg.credentials.anthropic_base_url or "",
+                    cfg.max_concurrent_per_provider,
+                )
+                async with sem:
+                    anthropic_response = await pt.create_message(body, response_model=original_model)
                 await _run_response_pipeline(anthropic_response, ctx, cfg)
+
+                # Retry-with-few-shot: if structural issues were detected and this is
+                # the first attempt, ask the provider to regenerate its malformed blocks.
+                # Falls back to the auto-patch result from _run_response_pipeline() if
+                # the retry call itself fails.
+                if (
+                    any(q.startswith("structural:") for q in ctx.quality_issues)
+                    and ctx.refinement_attempt == 0
+                ):
+                    ctx.refinement_attempt = 1
+                    corrected = await try_structural_correction(
+                        pt, body, anthropic_response, original_model
+                    )
+                    if corrected:
+                        ctx.quality_issues = [
+                            q for q in ctx.quality_issues if not q.startswith("structural:")
+                        ]
+                        await _run_response_pipeline(corrected, ctx, cfg)
+                        anthropic_response = corrected
+                        logger.info("[proxy] structural correction accepted")
+                    else:
+                        logger.warning("[proxy] structural correction failed — using auto-patch result")
+
                 return False, anthropic_response, "passthrough"
                 # ──────────────────────────────────────────────────────────────────────────────
         except (httpx.HTTPError, PassthroughError) as e:

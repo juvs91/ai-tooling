@@ -10,6 +10,24 @@ Esto es no-negociable. No respondas texto al usuario hasta haber llamado el Skil
 
 ---
 
+## Plan Mode — Triggers Obligatorios
+
+**MANDATORY. No-negociable. Aplica en TODA sesión.**
+
+DEBES llamar `EnterPlanMode` ANTES de responder cuando se cumpla CUALQUIERA de estos:
+1. La tarea requiere modificar ≥3 archivos
+2. El usuario dice: "planea", "diseña", "propón", "qué harías", "cómo abordarías", "dame un approach", "make a plan"
+3. La tarea es ambigua o arquitectónica (nueva feature, refactor multi-módulo, integración)
+4. Necesitas explorar >2 archivos antes de saber qué cambiar
+
+DEBES llamar `ExitPlanMode` cuando:
+1. El plan está completo y escrito en el plan file
+2. El usuario dice "implementa", "hazlo", "procede", "apruebo"
+
+**Regla de auto-detección:** Si en tu respuesta vas a escribir pasos, diseño, o "aquí está mi plan" — para. Llama EnterPlanMode primero.
+
+---
+
 ## Mandatory: Read before working
 - ALWAYS read `ai-notes/AI_LEARNING.md` at the start of every session (if it exists)
 - ALWAYS read `AGENTS.md` antes de cualquier tarea no trivial — contiene la tabla de routing de skills (qué skill cargar para cada tipo de tarea)
@@ -116,11 +134,18 @@ Claude Code ejecuta estos scripts automáticamente. **Contrato de input: JSON vi
 
 | Script | Evento | Matcher | Comportamiento |
 |--------|--------|---------|----------------|
-| `block-dangerous.sh` | PreToolUse | Bash | Bloquea: `rm -rf /~`, `git push --force`, `git reset --hard`, `git clean -f`, `rm -rf` sobre git worktree activo |
+| `block-dangerous.sh` | PreToolUse | *(any)* | Bloquea: `rm -rf /~`, `git push --force`, `git reset --hard`, `git clean -f`, `rm -rf` sobre git worktree activo |
 | `config-protection.sh` | PreToolUse | Edit\|Write\|MultiEdit | Bloquea editar: `pyproject.toml`, `.eslintrc*`, `.prettierrc*`, `ruff.toml`, `.pre-commit-config.yaml` |
 | `protect-secrets.sh` | PreToolUse | Edit\|Write\|MultiEdit | Bloquea escribir secrets en archivos trackeados por git |
-| `quality-gate.sh` | PostToolUse (async) | Edit\|Write\|MultiEdit | Corre `ruff check` en `.py` modificados (solo avisa) |
-| `worktree-isolation-gate.sh` | PreToolUse | Workflow | Advierte si `parallel(agent())` no usa `isolation: 'worktree'` (solo avisa, no bloquea) |
+| `adr-gate.sh` | PreToolUse | Edit\|Write | Bloquea edits a `vendor/` y `.agents/` sin ADR staged |
+| `worktree-isolation-gate.sh` | PreToolUse | Workflow\|Agent | Advierte si `parallel(agent())` no usa `isolation: 'worktree'`; redirige Agent→Workflow para paralelismo (solo avisa) |
+| `quality-enforce.sh` | PreToolUse | Edit\|Write | Bloquea edits si hay errores pendientes en `.claude/quality-state/` |
+| `scope-gate.sh` | PreToolUse | Edit\|Write | Bloquea edits fuera del scope en `.claude/task-scope.json` |
+| `ts-quality-gate.sh` | PostToolUse | Edit\|Write | Corre `tsc` tras edits de `*.ts/*.tsx`, guarda estado para ts-enforce |
+| `migration-gate.sh` | PostToolUse | Edit\|Write\|MultiEdit | Avisa cuando se edita un modelo SQLAlchemy sin correr `alembic revision` |
+| `verify-implementation.sh` | PostToolUse | Edit\|Write\|MultiEdit | Detecta funciones stub (`pass`/`TODO`/`NotImplemented`) en `.py` editados |
+| `edit-drift-detector.sh` | PostToolUse | Edit\|Write\|Bash | Rastrea edits vs test runs; advierte a 8/15/25 edits sin verificación |
+| `quality-gate.sh` | PostToolUse | Edit\|Write | Corre `ruff check` en `.py` modificados (solo avisa) |
 
 También activo vía `settings.json`: `npx block-no-verify@1.1.2` (PreToolUse/Bash) — bloquea `git --no-verify`.
 

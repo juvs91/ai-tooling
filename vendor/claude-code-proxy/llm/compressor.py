@@ -41,7 +41,9 @@ _CIRCUIT_BREAKER_THRESHOLD = 5   # failures before opening circuit
 _CIRCUIT_BREAKER_COOLDOWN = 60.0  # seconds to skip compressor after circuit opens
 
 # Compression token budget to limit DeepSeek calls per session
-_COMPRESSION_TOKEN_BUDGET = 50000  # Max tokens to spend on DeepSeek per session
+# Configurable via COMPRESSION_TOKEN_BUDGET env var. Default raised to 200k (was 50k) — a 80-msg
+# session consumes ~30k tokens per compression call; 50k was exhausted in 2-3 successful calls.
+_COMPRESSION_TOKEN_BUDGET = int(os.getenv("COMPRESSION_TOKEN_BUDGET", "200000"))
 _compression_tokens_spent: dict[str, int] = {}  # session_id -> tokens spent
 
 # Lock for all module-level mutable state (_compression_cache, _consecutive_failures, _circuit_open_until)
@@ -875,9 +877,15 @@ async def _llm_compress(
     """
     global _consecutive_failures, _circuit_open_until
 
-    # Circuit breaker: skip if too many recent failures
     now = time.monotonic()
+    # Check budget AND circuit breaker under one lock.
+    # Budget exhaustion is a graceful stop — NOT a failure, must NOT increment _consecutive_failures.
     async with _state_lock:
+        primary_budget = _compression_tokens_spent.get(model, 0)
+        if primary_budget > _COMPRESSION_TOKEN_BUDGET:
+            print(f"[compress] session budget exhausted ({primary_budget} > {_COMPRESSION_TOKEN_BUDGET}) — "
+                  f"trimming only (no circuit error)")
+            return None  # Return without touching circuit breaker state
         if _circuit_open_until > now:
             remaining = int(_circuit_open_until - now)
             print(f"[compress] Circuit breaker OPEN — skipping LLM compressor ({remaining}s remaining)")
