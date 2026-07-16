@@ -62,22 +62,14 @@ TASK_ID="${SLUG}-${DATE}"
 BASE_MODE=$(echo "$MODE" | cut -d: -f1)
 
 # ── Generic project structure discovery ──────────────────────────────────────
-# Detect which docs directories the project actually uses (none assumed)
+# Detect which docs directories the project actually uses — none assumed upfront.
 DOCS_DIRS=()
 for d in ai-notes docs notes documentation wiki; do
   [ -d "$CWD/$d" ] && DOCS_DIRS+=("$d")
 done
 
-# Detect which directories may contain :ts custom hooks (use-* pattern)
-TS_HOOK_DIRS=()
-if [ "$LANG_SUFFIX" = ":ts" ]; then
-  for d in hooks lib src/hooks src/lib src components; do
-    [ -d "$CWD/$d" ] && TS_HOOK_DIRS+=("$d")
-  done
-fi
-
-# ── analysis_write_paths — passed to scope-gate.sh ───────────────────────────
-# Always includes .claude/plans. Adds findings/ and analysis/ under each docs dir found.
+# ── analysis_write_paths — passed to scope-gate.sh (analysis mode) ───────────
+# Always includes .claude/plans. Adds findings/ and analysis/ under each docs dir.
 WRITE_PATHS=(".claude/plans")
 for d in "${DOCS_DIRS[@]}"; do
   WRITE_PATHS+=("${d}/findings")
@@ -143,6 +135,7 @@ fi
 # Temp files avoid jq --argjson shell-quoting issues with single quotes inside strings
 CHECKLIST_TMP=$(mktemp)
 PATHS_TMP=$(mktemp)
+DOCS_TMP=$(mktemp)
 
 if [ ${#ITEMS[@]} -gt 0 ]; then
   printf '%s\n' "${ITEMS[@]}" | jq -R . | jq -s . > "$CHECKLIST_TMP"
@@ -156,20 +149,29 @@ else
   printf '[".claude/plans"]' > "$PATHS_TMP"
 fi
 
+# docs_dirs: base directories only (consumed by scope-gate synthesize mode)
+if [ ${#DOCS_DIRS[@]} -gt 0 ]; then
+  printf '%s\n' "${DOCS_DIRS[@]}" | jq -R . | jq -s . > "$DOCS_TMP"
+else
+  printf '[]' > "$DOCS_TMP"
+fi
+
 jq -n \
   --arg task_id "$TASK_ID" \
   --arg mode "$MODE" \
   --slurpfile checklist "$CHECKLIST_TMP" \
   --slurpfile write_paths "$PATHS_TMP" \
+  --slurpfile docs_dirs "$DOCS_TMP" \
   '{
     "task_id":              $task_id,
     "mode":                 $mode,
     "allowed_patterns":     [],
+    "docs_dirs":            $docs_dirs[0],
     "analysis_write_paths": $write_paths[0],
     "completion_checklist": $checklist[0]
   }' > "$SCOPE_FILE"
 
-rm -f "$CHECKLIST_TMP" "$PATHS_TMP"
+rm -f "$CHECKLIST_TMP" "$PATHS_TMP" "$DOCS_TMP"
 touch "$BOOTSTRAP_MARKER"
 
 echo "intent-bootstrap: task-scope.json → mode=${MODE} task=${TASK_ID}"

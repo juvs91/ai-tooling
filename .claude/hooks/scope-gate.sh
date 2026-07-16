@@ -70,19 +70,35 @@ case "$BASE_MODE" in
     ;;
 
   synthesize)
-    case "$RELATIVE" in
-      # Generic documentation directories — project-agnostic
-      ai-notes/*|docs/*|notes/*|documentation/*|wiki/*) exit 0 ;;
-      # Root-level markdown (README, CHANGELOG, etc.) — but not inside code dirs
-      *.md)
+    # Read docs_dirs set by intent-bootstrap (discovered from actual project structure)
+    DOCS_DIRS=$(jq -r '.docs_dirs[]? // empty' "$SCOPE_FILE" 2>/dev/null)
+
+    if [ -n "$DOCS_DIRS" ]; then
+      while IFS= read -r ddir; do
+        [ -z "$ddir" ] && continue
         case "$RELATIVE" in
-          src/*|app/*|lib/*|components/*|vendor/*|node_modules/*|.venv/*) ;;
-          *) exit 0 ;;
+          ${ddir}/*|${ddir}) exit 0 ;;
         esac
+      done <<< "$DOCS_DIRS"
+      DOCS_DISPLAY=$(echo "$DOCS_DIRS" | tr '\n' ' ')
+    else
+      # Generic fallback when docs_dirs not set in task-scope.json
+      case "$RELATIVE" in
+        ai-notes/*|docs/*|notes/*|documentation/*|wiki/*) exit 0 ;;
+      esac
+      DOCS_DISPLAY="ai-notes/ docs/ notes/ documentation/ wiki/"
+    fi
+
+    # Root-level markdown always allowed (README.md, CHANGELOG.md, etc.)
+    case "$RELATIVE" in
+      *.md)
+        [[ "$RELATIVE" == */* ]] || exit 0
         ;;
     esac
+
     echo "scope-gate[synthesize]: '$RELATIVE' is not a documentation path." >&2
-    echo "  Allowed: ai-notes/ docs/ notes/ documentation/ wiki/ root-level *.md" >&2
+    echo "  Allowed: ${DOCS_DISPLAY}root-level *.md" >&2
+    echo "  To change: set 'docs_dirs' in .claude/task-scope.json" >&2
     exit 2
     ;;
 
