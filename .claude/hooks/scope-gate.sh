@@ -4,14 +4,18 @@
 # matcher: Edit|Write
 # timeout: 5
 # scope-gate.sh — PreToolUse hook (Edit|Write)
-# Si .claude/task-scope.json existe en el CWD del proyecto activo, bloquea edits fuera del scope.
-# El modelo actualiza task-scope.json dinámicamente al avanzar entre subtareas.
-# Sin task-scope.json = sin restricción (opt-in por tarea).
-# mode field en task-scope.json activa enforcement por tipo de tarea:
-#   analysis: solo ai-notes/findings/ y .claude/plans/
-#   validate: ningún write permitido
-#   synthesize: ai-notes/, docs/, *.md únicamente
-#   build|full: usa allowed_patterns[] (comportamiento original)
+#
+# If .claude/task-scope.json exists, enforces write scope per declared mode.
+# Without task-scope.json: no restriction (opt-in per task).
+#
+# Modes:
+#   analysis  — writes only to paths in analysis_write_paths[] (or generic fallback)
+#   validate  — no writes at all
+#   synthesize — writes only to doc directories and root-level markdown
+#   build|full — respects allowed_patterns[] (original behavior)
+#
+# analysis_write_paths[] in task-scope.json is set by intent-bootstrap.sh
+# based on what doc directories actually exist in the project.
 
 INPUT=$(cat)
 FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
@@ -23,41 +27,72 @@ SCOPE_FILE="$CWD/.claude/task-scope.json"
 
 RELATIVE="${FILE#$CWD/}"
 
-# Siempre permitir escribir el propio task-scope.json (el agente debe poder inicializar el scope)
+# Always allow writing task-scope.json itself
 [ "$RELATIVE" = ".claude/task-scope.json" ] && exit 0
 
-TASK_NAME=$(jq -r '.task // .task_id // "tarea actual"' "$SCOPE_FILE")
+TASK_NAME=$(jq -r '.task // .task_id // "current task"' "$SCOPE_FILE")
 STEP=$(jq -r '.current_step // ""' "$SCOPE_FILE")
 MODE=$(jq -r '.mode // "full"' "$SCOPE_FILE")
 BASE_MODE=$(echo "$MODE" | cut -d: -f1)
 
-# Mode-specific enforcement — antes de allowed_patterns[]
 case "$BASE_MODE" in
+
   analysis)
-    case "$RELATIVE" in
-      ai-notes/findings/*|.claude/plans/*) exit 0 ;;
-    esac
-    echo "scope-gate[analysis]: '$RELATIVE' fuera del scope de análisis." >&2
-    echo "  Solo permite writes en: ai-notes/findings/ y .claude/plans/" >&2
-    echo "  Analizar ≠ Documentar. Usa mode=synthesize para crear docs." >&2
+    # Read project-specific write paths from task-scope.json (set by intent-bootstrap)
+    WRITE_PATHS=$(jq -r '.analysis_write_paths[]? // empty' "$SCOPE_FILE" 2>/dev/null)
+
+    if [ -n "$WRITE_PATHS" ]; then
+      while IFS= read -r wpath; do
+        [ -z "$wpath" ] && continue
+        case "$RELATIVE" in
+          ${wpath}/*|${wpath}) exit 0 ;;
+        esac
+      done <<< "$WRITE_PATHS"
+      ALLOWED_DISPLAY=$(echo "$WRITE_PATHS" | tr '\n' ' ')
+    else
+      # Generic fallback when analysis_write_paths not set
+      case "$RELATIVE" in
+        .claude/plans/*|findings/*|notes/*) exit 0 ;;
+      esac
+      ALLOWED_DISPLAY=".claude/plans/  findings/  notes/"
+    fi
+
+    echo "scope-gate[analysis]: '$RELATIVE' is outside analysis scope." >&2
+    echo "  Allowed: ${ALLOWED_DISPLAY}" >&2
+    echo "  To change: set 'analysis_write_paths' in .claude/task-scope.json" >&2
+    echo "  Analyze ≠ Document. Use mode=synthesize to create docs." >&2
     exit 2
     ;;
+
   validate)
-    echo "scope-gate[validate]: modo validate no permite writes." >&2
+    echo "scope-gate[validate]: no writes allowed in validate mode." >&2
     exit 2
     ;;
+
   synthesize)
     case "$RELATIVE" in
-      ai-notes/*|docs/*|*.md) exit 0 ;;
+      # Generic documentation directories — project-agnostic
+      ai-notes/*|docs/*|notes/*|documentation/*|wiki/*) exit 0 ;;
+      # Root-level markdown (README, CHANGELOG, etc.) — but not inside code dirs
+      *.md)
+        case "$RELATIVE" in
+          src/*|app/*|lib/*|components/*|vendor/*|node_modules/*|.venv/*) ;;
+          *) exit 0 ;;
+        esac
+        ;;
     esac
-    echo "scope-gate[synthesize]: '$RELATIVE' no es documentación." >&2
+    echo "scope-gate[synthesize]: '$RELATIVE' is not a documentation path." >&2
+    echo "  Allowed: ai-notes/ docs/ notes/ documentation/ wiki/ root-level *.md" >&2
     exit 2
     ;;
+
   build|full)
+    # Fall through to allowed_patterns[] check below
     ;;
+
 esac
 
-# Comportamiento original: allowed_patterns[] (para mode=build|full)
+# build|full: respect allowed_patterns[] from task-scope.json
 ALLOWED=$(jq -r '.allowed_patterns // [] | .[]' "$SCOPE_FILE" 2>/dev/null)
 [ -z "$ALLOWED" ] && exit 0
 
@@ -66,8 +101,8 @@ while IFS= read -r pattern; do
 done <<< "$ALLOWED"
 
 ALLOWED_LIST=$(jq -r '.allowed_patterns | join(", ")' "$SCOPE_FILE")
-echo "scope-gate: '$RELATIVE' fuera del scope." >&2
-echo "  Tarea: '$TASK_NAME' | Paso: '${STEP:-no definido}'" >&2
-echo "  Scope actual: $ALLOWED_LIST" >&2
-echo "  → Actualiza .claude/task-scope.json si necesitas un nuevo scope, o confirma con el usuario." >&2
+echo "scope-gate: '$RELATIVE' is outside task scope." >&2
+echo "  Task: '$TASK_NAME' | Step: '${STEP:-not set}'" >&2
+echo "  Allowed patterns: $ALLOWED_LIST" >&2
+echo "  → Update .claude/task-scope.json if you need a wider scope." >&2
 exit 2
