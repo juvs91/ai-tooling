@@ -38,6 +38,11 @@ Skills en `.agents/skills/`. Routing completo con descripción de capacidad en `
 Índice para discovery mid-session: `.agents/skills/skills.md`.
 Sync automático via `sync_skills.sh` (throttle 24h). Force: `bash .agents/sync_skills.sh --force`
 
+## Output Style — MANDATORY
+
+- **No Artifacts / presentaciones visuales** salvo que el usuario los pida explícitamente.
+  Responder siempre en texto o markdown directo en el chat.
+
 ## Guardrails
 - Do NOT guess or fabricate file paths, commands, or outputs
 - Do NOT dump large outputs into chat — write everything to `ai-notes/`
@@ -93,12 +98,6 @@ Configured in `.mcp.json` → `mcpServers`:
 | `alloydb-query` | `mcp__alloydb__query_tool` | Query pricing data |
 | `alloydb-debug` | `mcp__alloydb__query_tool` | Diagnose calculation errors |
 | `cascade-analyzer` | `mcp__alloydb__query_tool` | Analyze price/freight cascade |
-
-### Dynamic Skills (via scripts)
-| Skill | Command | Documentation |
-|-------|---------|---------------|
-| `api-test` | `./scripts/api-test` | Tests API integration |
-| `validation-checker` | `./scripts/validation-checker` | Validates business rules |
 
 ### Project Skills (via MCP)
 | Skill | Commands | Docs |
@@ -171,7 +170,6 @@ echo '{"tool_name":"Edit","tool_input":{"file_path":"/path/pyproject.toml","old_
 |--------|----------|
 | `check-mcp-status.sh` | Check health of all MCP services |
 | `cloudsql-mcp.sh` | Wrapper for CloudSQL MCP (switches WPC_ENV) |
-| `_load-skill-doc.sh` | Helper to load markdown docs for dynamic skills |
 | `task-verify.sh` | Verifica completitud de tarea vs `.claude/task-scope.json`; exit 0 = completa |
 | `install-hooks.sh` | Distribuye hooks/scripts con `# distributable: true` a otro proyecto. **Correr tras actualizar hooks en ai-tooling.** |
 

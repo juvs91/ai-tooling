@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # skill-autoload.sh — Autocarga de workflow-coordinator UNA VEZ por sesión
-# Evento: UserPromptSubmit
+# distributable: true
+# event: UserPromptSubmit
+# matcher: ""
+# timeout: 5
 # Mecanismo:
 #   1. Lee SESSION_ID del JSON de entrada
 #   2. Si ya vio esta sesión (.claude/sessions/<ID>), sale silencioso
@@ -36,6 +39,14 @@ find "$SESSIONS_DIR" -maxdepth 1 -type f -mmin +2880 -delete 2>/dev/null || true
 
 SKILL_FILE=".agents/skills/workflow/workflow-coordinator/SKILL.md"
 AGENTS_FILE="AGENTS.md"
+
+# Si intent-bootstrap ya creó task-scope.json, la tarea está clasificada.
+# workflow-coordinator no agrega valor — solo overhead de routing.
+CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
+if [ -f "$CWD/.claude/task-scope.json" ]; then
+  touch "$SESSION_MARKER" 2>/dev/null || true
+  exit 0
+fi
 
 if [ -f "$SKILL_FILE" ] && [ -f "$AGENTS_FILE" ]; then
   # Emitir instrucción y marcar DESPUÉS para garantizar que Claude la recibe

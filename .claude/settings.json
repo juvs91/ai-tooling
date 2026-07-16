@@ -51,18 +51,6 @@
       "command": ".agents/skills/workflow/ticket-implementation/SKILL.md",
       "documentation": ".agents/skills/workflow/ticket-implementation/SKILL.md"
     },
-    "validation-checker": {
-      "description": "Validar reglas de negocio (dinamico)",
-      "category": "validation",
-      "command": "./scripts/validation-checker",
-      "documentation": ".claude/commands/validation-checker.md"
-    },
-    "api-test": {
-      "description": "Probar integracion con API (dinamico)",
-      "category": "integration",
-      "command": "./scripts/api-test",
-      "documentation": ".claude/commands/api-test.md"
-    },
     "jira-context": {
       "description": "Traer contexto de tickets Jira",
       "category": "project",
@@ -270,11 +258,33 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash .claude/hooks/intent-bootstrap.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Bootstrap task-scope.json en bash puro (sin Skill tool) — funciona en --print, interactivo y VS Code"
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
             "command": "bash .claude/hooks/skill-autoload.sh",
             "timeout": 5
           }
         ],
         "description": "Autoload stateless de workflow-coordinator en cada prompt"
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/task-scope-updater.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Detecta cambios de modo mid-session (analiza→implementa) y actualiza task-scope.json"
       },
       {
         "matcher": "",
