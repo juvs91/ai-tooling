@@ -34,6 +34,11 @@ if [ -f "$CWD/tsconfig.json" ] || [ -f "$CWD/package.json" ]; then LANG_SUFFIX="
 if [ -f "$CWD/pyproject.toml" ] || [ -f "$CWD/setup.py" ]; then LANG_SUFFIX=":py"; fi
 if [ -f "$CWD/go.mod" ]; then LANG_SUFFIX=":go"; fi
 if [ -f "$CWD/Cargo.toml" ]; then LANG_SUFFIX=":rs"; fi
+if [ -f "$CWD/pom.xml" ] || [ -f "$CWD/build.gradle" ] || [ -f "$CWD/build.gradle.kts" ]; then LANG_SUFFIX=":java"; fi
+# :sql — primarily SQL repos (migrations/, sql/, queries/) with no other lang marker
+if [ -z "$LANG_SUFFIX" ]; then
+  if [ -d "$CWD/migrations" ] || [ -d "$CWD/sql" ] || [ -d "$CWD/queries" ]; then LANG_SUFFIX=":sql"; fi
+fi
 
 # ── Intent detection ──────────────────────────────────────────────────────────
 if echo "$PROMPT" | grep -qiE \
@@ -80,37 +85,53 @@ for d in "${DOCS_DIRS[@]}"; do
 done
 
 # ── completion_checklist (analysis mode only) ─────────────────────────────────
+# Items are convention-free: structure + file counts only.
+# No naming patterns (no 'use-*.ts', no 'test_*.py') — agent discovers conventions
+# from the structure and decides what to search for based on the actual task.
 ITEMS=()
 
 if [ "$BASE_MODE" = "analysis" ]; then
 
-  # :ts — discover custom hooks across all detected hook dirs
-  if [ "$LANG_SUFFIX" = ":ts" ] && [ ${#TS_HOOK_DIRS[@]} -gt 0 ]; then
-    DIRS_STR="${TS_HOOK_DIRS[*]}"
-    ITEMS+=("find ${DIRS_STR} -name 'use-*.ts' -o -name 'use-*.tsx' 2>/dev/null | grep -v __tests__ | grep -v node_modules | sort  # custom hooks in ${DIRS_STR} :ts")
-    ITEMS+=("find . -path '*/__tests__/use-*.test.t*' 2>/dev/null | grep -v node_modules | sort  # hook test files :ts")
+  # Universal: project directory structure — always first, agent orients from this
+  ITEMS+=("find . -mindepth 1 -maxdepth 3 -type d | grep -v node_modules | grep -v .git | grep -v __pycache__ | grep -v .venv | grep -v vendor | grep -v target | sort  # project structure — explore ALL dirs before reporting")
+
+  # :ts — source and test file counts, no naming convention assumed
+  if [ "$LANG_SUFFIX" = ":ts" ]; then
+    ITEMS+=("find . \( -name '*.ts' -o -name '*.tsx' \) | grep -v node_modules | grep -v __tests__ | grep -v '.test.' | grep -v '.spec.' | wc -l  # total TypeScript source files :ts")
     ITEMS+=("find . \( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.spec.ts' -o -name '*.spec.tsx' \) | grep -v node_modules | wc -l  # total test files :ts")
   fi
 
-  # :py — generic Python source and test counts
+  # :py — source and test file counts
   if [ "$LANG_SUFFIX" = ":py" ]; then
-    ITEMS+=("find . -name '*.py' | grep -v __pycache__ | grep -v '.venv' | grep -v node_modules | wc -l  # total Python files :py")
-    ITEMS+=("find . \( -name 'test_*.py' -o -name '*_test.py' \) | grep -v node_modules | wc -l  # test files :py")
+    ITEMS+=("find . -name '*.py' | grep -v __pycache__ | grep -v .venv | grep -v node_modules | wc -l  # total Python files :py")
+    ITEMS+=("find . -name '*.py' | grep -v __pycache__ | grep -v .venv | xargs grep -l 'def test_\|class Test' 2>/dev/null | wc -l  # files with tests :py")
   fi
 
-  # :go — generic Go source and test counts
+  # :go — source and test file counts
   if [ "$LANG_SUFFIX" = ":go" ]; then
-    ITEMS+=("find . -name '*.go' | grep -v vendor | wc -l  # total Go files :go")
+    ITEMS+=("find . -name '*.go' | grep -v vendor | grep -v '_test.go' | wc -l  # total Go source files :go")
     ITEMS+=("find . -name '*_test.go' | grep -v vendor | wc -l  # test files :go")
   fi
 
-  # :rs — generic Rust source and test counts
+  # :rs — source and test file counts
   if [ "$LANG_SUFFIX" = ":rs" ]; then
-    ITEMS+=("find src -name '*.rs' | wc -l  # total Rust source files :rs")
-    ITEMS+=("find . -name '*.rs' -exec grep -l '#\[test\]' {} + | wc -l  # files with tests :rs")
+    ITEMS+=("find src -name '*.rs' | grep -v 'mod.rs' | wc -l  # total Rust source files :rs")
+    ITEMS+=("find . -name '*.rs' | xargs grep -l '#\[test\]' 2>/dev/null | wc -l  # files with tests :rs")
   fi
 
-  # Generic: docs structure discovery for each detected docs directory
+  # :java — source and test file counts
+  if [ "$LANG_SUFFIX" = ":java" ]; then
+    ITEMS+=("find . -name '*.java' | grep -v target | grep -v 'Test.java' | grep -v 'IT.java' | wc -l  # total Java source files :java")
+    ITEMS+=("find . -name '*Test.java' -o -name '*IT.java' | grep -v target | wc -l  # test files :java")
+  fi
+
+  # :sql — query and migration file counts (pg or mssql — same pattern)
+  if [ "$LANG_SUFFIX" = ":sql" ]; then
+    ITEMS+=("find . -name '*.sql' | grep -v node_modules | wc -l  # total SQL files :sql")
+    ITEMS+=("find . -name '*.sql' | grep -v node_modules | sort  # all SQL files listed :sql")
+  fi
+
+  # Generic: docs structure for each detected docs directory
   for d in "${DOCS_DIRS[@]}"; do
     ITEMS+=("find ${d} -mindepth 1 -maxdepth 2 -type d | sort  # subdirs in ${d}/ — explore before reporting")
     ITEMS+=("find ${d} -name '*.md' | wc -l  # markdown files in ${d}/")

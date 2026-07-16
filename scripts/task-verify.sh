@@ -52,11 +52,13 @@ if [ $FAIL -eq 0 ]; then
   case "$BASE_MODE" in
     build|validate)
       case "$LANG_SUFFIX" in
-        ts)  echo "→ Run: npx tsc --noEmit && pnpm test:run && pnpm test:e2e" ;;
-        py)  echo "→ Run: ruff check . && pytest" ;;
-        go)  echo "→ Run: go vet ./... && go test ./..." ;;
-        rs)  echo "→ Run: cargo check && cargo test" ;;
-        *)   echo "→ Run your project's test suite before merging" ;;
+        ts)   echo "→ Run: npx tsc --noEmit && pnpm test:run && pnpm test:e2e" ;;
+        py)   echo "→ Run: ruff check . && pytest" ;;
+        go)   echo "→ Run: go vet ./... && go test ./..." ;;
+        rs)   echo "→ Run: cargo check && cargo test" ;;
+        java) echo "→ Run: mvn test  (or: ./gradlew test)" ;;
+        sql)  echo "→ Run migrations against a test DB and verify with your SQL linter" ;;
+        *)    echo "→ Run your project's test suite before merging" ;;
       esac
       ;;
     analysis|synthesize)
