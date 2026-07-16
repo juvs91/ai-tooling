@@ -84,43 +84,29 @@ ITEMS=()
 
 if [ "$BASE_MODE" = "analysis" ]; then
 
-  # Universal: project directory structure — always first, agent orients from this
+  # Universal item 1: directory structure — agent orients from this
   ITEMS+=("find . -mindepth 1 -maxdepth 3 -type d | grep -v node_modules | grep -v .git | grep -v __pycache__ | grep -v .venv | grep -v vendor | grep -v target | sort  # project structure — explore ALL dirs before reporting")
 
-  # :ts — source and test file counts, no naming convention assumed
+  # Universal item 2 (language-specific): full file listing — agent sees every file,
+  # decides what is relevant to the task without naming-convention assumptions.
+  # Listing (sort) instead of counting (wc -l): agent needs to SEE filenames, not just totals.
   if [ "$LANG_SUFFIX" = ":ts" ]; then
-    ITEMS+=("find . \( -name '*.ts' -o -name '*.tsx' \) | grep -v node_modules | grep -v __tests__ | grep -v '.test.' | grep -v '.spec.' | wc -l  # total TypeScript source files :ts")
-    ITEMS+=("find . \( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.spec.ts' -o -name '*.spec.tsx' \) | grep -v node_modules | wc -l  # total test files :ts")
+    ITEMS+=("find . \( -name '*.ts' -o -name '*.tsx' \) | grep -v node_modules | sort  # all TypeScript files :ts")
   fi
-
-  # :py — source and test file counts
   if [ "$LANG_SUFFIX" = ":py" ]; then
-    ITEMS+=("find . -name '*.py' | grep -v __pycache__ | grep -v .venv | grep -v node_modules | wc -l  # total Python files :py")
-    ITEMS+=("find . -name '*.py' | grep -v __pycache__ | grep -v .venv | xargs grep -l 'def test_\|class Test' 2>/dev/null | wc -l  # files with tests :py")
+    ITEMS+=("find . -name '*.py' | grep -v __pycache__ | grep -v .venv | sort  # all Python files :py")
   fi
-
-  # :go — source and test file counts
   if [ "$LANG_SUFFIX" = ":go" ]; then
-    ITEMS+=("find . -name '*.go' | grep -v vendor | grep -v '_test.go' | wc -l  # total Go source files :go")
-    ITEMS+=("find . -name '*_test.go' | grep -v vendor | wc -l  # test files :go")
+    ITEMS+=("find . -name '*.go' | grep -v vendor | sort  # all Go files :go")
   fi
-
-  # :rs — source and test file counts
   if [ "$LANG_SUFFIX" = ":rs" ]; then
-    ITEMS+=("find src -name '*.rs' | grep -v 'mod.rs' | wc -l  # total Rust source files :rs")
-    ITEMS+=("find . -name '*.rs' | xargs grep -l '#\[test\]' 2>/dev/null | wc -l  # files with tests :rs")
+    ITEMS+=("find . -name '*.rs' | grep -v target | sort  # all Rust files :rs")
   fi
-
-  # :java — source and test file counts
   if [ "$LANG_SUFFIX" = ":java" ]; then
-    ITEMS+=("find . -name '*.java' | grep -v target | grep -v 'Test.java' | grep -v 'IT.java' | wc -l  # total Java source files :java")
-    ITEMS+=("find . -name '*Test.java' -o -name '*IT.java' | grep -v target | wc -l  # test files :java")
+    ITEMS+=("find . -name '*.java' | grep -v target | sort  # all Java files :java")
   fi
-
-  # :sql — query and migration file counts (pg or mssql — same pattern)
   if [ "$LANG_SUFFIX" = ":sql" ]; then
-    ITEMS+=("find . -name '*.sql' | grep -v node_modules | wc -l  # total SQL files :sql")
-    ITEMS+=("find . -name '*.sql' | grep -v node_modules | sort  # all SQL files listed :sql")
+    ITEMS+=("find . -name '*.sql' | grep -v node_modules | sort  # all SQL files :sql")
   fi
 
   # Generic: docs structure for each detected docs directory
