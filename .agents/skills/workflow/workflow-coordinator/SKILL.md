@@ -99,6 +99,52 @@ Analyze the first message for patterns:
 
 ---
 
+### Task Scope Generation (ADR-0022)
+
+**MANDATORY:** After detecting intent and BEFORE loading the target skill, write `.claude/task-scope.json`
+in the project root. This activates scope-gate.sh enforcement for the entire session.
+
+**Intent → mode mapping:**
+
+| Detected intent | mode | When |
+|---|---|---|
+| Análisis, exploración, "cuántos", "qué hace", "cómo funciona", "analiza" | `analysis` | discovery/inquiry |
+| Implementación, "crea", "fix", "build", "agrega", "implementa" | `build:<lang>` | code changes |
+| Documentación, "documenta", "escribe docs", "crea guía", "describe" | `synthesize` | doc creation |
+| Verificación, "revisa", "valida", "corre tests", "review" | `validate` | read-only checks |
+| Planeación, "planea", "diseña", "propón", "approach" | `full` | plan mode sessions |
+| Ambiguo / no clasificable | `full` | safe default |
+
+**Language suffix** (for `build` mode only): `:ts` if project has tsconfig.json / package.json with TypeScript,
+`:py` if Python/FastAPI, `:go` if Go, `:rs` if Rust. Omit if unclear.
+
+**Write the file immediately after intent detection:**
+```json
+{
+  "task_id": "<intent-slug>-<YYYY-MM-DD>",
+  "mode": "<mode>",
+  "allowed_patterns": [],
+  "completion_checklist": []
+}
+```
+
+Example for "analiza los hooks en hooks/ y crea un reporte":
+```json
+{
+  "task_id": "analyze-hooks-2026-07-15",
+  "mode": "analysis:ts",
+  "allowed_patterns": [],
+  "completion_checklist": []
+}
+```
+
+**Mid-session task change:** If the user shifts intent ("ok ahora impleméntalo"), update
+`.claude/task-scope.json` with the new mode. The scope-gate always allows writing this file.
+
+**Granularity:** once per session. Subsequent messages use the same task-scope.json.
+
+---
+
 ## Core Expertise
 
 ### Intent Detection
