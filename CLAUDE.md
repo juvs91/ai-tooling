@@ -172,6 +172,8 @@ echo '{"tool_name":"Edit","tool_input":{"file_path":"/path/pyproject.toml","old_
 | `check-mcp-status.sh` | Check health of all MCP services |
 | `cloudsql-mcp.sh` | Wrapper for CloudSQL MCP (switches WPC_ENV) |
 | `_load-skill-doc.sh` | Helper to load markdown docs for dynamic skills |
+| `task-verify.sh` | Verifica completitud de tarea vs `.claude/task-scope.json`; exit 0 = completa |
+| `install-hooks.sh` | Distribuye hooks/scripts con `# distributable: true` a otro proyecto. **Correr tras actualizar hooks en ai-tooling.** |
 
 ## Agent Skills
 
@@ -179,3 +181,52 @@ Agent routing and specialized personas are defined in `AGENTS.md`.
 Read `@AGENTS.md` for complete routing directives, deduplication mandates, and learning protocols.
 
 Use `.agents/skills/` subagents for deep analysis tasks to keep the main context lean.
+
+---
+
+## Task Mode Protocol (Universal)
+
+Aplica en CUALQUIER proyecto. Copia este bloque a `CLAUDE.md` de cada proyecto.
+Las partes específicas del proyecto van en `completion_checklist` del `task-scope.json`, no aquí.
+
+### Iniciar una tarea con scope declarado:
+1. Antes de empezar, escribe `.claude/task-scope.json`:
+   ```json
+   {
+     "task_id": "<descripción-fecha>",
+     "mode": "<analysis|build|validate|synthesize|full>[:<ts|py|go|rs>]",
+     "allowed_patterns": [],
+     "completion_checklist": ["<comando>  # descripción", ...]
+   }
+   ```
+2. El hook `scope-gate.sh` aplicará restricciones de write según el modo automáticamente
+3. Si no hay `task-scope.json`: comportamiento default (mode=full, sin restricciones extra)
+
+### Scope Discipline — la diferencia entre modos:
+- **analysis**: SOLO leer, contar, comparar, reportar. Write solo en `ai-notes/findings/` y `.claude/plans/`.
+  **"Analizar X" ≠ "Documentar X".** No crear archivos fuera de esas rutas.
+- **build**: editar código en `allowed_patterns[]`. Correr tests al terminar.
+- **synthesize**: crear/editar documentación en `ai-notes/`, `docs/`, `*.md`. No editar código.
+- **validate**: solo leer + correr comandos. No escribir nada.
+
+### Verificación numérica (OBLIGATORIO antes de reportar cualquier conteo):
+1. NUNCA usar `~X` cuando se puede contar exactamente:
+   ```bash
+   find <dir> -name "<pattern>" | grep -v node_modules | wc -l
+   ```
+2. SIEMPRE explorar subdirectorios antes de reportar estructura:
+   ```bash
+   find <dir> -mindepth 1 -maxdepth 2 -type d | sort
+   ```
+   Si encuentras subdirs inesperados: explóralos PRIMERO, reporta DESPUÉS.
+3. Al terminar un análisis: listar explícitamente qué NO fue revisado y por qué.
+
+### Task Completion Gate:
+- SIEMPRE correr `./scripts/task-verify.sh` antes de reportar la tarea como completa
+- Si exit 1: completar los ítems pendientes listados antes de reportar
+- Si exit 0: task-verify.sh indicará si hay tests a correr según modo:lenguaje
+
+### Instalación en un nuevo proyecto:
+1. Copiar este bloque al `CLAUDE.md` del proyecto
+2. Copiar `scripts/task-verify.sh` de `ai-tooling/scripts/` al proyecto
+3. Copiar `.claude/hooks/scope-gate.sh` de `ai-tooling/.claude/hooks/` al proyecto
