@@ -26,6 +26,15 @@ DEBES llamar `ExitPlanMode` cuando:
 
 **Regla de auto-detección:** Si en tu respuesta vas a escribir pasos, diseño, o "aquí está mi plan" — para. Llama EnterPlanMode primero.
 
+**Pre-requisito OBLIGATORIO:** `EnterPlanMode`, `ExitPlanMode` y `AskUserQuestion` son deferred
+tools — sus schemas NO están cargados por defecto. ANTES de llamarlos, ejecuta:
+```
+ToolSearch({ query: "select:EnterPlanMode,ExitPlanMode,AskUserQuestion" })
+```
+Sin este paso la llamada falla con InputValidationError silencioso. Aplica especialmente
+en sesiones largas y con modelos no-Claude (Kimi K2, GPT-4o). Ver inventario completo
+de deferred tools en `.claude/commands/workflow-coordinator.md`.
+
 ---
 
 ## Mandatory: Read before working

@@ -63,6 +63,50 @@ sin este paso. Aplica en TODA sesión, especialmente las largas con Kimi K2.
 | `ExitPlanMode` | Cuando el plan está completo y listo para aprobación del usuario |
 | `AskUserQuestion` | Para pedir aclaraciones antes de planear (opciones estructuradas) |
 
+## Deferred Tools — Referencia Completa
+
+> **Fuente:** `code.claude.com/docs/en/tools-reference` + GH #31002.
+> Desde v2.1.69 TODOS los built-in tools son deferred. Los "auto-loaded" son los que
+> Claude Code descubre solo; los demás necesitan `ToolSearch` explícito en sesiones largas
+> o con modelos no-Claude (Kimi K2, GPT-4o) que no hacen auto-discovery.
+
+### Pre-carga por tipo de tarea
+
+| Trigger | Query |
+|---------|-------|
+| Planning, diseño, arquitectura | `select:EnterPlanMode,ExitPlanMode,AskUserQuestion` |
+| Agent teams / orquestación multi-agent | `select:EnterPlanMode,ExitPlanMode,AskUserQuestion,SendMessage` |
+| Monitoreo de procesos / CI polling | `select:Monitor` |
+| Notebooks Jupyter | `select:NotebookEdit` |
+| Cron / tareas programadas | `select:CronCreate,CronDelete,CronList` |
+| Worktrees aislados | `select:EnterWorktree,ExitWorktree` |
+| Code review con findings estructurados | `select:ReportFindings` |
+
+### Inventario de tools
+
+**Auto-loaded (Claude Code los resuelve sin ToolSearch):**
+`Bash` · `Read` · `Edit` · `Write` · `Glob` · `Grep` · `Agent` · `Skill` · `ToolSearch` · `Workflow`
+
+**Deferred — pre-cargar con ToolSearch en sesiones largas o con modelos no-Claude:**
+
+| Categoría | Tools |
+|-----------|-------|
+| Plan mode | `EnterPlanMode` · `ExitPlanMode` · `AskUserQuestion` |
+| Web | `WebFetch` · `WebSearch` |
+| Task mgmt | `TaskCreate` · `TaskGet` · `TaskList` · `TaskUpdate` · `TaskStop` |
+| Agentes | `SendMessage` · `Monitor` |
+| Cron | `CronCreate` · `CronDelete` · `CronList` |
+| Worktree | `EnterWorktree` · `ExitWorktree` |
+| Notebooks | `NotebookEdit` |
+| Code review | `ReportFindings` |
+| Notif / remote | `PushNotification` · `RemoteTrigger` · `SendUserFile` |
+| MCP resources | `ListMcpResourcesTool` · `ReadMcpResourceTool` |
+| Loop / schedule | `ScheduleWakeup` |
+
+**⚠️ Deprecated — NO usar:**
+- `TodoWrite` → deshabilitado desde v2.1.142. Reemplazado por `TaskCreate/Get/List/Update`.
+- `TaskOutput` → deprecated. Usar `Read` sobre el output file path del task.
+
 ## Protocolo completo
 
 Para el protocolo detallado (workflow states, guards, compound tasks, intent detection):
