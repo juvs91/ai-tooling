@@ -41,7 +41,7 @@ Skill tool loads workflow-coordinator
     ↓
 workflow-coordinator analyzes user's first message
     ↓
-Intent detected → Route to appropriate skill via Skill tool
+Intent detected → Read SKILL.md via Read tool (path from AGENTS.md)
     ↓
 Target skill handles user request
 ```
@@ -81,10 +81,12 @@ Target skill handles user request
    - Use the "Path" column to locate SKILL.md
    - Example: `workflow/ticket-planner/SKILL.md`
 
-4. **Load skill via Skill tool:**
-   ```bash
-   /skill <skill-name-from-table>
+4. **Load skill via Read tool (NOT Skill tool):**
    ```
+   Read .agents/skills/<path-from-AGENTS.md>
+   ```
+   The Skill tool only recognizes commands in `.claude/commands/`. All agent skills
+   live in `.agents/skills/` and must be loaded with the Read tool directly.
 
 **Note:** If intent is ambiguous, workflow-coordinator remains loaded to assist with routing.
 
@@ -96,52 +98,6 @@ Analyze the first message for patterns:
 - **Planning:** "plan", "break down", "how should I", "design"
 - **Inquiry:** "how", "what", "why", "explain", "understand"
 - **Review:** "review", "check", "verify", "validate"
-
----
-
-### Task Scope Generation (ADR-0022)
-
-**MANDATORY:** After detecting intent and BEFORE loading the target skill, write `.claude/task-scope.json`
-in the project root. This activates scope-gate.sh enforcement for the entire session.
-
-**Intent → mode mapping:**
-
-| Detected intent | mode | When |
-|---|---|---|
-| Análisis, exploración, "cuántos", "qué hace", "cómo funciona", "analiza" | `analysis` | discovery/inquiry |
-| Implementación, "crea", "fix", "build", "agrega", "implementa" | `build:<lang>` | code changes |
-| Documentación, "documenta", "escribe docs", "crea guía", "describe" | `synthesize` | doc creation |
-| Verificación, "revisa", "valida", "corre tests", "review" | `validate` | read-only checks |
-| Planeación, "planea", "diseña", "propón", "approach" | `full` | plan mode sessions |
-| Ambiguo / no clasificable | `full` | safe default |
-
-**Language suffix** (for `build` mode only): `:ts` if project has tsconfig.json / package.json with TypeScript,
-`:py` if Python/FastAPI, `:go` if Go, `:rs` if Rust. Omit if unclear.
-
-**Write the file immediately after intent detection:**
-```json
-{
-  "task_id": "<intent-slug>-<YYYY-MM-DD>",
-  "mode": "<mode>",
-  "allowed_patterns": [],
-  "completion_checklist": []
-}
-```
-
-Example for "analiza los hooks en hooks/ y crea un reporte":
-```json
-{
-  "task_id": "analyze-hooks-2026-07-15",
-  "mode": "analysis:ts",
-  "allowed_patterns": [],
-  "completion_checklist": []
-}
-```
-
-**Mid-session task change:** If the user shifts intent ("ok ahora impleméntalo"), update
-`.claude/task-scope.json` with the new mode. The scope-gate always allows writing this file.
-
-**Granularity:** once per session. Subsequent messages use the same task-scope.json.
 
 ---
 
@@ -254,7 +210,7 @@ Invoke this skill when:
 2. Compare against "Triggers" column (case-insensitive)
 3. Find first match (table is ordered by priority)
 4. Extract skill name and path from matched row
-5. Load skill using: `/skill <skill-name>`
+5. Load skill using Read tool: `Read .agents/skills/<path>`
 
 **Example output after reading AGENTS.md:**
 ```
@@ -265,7 +221,7 @@ Invoke this skill when:
 
 📋 Skill: ticket-implementation
 📍 Path: workflow/ticket-implementation/SKILL.md
-🔀 Loading: /skill ticket-implementation
+🔀 Loading: Read .agents/skills/workflow/ticket-implementation/SKILL.md
 ```
 
 ### Step 1: Detect Intent Using AGENTS.md Triggers
@@ -325,9 +281,9 @@ User message: "Implementar ARP-123 con FastAPI"
 Keywords: ["implementar", "ARP-123", "FastAPI"]
 Matches:
   - "implementar" → ticket-implementation (row 62)
-  - "FastAPI" → senior-backend (row 39)
+  - "FastAPI" → python-senior-backend (row 39)
 First match: ticket-implementation
-Action: Load /skill ticket-implementation
+Action: Read .agents/skills/workflow/ticket-implementation/SKILL.md
 ```
 
 ```
@@ -337,7 +293,7 @@ Matches:
   - "¿cómo funciona" → inquiry pattern (no direct trigger)
   - Domain: pricing system
 Intent: Inquiry → software-archeologist (for codebase analysis)
-Action: Load /skill software-archeologist
+Action: Read .agents/skills/software/discovery/software-archeologist/SKILL.md
 ```
 
 ```
@@ -345,9 +301,8 @@ User message: "Diseñar nueva API de precios"
 Keywords: ["diseñar", "nueva", "API", "precios"]
 Matches:
   - "diseñar algo" → brainstorming (row 30)
-  - "REST API" → api-design (row 58)
 First match: brainstorming
-Action: Load /skill brainstorming
+Action: Read .agents/skills/core/brainstorming/SKILL.md
 ```
 
 **Primary Intent Classification:**
@@ -391,8 +346,9 @@ Based on AGENTS.md triggers, classify into:
 **Routing Algorithm:**
 
 1. **Identify matched skill from Step 1**
-2. **Extract skill path from AGENTS.md** (column "Path")
-3. **Load skill using Skill tool:** `/skill <skill-name>`
+2. **Extract skill path from AGENTS.md** (column "Path", relative to `.agents/skills/`)
+3. **Load skill via Read tool:** `Read .agents/skills/<path>`
+   - Do NOT use the Skill tool — it only sees `.claude/commands/`, not `.agents/skills/`
 4. **Hand off context** to loaded skill
 
 **Common Routing Scenarios:**
@@ -402,7 +358,7 @@ Based on AGENTS.md triggers, classify into:
 User: "Quiero agregar un endpoint de precios"
 Triggers: "nueva feature", "quiero hacer X", "endpoint"
 Match: brainstorming (row 30)
-Action: /skill brainstorming
+Action: Read .agents/skills/core/brainstorming/SKILL.md
 
 Brainstorming will:
   - Gate de diseño obligatorio
@@ -415,7 +371,7 @@ Brainstorming will:
 User: "Implementar ARP-123"
 Triggers: "implementar ticket" (row 62)
 Match: ticket-planner (row 61)
-Action: /skill ticket-planner
+Action: Read .agents/skills/workflow/ticket-planner/SKILL.md
 
 ticket-planner will:
   - Planificar Jira con 11-fuentes context
@@ -430,7 +386,7 @@ Check: ai-specs/changes/ARP-123_backend.md exists?
   - YES → Skip planning, go to implementation
   - NO → Go to Scenario B
 
-Action: /skill ticket-implementation
+Action: Read .agents/skills/workflow/ticket-implementation/SKILL.md
 
 ticket-implementation will:
   - Ejecutar plan via 7-hop multihop grounding
@@ -443,7 +399,7 @@ ticket-implementation will:
 User: "¿Cómo funciona el cálculo de precios?"
 Triggers: "reverse engineer", "analizar codebase" (row 36)
 Match: software-archeologist (row 36)
-Action: /skill software-archeologist
+Action: Read .agents/skills/software/discovery/software-archeologist/SKILL.md
 
 software-archeologist will:
   - Ingeniería inversa: execution graph
@@ -455,10 +411,10 @@ software-archeologist will:
 ```
 User: "Crear endpoint FastAPI para precios"
 Triggers: "FastAPI", "endpoint" (row 39)
-Match: senior-backend (row 39)
-Action: /skill senior-backend
+Match: python-senior-backend (row 39)
+Action: Read .agents/skills/backend/python-senior-backend/SKILL.md
 
-senior-backend will:
+python-senior-backend will:
   - SOLID, DRY, async patterns
   - JWT/OAuth, rate limiting
   - Caching, middleware
@@ -469,7 +425,7 @@ senior-backend will:
 User: "Crear componente React para precios"
 Triggers: "React", "componente" (row 49)
 Match: senior-frontend (row 49)
-Action: /skill senior-frontend
+Action: Read .agents/skills/frontend/senior-frontend/SKILL.md
 
 senior-frontend will:
   - Component optimization
@@ -482,7 +438,7 @@ senior-frontend will:
 User: "Review mis cambios en feature/ARP-123"
 Triggers: "review PR", "revisar código" (row 43)
 Match: code-reviewer (row 44)
-Action: /skill code-reviewer
+Action: Read .agents/skills/software/quality/code-reviewer/SKILL.md
 
 code-reviewer will:
   - Quality/security review
@@ -490,16 +446,16 @@ code-reviewer will:
   - Pre-merge validation
 ```
 
-**Scenario H: Inquiry About Documentation**
+**Scenario H: Inquiry About Documentation (Context7)**
 ```
 User: "¿Cómo se usa Alembic?"
-Triggers: "docs de librería", "look up API" (row 55)
-Match: documentation-lookup (row 55)
-Action: /skill documentation-lookup
+Triggers: "docs de librería", "look up API"
+Match: context7 MCP (mcp__context7__resolve-library-id + mcp__context7__query-docs)
+Action: usar mcp__context7 directamente (no hay SKILL.md para esto)
 
-documentation-lookup will:
-  - Buscar docs actualizadas vía Context7
-  - Proporcionar ejemplos
+Context7 will:
+  - Buscar docs actualizadas de la librería
+  - Proporcionar ejemplos actualizados
 ```
 
 **Scenario I: Architecture Question**
@@ -507,7 +463,7 @@ documentation-lookup will:
 User: "¿Qué patrón usar para precios?"
 Triggers: "diseño de sistema", "componentes", "boundaries" (row 33)
 Match: architect (row 33)
-Action: /skill architect
+Action: Read .agents/skills/software/architecture/architect/SKILL.md
 
 architect will:
   - Evaluar trade-offs
@@ -520,7 +476,7 @@ architect will:
 User: "Documentar decisión de arquitectura"
 Triggers: "ADR", "architecture decision record" (row 34)
 Match: adr-writer (row 34)
-Action: /skill adr-writer
+Action: Read .agents/skills/software/architecture/adr-writer/SKILL.md
 
 adr-writer will:
   - Capturar decisión en formato MADR
@@ -534,42 +490,41 @@ From AGENTS.md lines 68-76, when multiple skills apply:
 ```
 Example: "Migrar stored procedure de precios a FastAPI"
 
-Order of loading:
-1. /skill brainstorming (feature nueva)
-2. /skill software-archeologist (análisis legacy)
-3. /skill senior-backend (FastAPI implementation)
-4. /skill python-testing (tests)
-5. /skill tdd-workflow (TDD approach)
-6. /skill verification-loop (pre-PR)
-7. /skill learning-protocol (closing session)
+Order of loading (Read each SKILL.md in sequence):
+1. Read .agents/skills/core/brainstorming/SKILL.md            (feature nueva)
+2. Read .agents/skills/software/discovery/software-archeologist/SKILL.md (análisis legacy)
+3. Read .agents/skills/backend/python-senior-backend/SKILL.md (FastAPI implementation)
+4. Read .agents/skills/backend/python-testing/SKILL.md        (tests)
+5. Read .agents/skills/quality/tdd-workflow/SKILL.md          (TDD approach)
+6. Read .agents/skills/core/learning-protocol/SKILL.md        (closing session)
 ```
 
 **Domain-Specific Routing:**
 
-| Domain | Keywords | Skills |
-|--------|----------|--------|
-| **Pricing** | "precios", "cascade", "descuento" | database-expert, senior-backend |
-| **Auth/Security** | "auth", "JWT", "OAuth", "seguridad" | security-expert, senior-backend |
-| **Database** | "SQL", "query", "migración", "AlloyDB" | database-expert |
-| **API** | "endpoint", "REST", "OpenAPI" | api-design, senior-backend |
-| **Frontend** | "React", "Next.js", "UI", "componente" | senior-frontend, nextjs |
-| **Testing** | "test", "pytest", "coverage" | python-testing, tdd-workflow |
-| **CI/CD** | "deploy", "pipeline", "Docker" | gitops-expert |
-| **Legacy SQL** | "stored procedure", "SQL Server" | software-archeologist, squit-remote |
+| Domain | Keywords | Skills (paths en .agents/skills/) |
+|--------|----------|-----------------------------------|
+| **Pricing** | "precios", "cascade", "descuento" | infrastructure/database-expert, backend/python-senior-backend |
+| **Auth/Security** | "auth", "JWT", "OAuth", "seguridad" | security/security-expert, backend/python-senior-backend |
+| **Database** | "SQL", "query", "migración", "AlloyDB" | infrastructure/database-expert |
+| **Frontend** | "React", "Next.js", "UI", "componente" | frontend/senior-frontend, frontend/nextjs |
+| **Testing** | "test", "pytest", "coverage" | backend/python-testing, quality/tdd-workflow |
+| **CI/CD** | "deploy", "pipeline", "Docker" | infrastructure/gitops-expert |
+| **Legacy SQL** | "stored procedure", "SQL Server" | archaeology/squit, sql/deacero-tech-dos |
 
-**Skill Loading Command:**
+**Skill Loading — Método correcto:**
 
-Always use the Skill tool with the skill name from AGENTS.md:
-
-```bash
-/skill <skill-name>
+```
+Read .agents/skills/<path-from-AGENTS.md>
 ```
 
-**Examples:**
-- `/skill ticket-planner`
-- `/skill senior-backend`
-- `/skill software-archeologist`
-- `/skill code-reviewer`
+**Ejemplos:**
+- `Read .agents/skills/workflow/ticket-planner/SKILL.md`
+- `Read .agents/skills/backend/python-senior-backend/SKILL.md`
+- `Read .agents/skills/software/discovery/software-archeologist/SKILL.md`
+- `Read .agents/skills/software/quality/code-reviewer/SKILL.md`
+
+> El Skill tool (`/skill <nombre>`) solo reconoce archivos en `.claude/commands/`.
+> Los agent skills en `.agents/skills/` se cargan SIEMPRE con el Read tool.
 
 **NEVER use enhanced commands directly** - let skills orchestrate themselves.
 
@@ -659,19 +614,19 @@ Blocking Rule: [rule]
 📍 Path: workflow/ticket-planner/SKILL.md
 
 ✅ Creating plan first...
-🔀 Loading skill: /skill ticket-planner
+🔀 Read .agents/skills/workflow/ticket-planner/SKILL.md
 
 ─────────────────────────────
-[Skill: ticket-planner loads]
+[Skill: ticket-planner activo]
 ─────────────────────────────
 
 📋 Plan created: ai-specs/changes/ARP-1_backend.md
 
 🔍 Next: Loading ticket-implementation...
-🔀 Loading skill: /skill ticket-implementation
+🔀 Read .agents/skills/workflow/ticket-implementation/SKILL.md
 
 ─────────────────────────────
-[Skill: ticket-implementation loads]
+[Skill: ticket-implementation activo]
 ─────────────────────────────
 ```
 
@@ -689,10 +644,10 @@ Blocking Rule: [rule]
 🔍 Analyzing triggers: "implementar" → ticket-implementation (row 62)
 📍 Path: workflow/ticket-implementation/SKILL.md
 
-🔀 Loading skill: /skill ticket-implementation
+🔀 Read .agents/skills/workflow/ticket-implementation/SKILL.md
 
 ─────────────────────────────
-[Skill: ticket-implementation loads]
+[Skill: ticket-implementation activo]
 ─────────────────────────────
 ```
 
@@ -710,10 +665,10 @@ Blocking Rule: [rule]
   - Triggers: "reverse engineer", "analizar codebase"
   - Path: software/discovery/software-archeologist/SKILL.md
 
-🔀 Loading skill: /skill software-archeologist
+🔀 Read .agents/skills/software/discovery/software-archeologist/SKILL.md
 
 ─────────────────────────────
-[Skill: software-archeologist loads]
+[Skill: software-archeologist activo]
 ─────────────────────────────
 
 📊 Gathering context...
@@ -738,10 +693,10 @@ Blocking Rule: [rule]
   - Match: brainstorming
   - Path: core/brainstorming/SKILL.md
 
-🔀 Loading skill: /skill brainstorming
+🔀 Read .agents/skills/core/brainstorming/SKILL.md
 
 ─────────────────────────────
-[Skill: brainstorming loads]
+[Skill: brainstorming activo]
 ─────────────────────────────
 
 ⚠️ DESIGN GATE ACTIVE
@@ -766,15 +721,15 @@ Blocking Rule: [rule]
 🎯 Domain: BACKEND
 
 🔍 Analyzing triggers:
-  - "FastAPI" → senior-backend (row 39)
-  - "Python service" → senior-backend (row 39)
-  - Match: senior-backend
-  - Path: software/backend/senior-backend/SKILL.md
+  - "FastAPI" → python-senior-backend (row 39)
+  - "Python service" → python-senior-backend (row 39)
+  - Match: python-senior-backend
+  - Path: backend/python-senior-backend/SKILL.md
 
-🔀 Loading skill: /skill senior-backend
+🔀 Read .agents/skills/backend/python-senior-backend/SKILL.md
 
 ─────────────────────────────
-[Skill: senior-backend loads]
+[Skill: python-senior-backend activo]
 ─────────────────────────────
 
 🐍 Python/FastAPI Expert Mode Active
@@ -801,10 +756,10 @@ Blocking Rule: [rule]
   - Match: code-reviewer (quality/security focused)
   - Path: software/quality/code-reviewer/SKILL.md
 
-🔀 Loading skill: /skill code-reviewer
+🔀 Read .agents/skills/software/quality/code-reviewer/SKILL.md
 
 ─────────────────────────────
-[Skill: code-reviewer loads]
+[Skill: code-reviewer activo]
 ─────────────────────────────
 
 🔍 Code Review Active
@@ -871,13 +826,13 @@ User request → workflow-coordinator → /skill <name>
 
 ### Mapping: Enhanced Commands → Skills
 
-| Enhanced Command | Skills Used | Direct Route |
-|-----------------|-------------|--------------|
-| `plan-backend-ticket-enhanced` | ticket-planner + backend-developer | `/skill ticket-planner` or `/skill backend-developer` |
-| `develop-backend-enhanced` | ticket-implementation + python-senior-backend | `/skill ticket-implementation` |
-| `plan-frontend-ticket-enhanced` | ticket-planner + frontend-developer | `/skill ticket-planner` or `/skill frontend-developer` |
-| `develop-frontend-enhanced` | ticket-implementation + senior-frontend | `/skill ticket-implementation` |
-| `enforce-workflow` | workflow-coordinator | `/skill workflow-coordinator` |
+| Enhanced Command | Skills Used | Direct Route (Read tool) |
+|-----------------|-------------|--------------------------|
+| `plan-backend-ticket-enhanced` | ticket-planner + backend-developer | `Read .agents/skills/workflow/ticket-planner/SKILL.md` |
+| `develop-backend-enhanced` | ticket-implementation + python-senior-backend | `Read .agents/skills/workflow/ticket-implementation/SKILL.md` |
+| `plan-frontend-ticket-enhanced` | ticket-planner + frontend-developer | `Read .agents/skills/workflow/ticket-planner/SKILL.md` |
+| `develop-frontend-enhanced` | ticket-implementation + senior-frontend | `Read .agents/skills/workflow/ticket-implementation/SKILL.md` |
+| `enforce-workflow` | workflow-coordinator | Skill tool: `/skill workflow-coordinator` (existe en `.claude/commands/`) |
 
 **When to use enhanced commands:**
 - Complex workflows that require multiple skills in sequence

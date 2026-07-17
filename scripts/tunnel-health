@@ -1,6 +1,0 @@
-#!/bin/bash
-# tunnel-health: Load tunnel/environment health check skill documentation
-# Usage: ./scripts/tunnel-health
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-"$SCRIPT_DIR/_load-skill-doc.sh" "tunnel-health"

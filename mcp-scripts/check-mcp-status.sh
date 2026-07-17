@@ -96,15 +96,11 @@ if lsof -i :5435 > /dev/null 2>&1 || lsof -i :9433 > /dev/null 2>&1; then
     echo -e "  ${GREEN}+${NC} /alloydb-query    - Consultar precios"
     echo -e "  ${GREEN}+${NC} /alloydb-debug    - Diagnosticar cálculos"
     echo -e "  ${GREEN}+${NC} /cascade-analyzer  - Analizar cascada"
-    echo -e "  ${GREEN}+${NC} /validation-checker - Validar reglas"
-    echo -e "  ${GREEN}+${NC} /api-test           - Probar integración"
     echo -e "  ${GREEN}+${NC} /cloudsql-query     - Consultar CloudSQL"
 else
     echo -e "  ${YELLOW}~${NC} /alloydb-query    - (degradado: usa documentación local)"
     echo -e "  ${YELLOW}~${NC} /alloydb-debug    - (degradado: usa documentación local)"
     echo -e "  ${YELLOW}~${NC} /cascade-analyzer - (degradado: usa documentación local)"
-    echo -e "  ${YELLOW}~${NC} /validation-checker - (degradado: usa documentación local)"
-    echo -e "  ${YELLOW}~${NC} /api-test           - (degradado: usa documentación local)"
     echo -e "  ${YELLOW}~${NC} /cloudsql-query     - (degradado: usa documentación local)"
 fi
 
