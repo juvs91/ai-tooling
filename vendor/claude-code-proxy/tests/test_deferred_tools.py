@@ -380,14 +380,14 @@ class TestExitPlanAlreadyCalled:
         assert _exit_plan_already_called(messages) is True
 
     def test_window_limits_scan(self):
-        """ExitPlanMode beyond window=60 assistant messages is not found."""
+        """ExitPlanMode beyond window=120 assistant messages is not found."""
         from llm.transformers.deferred_tools import _exit_plan_already_called
         # ExitPlanMode as the oldest (position 0 in list, last in reversed scan)
-        # followed by 61 newer Read messages → ExitPlanMode is message #62 in reverse
+        # followed by 121 newer Read messages → ExitPlanMode is message #122 in reverse
         messages = [self._asst("ExitPlanMode")]
-        for _ in range(61):
+        for _ in range(121):
             messages.append(self._asst("Read"))
-        # reversed: [Read×61, ExitPlanMode] — 61 Reads exhaust the window before ExitPlanMode
+        # reversed: [Read×121, ExitPlanMode] — 121 Reads exhaust the window before ExitPlanMode
         assert _exit_plan_already_called(messages) is False
 
     def test_within_window_is_found(self):
@@ -431,11 +431,11 @@ class TestMultiTurnPlanSession:
         req.tools = tools or []
         return req
 
-    def _make_ctx(self, phase="ANALYZING", session_id="test-session-123"):
+    def _make_ctx(self, phase="ANALYZING", session_id="test-session-123", plan_mode_active=False):
         ctx = MagicMock()
         ctx.phase = phase
         ctx.session_id = session_id
-        ctx.plan_mode_active = False
+        ctx.plan_mode_active = plan_mode_active
         return ctx
 
     def _asst(self, *tool_names):
@@ -594,7 +594,7 @@ class TestMultiTurnPlanSession:
         from unittest.mock import patch
 
         req = self._make_request(system=None, messages=[], tools=[])
-        ctx = self._make_ctx(phase="PLAN")
+        ctx = self._make_ctx(phase="PLAN", plan_mode_active=True)
 
         with patch("llm.transformers.deferred_tools.get_session_deferred_tools",
                    new_callable=AsyncMock, return_value=[]), \
@@ -634,11 +634,11 @@ class TestConnectionResetScenarios:
         req.tools = tools or []
         return req
 
-    def _make_ctx(self, phase="ANALYZING", session_id="session-abc"):
+    def _make_ctx(self, phase="ANALYZING", session_id="session-abc", plan_mode_active=False):
         ctx = MagicMock()
         ctx.phase = phase
         ctx.session_id = session_id
-        ctx.plan_mode_active = False
+        ctx.plan_mode_active = plan_mode_active
         return ctx
 
     def _asst(self, *tool_names):
@@ -730,7 +730,7 @@ class TestConnectionResetScenarios:
         from unittest.mock import patch
 
         req = self._make_request(system=None, messages=[], tools=[])
-        ctx = self._make_ctx(phase="PLAN", session_id="NEW-session-xyz")
+        ctx = self._make_ctx(phase="PLAN", session_id="NEW-session-xyz", plan_mode_active=True)
 
         with patch("llm.transformers.deferred_tools.get_session_deferred_tools",
                    new_callable=AsyncMock, return_value=[]), \
@@ -862,26 +862,26 @@ class TestCompressionEdgeCases:
         )
 
     def test_exit_plan_just_inside_window_is_found(self):
-        """ExitPlanMode at exactly window position 60 IS found (boundary check)."""
+        """ExitPlanMode at exactly window position 120 IS found (boundary check)."""
         from llm.transformers.deferred_tools import _exit_plan_already_called
 
-        # ExitPlanMode is the OLDEST, with exactly 59 Read messages after it
+        # ExitPlanMode is the OLDEST, with exactly 119 Read messages after it
         messages = [self._asst("ExitPlanMode")]
-        for _ in range(59):
+        for _ in range(119):
             messages.append(self._asst("Read"))
 
-        # reversed scan: 59 Reads (count 1-59), then ExitPlanMode (count 60, found!)
+        # reversed scan: 119 Reads (count 1-119), then ExitPlanMode (count 120, found!)
         assert _exit_plan_already_called(messages) is True
 
     def test_exit_plan_just_outside_window_is_not_found(self):
-        """ExitPlanMode at position 61 (one beyond window=60) is NOT found."""
+        """ExitPlanMode at position 121 (one beyond window=120) is NOT found."""
         from llm.transformers.deferred_tools import _exit_plan_already_called
 
         messages = [self._asst("ExitPlanMode")]
-        for _ in range(60):
+        for _ in range(120):
             messages.append(self._asst("Read"))
 
-        # reversed scan: 60 Reads (count reaches 60, break), ExitPlanMode not reached
+        # reversed scan: 120 Reads (count reaches 120, break), ExitPlanMode not reached
         assert _exit_plan_already_called(messages) is False
 
     def test_mixed_user_assistant_messages_count_only_assistant(self):
@@ -985,7 +985,7 @@ class TestPlanDefaultToolsGuarantee:
             "</available-deferred-tools>"
         )
         req = self._make_request(system=system, tools=[])
-        ctx = self._make_ctx(phase="PLAN")
+        ctx = self._make_ctx(phase="PLAN", plan_mode_active=True)
 
         with patch("llm.transformers.deferred_tools.save_session_deferred_tools",
                    new_callable=AsyncMock):
@@ -1012,7 +1012,7 @@ class TestPlanDefaultToolsGuarantee:
         from unittest.mock import patch
 
         req = self._make_request(system=None, messages=[], tools=[])
-        ctx = self._make_ctx(phase="PLAN")
+        ctx = self._make_ctx(phase="PLAN", plan_mode_active=True)
 
         with patch("llm.transformers.deferred_tools.get_session_deferred_tools",
                    new_callable=AsyncMock, return_value=[]), \
