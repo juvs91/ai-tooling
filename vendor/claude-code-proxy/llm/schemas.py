@@ -83,7 +83,7 @@ class SystemContent(BaseModel):
     text: str
 
 class Message(BaseModel):
-    role: Literal["user", "assistant"]
+    role: Literal["user", "assistant", "system"]
     content: Union[
         str,
         List[Union[
