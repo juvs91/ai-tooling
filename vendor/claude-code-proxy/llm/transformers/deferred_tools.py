@@ -65,7 +65,10 @@ def _compute_deferred_session_id(messages: list) -> str | None:
 
 
 
-def _exit_plan_already_called(messages: list, window: int = 120) -> bool:
+_EXIT_PLAN_SCAN_WINDOW = 120  # matches _plan_mode_active() in intent_classifier.py
+
+
+def _exit_plan_already_called(messages: list, window: int = _EXIT_PLAN_SCAN_WINDOW) -> bool:
     """Return True if ExitPlanMode was already called in recent assistant history.
 
     Used to decide whether to strip plan-mode tools from the session cache.
@@ -73,7 +76,7 @@ def _exit_plan_already_called(messages: list, window: int = 120) -> bool:
     stay available even during READ/ANALYZING intermediate turns of a multi-turn
     plan session (where the model explores files before writing the final plan).
 
-    Window=120 matches _plan_mode_active() in intent_classifier.py.
+    Window matches _plan_mode_active() in intent_classifier.py.
     Plan sessions with many file reads easily exceed 20 messages; 120 gives
     sufficient coverage for typical planning sessions.
     """

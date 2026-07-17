@@ -380,14 +380,12 @@ class TestExitPlanAlreadyCalled:
         assert _exit_plan_already_called(messages) is True
 
     def test_window_limits_scan(self):
-        """ExitPlanMode beyond window=120 assistant messages is not found."""
-        from llm.transformers.deferred_tools import _exit_plan_already_called
-        # ExitPlanMode as the oldest (position 0 in list, last in reversed scan)
-        # followed by 121 newer Read messages → ExitPlanMode is message #122 in reverse
+        """ExitPlanMode beyond _EXIT_PLAN_SCAN_WINDOW assistant messages is not found."""
+        from llm.transformers.deferred_tools import _exit_plan_already_called, _EXIT_PLAN_SCAN_WINDOW
+        # ExitPlanMode oldest, WINDOW+1 Reads after → ExitPlanMode is past the window in reverse
         messages = [self._asst("ExitPlanMode")]
-        for _ in range(121):
+        for _ in range(_EXIT_PLAN_SCAN_WINDOW + 1):
             messages.append(self._asst("Read"))
-        # reversed: [Read×121, ExitPlanMode] — 121 Reads exhaust the window before ExitPlanMode
         assert _exit_plan_already_called(messages) is False
 
     def test_within_window_is_found(self):
@@ -862,26 +860,25 @@ class TestCompressionEdgeCases:
         )
 
     def test_exit_plan_just_inside_window_is_found(self):
-        """ExitPlanMode at exactly window position 120 IS found (boundary check)."""
-        from llm.transformers.deferred_tools import _exit_plan_already_called
+        """ExitPlanMode at exactly the scan window boundary IS found."""
+        from llm.transformers.deferred_tools import _exit_plan_already_called, _EXIT_PLAN_SCAN_WINDOW
 
-        # ExitPlanMode is the OLDEST, with exactly 119 Read messages after it
+        # WINDOW-1 Reads after ExitPlanMode → ExitPlanMode is reached before break
         messages = [self._asst("ExitPlanMode")]
-        for _ in range(119):
+        for _ in range(_EXIT_PLAN_SCAN_WINDOW - 1):
             messages.append(self._asst("Read"))
 
-        # reversed scan: 119 Reads (count 1-119), then ExitPlanMode (count 120, found!)
         assert _exit_plan_already_called(messages) is True
 
     def test_exit_plan_just_outside_window_is_not_found(self):
-        """ExitPlanMode at position 121 (one beyond window=120) is NOT found."""
-        from llm.transformers.deferred_tools import _exit_plan_already_called
+        """ExitPlanMode one position beyond the scan window is NOT found."""
+        from llm.transformers.deferred_tools import _exit_plan_already_called, _EXIT_PLAN_SCAN_WINDOW
 
+        # WINDOW Reads after ExitPlanMode → count hits WINDOW, break fires before ExitPlanMode
         messages = [self._asst("ExitPlanMode")]
-        for _ in range(120):
+        for _ in range(_EXIT_PLAN_SCAN_WINDOW):
             messages.append(self._asst("Read"))
 
-        # reversed scan: 120 Reads (count reaches 120, break), ExitPlanMode not reached
         assert _exit_plan_already_called(messages) is False
 
     def test_mixed_user_assistant_messages_count_only_assistant(self):
