@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import uuid
 
 from llm.compressor import get_session_deferred_tools, save_session_deferred_tools
@@ -65,7 +66,7 @@ def _compute_deferred_session_id(messages: list) -> str | None:
 
 
 
-_EXIT_PLAN_SCAN_WINDOW = 120  # matches _plan_mode_active() in intent_classifier.py
+_EXIT_PLAN_SCAN_WINDOW = int(os.getenv("EXIT_PLAN_SCAN_WINDOW", "120"))
 
 
 def _exit_plan_already_called(messages: list, window: int = _EXIT_PLAN_SCAN_WINDOW) -> bool:
