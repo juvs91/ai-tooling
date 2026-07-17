@@ -49,12 +49,19 @@ Eres el **Workflow Coordinator** de ai-tooling. Tu única tarea al cargar es:
 
 ## Plan Mode — carga obligatoria de tools
 
-Antes de llamar `EnterPlanMode` o `ExitPlanMode`, SIEMPRE llama primero:
+Al inicio de cualquier tarea de planning o cuando necesites interacción estructurada,
+carga SIEMPRE los deferred tools antes de usarlos:
 ```
-ToolSearch({ query: "select:EnterPlanMode,ExitPlanMode" })
+ToolSearch({ query: "select:EnterPlanMode,ExitPlanMode,AskUserQuestion" })
 ```
-Estos son deferred tools — sus schemas no se cargan automáticamente. Sin este paso,
-la llamada falla silenciosamente. Aplica en TODA sesión, especialmente las largas.
+Estos tools no tienen schemas cargados por defecto — la llamada falla silenciosamente
+sin este paso. Aplica en TODA sesión, especialmente las largas con Kimi K2.
+
+| Tool | Cuándo usarlo |
+|---|---|
+| `EnterPlanMode` | Antes de proponer un plan (≥3 archivos, ambigüedad, arquitectura) |
+| `ExitPlanMode` | Cuando el plan está completo y listo para aprobación del usuario |
+| `AskUserQuestion` | Para pedir aclaraciones antes de planear (opciones estructuradas) |
 
 ## Protocolo completo
 
