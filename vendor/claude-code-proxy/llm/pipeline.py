@@ -34,6 +34,9 @@ class TransformContext:
     # Computed once early in the pipeline; all downstream transformers read this field
     # instead of independently re-deriving plan mode state from history.
     plan_mode_active: bool = False
+    # "cc" = CC toggle activated plan mode (CC handles EnterPlanMode on client side)
+    # "proxy" = proxy detected PLAN intent without CC toggle (model must call Enter+Exit)
+    plan_mode_source: str = "cc"
 
     # Set by TokenCapTransformer
     approx_tokens: int = 0

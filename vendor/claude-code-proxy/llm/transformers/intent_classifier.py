@@ -562,6 +562,8 @@ class IntentClassifierTransformer(Transformer):
 
         # Persist final state every turn: sets on activation (with source), clears on exit.
         ctx.plan_mode_active = plan_mode_active
+        if _pm_source:
+            ctx.plan_mode_source = _pm_source
         if ctx.session_id:
             _source_to_persist = _pm_source if plan_mode_active else None
             await set_session_plan_mode(
