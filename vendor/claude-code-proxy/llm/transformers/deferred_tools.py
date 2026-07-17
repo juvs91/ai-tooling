@@ -249,6 +249,20 @@ _CC_TOOL_DESCRIPTIONS: dict[str, str] = {
         '{"name": "session-name"} '
         "to create/reuse a worktree identified by name."
     ),
+    "EnterPlanMode": (
+        "PLAN MODE OPEN — Call this as your VERY FIRST tool call to formally start a planning "
+        "session. This is NOT ExitWorktree. This is NOT ExitPlanMode. "
+        "After calling EnterPlanMode({}) you may read files, ask questions with AskUserQuestion, "
+        "and write your plan to .claude/plans/<name>.md. Do NOT edit source code while in plan "
+        "mode — only the plan file. Call with empty input: {}"
+    ),
+    "ExitPlanMode": (
+        "PLAN MODE CLOSE — Call this as the LAST step after you have written the complete plan "
+        "to .claude/plans/<name>.md. This surfaces the plan to the user for approval and pauses "
+        "implementation until they respond. This is NOT ExitWorktree. This is NOT EnterPlanMode. "
+        "You MUST call this — do NOT just output text saying 'the plan is ready'. "
+        "Call with empty input: {}"
+    ),
 }
 
 # Tools that should only be injected during PLAN phase.

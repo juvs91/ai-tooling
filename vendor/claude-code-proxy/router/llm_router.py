@@ -79,8 +79,8 @@ PLANNING_RE = re.compile(
     r"plan|planning|checklist|steps|roadmap|design|review|rfc|tradeoff|compare|comparison|"
     r"architect|evaluat|analyz|analys|assess|strateg|priorit|scope|proposal|"
     r"outline|blueprint|mockup|flowchart|timeline|milestone|"
-    # Spanish
-    r"arquitect|dise[ñn]|estrateg|riesg|compar|evalua|anal[ií][zs]|alcance|propuesta|planific|revisar|"
+    # Spanish — stems use \w* so conjugated forms match (ñ is \w in Python 3, \b alone fails)
+    r"arquitect\w*|dise[ñn]\w*|planea\w*|planific\w*|estrateg\w*|riesg\w*|compar\w*|evalua\w*|anal[ií][zs]\w*|alcance|propuesta|revisar|"
     r"bosquejo|esquema|flujograma|cronograma|hito"
     r")\b",
     re.IGNORECASE,
