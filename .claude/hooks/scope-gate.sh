@@ -30,6 +30,11 @@ RELATIVE="${FILE#$CWD/}"
 # Always allow writing task-scope.json itself
 [ "$RELATIVE" = ".claude/task-scope.json" ] && exit 0
 
+# Paths outside the project directory are outside scope-gate's jurisdiction.
+# scope-gate only protects project files. External paths (e.g. ~/.claude/plans/,
+# /tmp/) are allowed — they are not project files subject to scope drift.
+[ "$RELATIVE" = "$FILE" ] && exit 0
+
 TASK_NAME=$(jq -r '.task // .task_id // "current task"' "$SCOPE_FILE")
 STEP=$(jq -r '.current_step // ""' "$SCOPE_FILE")
 MODE=$(jq -r '.mode // "full"' "$SCOPE_FILE")

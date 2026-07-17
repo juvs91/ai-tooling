@@ -2,7 +2,7 @@
 > Aprendizajes iterativos del proyecto. Actualizar despues de cada sesion.
 
 ## Ultima actualizacion
-- Fecha: 2026-07-10
+- Fecha: 2026-07-17
 - Por: claude-sonnet-4-6 + jeguzman
 
 ---
@@ -472,3 +472,137 @@ Apareció en 13+ archivos. Siempre el mismo fix: mover la declaración antes del
 - Compilabilidad: 3/10 — missing imports, referencias a funciones inexistentes
 - Testing/verificación: 1/10 — nunca corrió el código
 - Python proxy: 7/10 — funcional y limpio
+
+---
+
+## Session 2026-07-15/17: Plan Mode — Fixes completos
+
+### [P001] Window boundary tests usaban límites hardcodeados
+
+**Observado:** `test_window_limits_scan` y `test_exit_plan_just_outside_window_is_not_found` tenían
+`messages = [self._asst("ExitPlanMode")] + [self._asst("Read")] * 60` pero la función usa window=120.
+Tests eran incorrectos desde el inicio (falsos negativos perpetuos).
+
+**Fix:** Importar `_EXIT_PLAN_SCAN_WINDOW` como constante y computar límites relativos:
+```python
+from llm.transformers.deferred_tools import _exit_plan_already_called, _EXIT_PLAN_SCAN_WINDOW
+messages = [self._asst("ExitPlanMode")] + [self._asst("Read")] * (_EXIT_PLAN_SCAN_WINDOW - 1)
+```
+
+**ADR:** `ADR-0024` (constant), `ADR-0025` (env-configurable).
+
+---
+
+### [P002] Plan guarantee tests fallaban silenciosamente
+
+**Observado:** 4 tests llamaban `_make_ctx(phase="PLAN")` con `plan_mode_active=False` (default).
+El Step 4 transformer guarda en `ctx.plan_mode_active=True`, no en `ctx.phase=="PLAN"` — por diseño
+(evitar falsos positivos en SYNTHESIZING). Tests nunca ejercían el path real.
+
+**Fix:** Pasar `plan_mode_active=True` explícitamente en los 4 test calls afectados.
+
+---
+
+### [P003] 422 Unprocessable Entity — role=system en messages array
+
+**Observado:** CC beta envía mensajes con `role: "system"` dentro de `messages[]`. La Pydantic
+`Message` model solo aceptaba `Literal["user", "assistant"]`.
+
+**Fix:** Widened to `Literal["user", "assistant", "system"]` en `schemas.py:86`.  
+**ADR:** `ADR-0026`.
+
+---
+
+### [P004] plan_mode_source como campo de TransformContext
+
+**Problema:** EnterPlanMode en enforcement note era incorrecto para Signal 1 (CC toggle activo).
+CC ya llama EnterPlanMode en el cliente — decirle al modelo que lo llame producía naming incorrecto.
+
+**Solución:** Agregar `plan_mode_source: str = "cc"` a `TransformContext`. IntentClassifier lo
+setea a `"cc"` para Signal 1 o `"proxy"` para Signal 2. `PlanModeEnforcementTransformer` elige
+el enforcement note correcto según `ctx.plan_mode_source`.
+
+**Dos notes:**
+- `_PLAN_MODE_EXIT_NOTE` (cc): solo recuerda ExitPlanMode, no EnterPlanMode
+- `_PLAN_MODE_PROXY_NOTE` (proxy): instrucciones Enter → explorar → escribir → Exit
+
+**ADR:** `ADR-0027`.
+
+---
+
+### [P005] Plan preview dialog vacío — path conflict
+
+**Síntoma:** "Accept this plan?" dialog aparecía pero sin contenido.
+
+**Causa raíz:** CC inyecta en system prompt la ruta donde escribir el plan:
+`"No plan file exists yet. You should create your plan at ~/.claude/plans/<name>.md"`.
+El enforcement note del proxy instruía `".claude/plans/<nombre>.md"` (project-local).
+El modelo seguía el proxy note → escribía en path incorrecto → CC buscaba en `~/.claude/plans/` → file not found → diálogo vacío.
+
+**Evidencia:** Strings del CC binary (`~/.local/share/claude/versions/2.1.165`):
+```
+Custom directory for plan files, relative to project root. If not set, defaults to ~/.claude/plans/
+planFilePath
+The plan file path (injected by normalizeToolInput)
+No plan file found at
+```
+
+**Fix:** Remover path hardcodeado de `_PLAN_MODE_EXIT_NOTE`. CC ya le dice al modelo el path correcto.
+Para `_PLAN_MODE_PROXY_NOTE`: cambiar `.claude/plans/` → `~/.claude/plans/` (match CC default).
+
+**ADR:** `ADR-0028`.
+
+### [P006] scope-gate.sh bloqueaba rutas absolutas fuera del CWD
+
+**Síntoma:** Complemento de P005. El scope-gate (mode=analysis) bloqueaba la escritura del
+plan file a `~/.claude/plans/xyz.md` con `exit 2`.
+
+**Causa raíz:** línea `RELATIVE="${FILE#$CWD/}"` — cuando el path es absoluto y no empieza con
+el CWD, `RELATIVE == FILE`. Los patterns `case "$RELATIVE" in .claude/plans/*)` esperan rutas
+relativas y nunca hacen match con un path absoluto. El hook bloquea la escritura.
+
+**Bug confirmado:**
+```bash
+echo '{"tool_name":"Write","tool_input":{"file_path":"/Users/jeguzman/.claude/plans/test.md","content":"x"},"cwd":"/Users/jeguzman/Documents/school-system"}' | \
+  bash scope-gate.sh
+# scope-gate[analysis]: '/Users/jeguzman/.claude/plans/test.md' is outside analysis scope.
+# exit: 2
+```
+
+**Fix (3 líneas):** Guard inmediatamente después de `[ "$RELATIVE" = ".claude/task-scope.json" ]`:
+```bash
+# Paths outside the project directory are outside scope-gate's jurisdiction.
+[ "$RELATIVE" = "$FILE" ] && exit 0
+```
+
+**Aplicado en:** `.claude/hooks/scope-gate.sh` (ai-tooling fuente) y en school-system (copia instalada).
+
+**Principio:** scope-gate protege archivos del proyecto, no paths externos. Rutas fuera del CWD
+(`~/.claude/`, `/tmp/`) no son project files y no deben ser controladas por scope-gate.
+
+### Resumen: diagrama del bug compuesto "plan preview vacío"
+
+```
+CC → system prompt: "write plan to ~/.claude/plans/xyz.md"
+proxy note → "write to .claude/plans/<nombre>.md"  ← P005: path incorrecto
+Kimi sigue proxy note (última instrucción gana)
+Kimi → Write tool: file_path=".claude/plans/goofy-shell.md"
+scope-gate: .claude/plans/* → ALLOWED (pero era el path equivocado para CC)
+CC → ExitPlanMode → busca ~/.claude/plans/xyz.md → NOT FOUND → diálogo vacío
+
+Si Kimi hubiera seguido CC (file_path="~/.claude/plans/xyz.md"):
+scope-gate: RELATIVE == FILE (ruta absoluta) → BLOCKED ← P006: segundo bug
+```
+
+**Fixes aplicados:**
+1. P005 (ADR-0028): enforcement note ya no hardcodea `.claude/plans/`
+2. P006: scope-gate ahora permite paths fuera del CWD
+
+### Patrón general: Enforcement notes no deben sobreescribir instrucciones de CC
+
+Si CC ya inyecta una instrucción en el system prompt (path, tool schema, constraint), el proxy
+NO debe repetirla con valores diferentes. El modelo prioriza la última instrucción visible en el
+contexto — y nuestro note (inyectado al final vía `ensure_system_note`) ganará al de CC.
+
+**Regla futura:** Cuando el proxy agregue un enforcement note que intersecta con algo que CC
+también inyecta, verificar el CC binary con `strings` para validar que los valores coinciden.
