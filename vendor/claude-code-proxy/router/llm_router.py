@@ -86,6 +86,16 @@ PLANNING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Subset of PLANNING_RE that unambiguously means "the user is asking for a plan/
+# design", not just using a technical/descriptive word that happens to overlap
+# (e.g. "análisis arquitectónico" describing HOW to investigate a bug, vs "crea
+# un plan" where the object of the request IS a plan). Used only to break the
+# PLAN vs BUILD tie in _regex_fallback_intent — see ADR-0008/P009 (ai-notes).
+STRONG_PLANNING_RE = re.compile(
+    r"\b(plan|planning|planea\w*|planific\w*|dise[ñn]\w*|design)\b",
+    re.IGNORECASE,
+)
+
 BUILDING_RE = re.compile(
     r"\b("
     # English (test|pytest removed → they belong in VERIFY_RE. "fix the pytest config" still
@@ -282,8 +292,12 @@ def _regex_fallback_intent(text: str) -> str:
     if is_planning and not is_building:
         return "PLAN"
     if is_planning and is_building:
-        # Ambiguous: both concepts present → prefer PLAN (deep reasoning).
-        return "PLAN"
+        # Ambiguous: both concepts present. Only prefer PLAN (deep reasoning) when
+        # an unambiguous "make a plan/design" signal is present (STRONG_PLANNING_RE).
+        # Otherwise the planning match is likely an incidental descriptive word
+        # ("análisis arquitectónico" describing HOW to investigate) rather than a
+        # genuine plan request — e.g. "Identifica los bugs... Propón un fix" → BUILD.
+        return "PLAN" if STRONG_PLANNING_RE.search(text) else "BUILD"
 
     # VERIFY: only when no BUILD/PLAN/READ signals detected.
     # "run tests" → VERIFY, but "design the test architecture" → PLAN (caught above).

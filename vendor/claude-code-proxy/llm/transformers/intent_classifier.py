@@ -26,6 +26,7 @@ from llm.compressor import (
     get_session_plan_mode_source,
     set_session_plan_mode_source,
 )
+from llm.transformers.deferred_tools import _compute_deferred_session_id
 
 
 WRITE_TOOLS = frozenset({"Write", "Edit", "NotebookEdit"})
@@ -340,6 +341,15 @@ class IntentClassifierTransformer(Transformer):
         last_text = get_last_user_text(request.messages)
         messages = getattr(request, "messages", [])
 
+        # Clients that don't send X-Session-ID (e.g. Claude Code VS Code extension —
+        # confirmed via live proxy logs: session_id="" for an entire real session)
+        # would otherwise never persist plan_mode_active across turns, since Signal 3
+        # below silently no-ops without a session_id. Fall back to the same
+        # deterministic conversation-prefix hash DeferredToolsTransformer already
+        # uses, so both transformers agree on the same derived session identity.
+        # See ADR-0030.
+        effective_sid = ctx.session_id or _compute_deferred_session_id(messages)
+
         # Step 1: Detect tool history + analysis state BEFORE classification
         history_phase, tool_names = _detect_phase(messages)
         analysis_detected = is_analysis_request(last_text) or _detect_analysis_from_history(messages)
@@ -410,7 +420,7 @@ class IntentClassifierTransformer(Transformer):
 
         # Inject plan session context so the LLM classifier avoids misclassifying
         # natural plan-session language (e.g., "hay un error") as BUILD. ADR-0010.
-        _cached_plan_active = await get_session_plan_mode(ctx.session_id) if ctx.session_id else False
+        _cached_plan_active = await get_session_plan_mode(effective_sid) if effective_sid else False
         if _plan_mode_active(messages) or _cached_plan_active:
             tool_context += " [PLAN SESSION ACTIVE: do NOT classify as BUILD/VERIFY unless ExitPlanMode was already called]"
 
@@ -513,11 +523,11 @@ class IntentClassifierTransformer(Transformer):
                 plan_mode_active = True
                 _activation_signal = "2"
         # Signal 3: Session cache — persists plan mode state across history truncation
-        # and proxy restarts. Provides unlimited coverage for model-initiated plan mode
-        # (not bound by the 60-message Signal 0 window). Only fires when session_id is
-        # available (always set from X-Session-ID header for real CC sessions).
-        if not plan_mode_active and ctx.session_id:
-            plan_mode_active = await get_session_plan_mode(ctx.session_id)
+        # and proxy restarts. Provides unlimited coverage for model-initiated plan mode.
+        # Uses effective_sid (X-Session-ID, or a deterministic fallback hashed from the
+        # conversation prefix for clients that don't send the header — see ADR-0030).
+        if not plan_mode_active and effective_sid:
+            plan_mode_active = await get_session_plan_mode(effective_sid)
             if plan_mode_active:
                 _activation_signal = "3"
         # ExitPlanMode override: if called in recent history, always force False even if
@@ -530,8 +540,15 @@ class IntentClassifierTransformer(Transformer):
         # plan mode ("proxy") this would always fire (Signal 1 is never present), causing
         # false-positive exits and periodic oscillation. See ADR-0008, ADR-0010.
         _pm_source: str | None = None
-        if ctx.session_id:
-            _pm_source = await get_session_plan_mode_source(ctx.session_id)
+        if effective_sid:
+            _pm_source = await get_session_plan_mode_source(effective_sid)
+        if _pm_source is None and "EnterPlanMode" in _recent_tools:
+            # No cached source yet (no session_id, or first classification of this
+            # session) — infer "cc" from the message history itself, not just the
+            # live system banner (_signal1_active only reflects THIS turn's system
+            # text). Without this, Signal 4 could never fire for a single-shot
+            # classification covering a whole session's history. See ADR-0008.
+            _pm_source = "cc"
         if plan_mode_active and "Plan mode is active" not in _system_text and ctx.intent in ("BUILD", "VERIFY"):
             if _pm_source == "cc":
                 plan_mode_active = False
@@ -548,26 +565,26 @@ class IntentClassifierTransformer(Transformer):
 
         # ── Source tracking (ADR-0010): set on activation, clear on exit ─────────────────
         # Source ("cc"/"proxy") controls whether Signal 4 can fire in future turns.
-        if ctx.session_id and plan_mode_active:
+        if effective_sid and plan_mode_active:
             if _pm_source is None:
                 # Source not in cache (new session or proxy restart). Infer from this turn:
                 # Signal 1 active → CC-initiated; anything else → proxy-initiated.
                 _pm_source = "cc" if _signal1_active else "proxy"
-                await set_session_plan_mode_source(ctx.session_id, _pm_source)
+                await set_session_plan_mode_source(effective_sid, _pm_source)
                 logger.debug("[classify] plan_mode_source inferred as '%s' (cache was empty)", _pm_source)
             elif _signal1_active and _pm_source != "cc":
                 # Signal 1 observed on a session previously marked "proxy" — upgrade to "cc".
-                await set_session_plan_mode_source(ctx.session_id, "cc")
+                await set_session_plan_mode_source(effective_sid, "cc")
                 _pm_source = "cc"
 
         # Persist final state every turn: sets on activation (with source), clears on exit.
         ctx.plan_mode_active = plan_mode_active
         if _pm_source:
             ctx.plan_mode_source = _pm_source
-        if ctx.session_id:
+        if effective_sid:
             _source_to_persist = _pm_source if plan_mode_active else None
             await set_session_plan_mode(
-                ctx.session_id,
+                effective_sid,
                 plan_mode_active,
                 source=_source_to_persist,
                 signal=_activation_signal or "exit",

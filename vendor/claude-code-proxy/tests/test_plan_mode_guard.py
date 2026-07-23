@@ -320,7 +320,7 @@ async def test_intent_classifier_no_reactivation_after_exit_plan_mode():
     from config import ClassifierConfig, PolicyConfig
 
     classifier = IntentClassifierTransformer(
-        ClassifierConfig(model="", api_key="", base_url=None, timeout=3.0),
+        ClassifierConfig(model="", api_key="", base_url=None, timeout=3.0, max_consecutive_errors=3, circuit_reset_seconds=60.0),
         PolicyConfig(tool_allowlist_raw="*", policy_note_in_system=True,
                      max_input_tokens=0, hard_block_oversize=False,
                      analysis_enforcement=False, tool_upgrade_threshold=5,
@@ -387,7 +387,7 @@ async def test_signal3_cache_fallback_for_long_session():
     await set_session_plan_mode(SESSION_ID, True)
 
     classifier = IntentClassifierTransformer(
-        ClassifierConfig(model="", api_key="", base_url=None, timeout=3.0),
+        ClassifierConfig(model="", api_key="", base_url=None, timeout=3.0, max_consecutive_errors=3, circuit_reset_seconds=60.0),
         PolicyConfig(tool_allowlist_raw="*", policy_note_in_system=True,
                      max_input_tokens=0, hard_block_oversize=False,
                      analysis_enforcement=False, tool_upgrade_threshold=5,
@@ -441,7 +441,7 @@ async def test_signal3_exit_plan_mode_clears_cache():
     await set_session_plan_mode(SESSION_ID, True)
 
     classifier = IntentClassifierTransformer(
-        ClassifierConfig(model="", api_key="", base_url=None, timeout=3.0),
+        ClassifierConfig(model="", api_key="", base_url=None, timeout=3.0, max_consecutive_errors=3, circuit_reset_seconds=60.0),
         PolicyConfig(tool_allowlist_raw="*", policy_note_in_system=True,
                      max_input_tokens=0, hard_block_oversize=False,
                      analysis_enforcement=False, tool_upgrade_threshold=5,
@@ -497,7 +497,7 @@ async def test_signal3_no_session_id_skips_cache():
     await set_session_plan_mode("other-session-xyz", True)
 
     classifier = IntentClassifierTransformer(
-        ClassifierConfig(model="", api_key="", base_url=None, timeout=3.0),
+        ClassifierConfig(model="", api_key="", base_url=None, timeout=3.0, max_consecutive_errors=3, circuit_reset_seconds=60.0),
         PolicyConfig(tool_allowlist_raw="*", policy_note_in_system=True,
                      max_input_tokens=0, hard_block_oversize=False,
                      analysis_enforcement=False, tool_upgrade_threshold=5,

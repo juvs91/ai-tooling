@@ -5,6 +5,14 @@
 # Usage: ./scripts/task-verify.sh
 # Exit 0: task completa. Exit 1: ítems pendientes.
 
+if [ -n "$TASK_VERIFY_RUNNING" ]; then
+  echo "task-verify.sh: invocación recursiva detectada (el propio completion_checklist" >&2
+  echo "invoca a task-verify.sh) — abortando para evitar loop infinito." >&2
+  echo "Quita esa línea del completion_checklist; task-verify.sh no debe verificarse a sí mismo." >&2
+  exit 1
+fi
+export TASK_VERIFY_RUNNING=1
+
 SCOPE_FILE=".claude/task-scope.json"
 [ ! -f "$SCOPE_FILE" ] && { echo "No task-scope.json found. Nothing to verify."; exit 0; }
 
@@ -65,6 +73,8 @@ if [ $FAIL -eq 0 ]; then
       echo "→ No code changed. No tests required."
       ;;
   esac
+  rm -f "$SCOPE_FILE"
+  echo "→ $SCOPE_FILE borrado — scope abierto para la siguiente tarea."
   exit 0
 else
   echo ""

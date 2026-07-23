@@ -41,12 +41,13 @@ find "$SESSIONS_DIR" -maxdepth 1 -type f -mmin +2880 -delete 2>/dev/null || true
 SKILL_FILE="$CWD/.agents/skills/workflow/workflow-coordinator/SKILL.md"
 AGENTS_FILE="$CWD/AGENTS.md"
 
-# If intent-bootstrap already created task-scope.json, intent is classified.
-# workflow-coordinator adds no value — skip to avoid routing overhead.
-if [ -f "$CWD/.claude/task-scope.json" ]; then
-  touch "$SESSION_MARKER" 2>/dev/null || true
-  exit 0
-fi
+# NOTE: task-scope.json existing (from intent-bootstrap.sh) does NOT mean
+# workflow-coordinator's actual routing table (AGENTS.md) was consulted —
+# intent-bootstrap.sh only runs a bash-regex heuristic, not the real routing
+# match. Skipping the mandatory reminder here used to mean the FIRST prompt of
+# every session (which always triggers intent-bootstrap first) never got it.
+# CLAUDE.md's exception is "a skill is already active", not "a bash heuristic
+# ran" — so this always fires once per session regardless of task-scope.json.
 
 if [ -f "$SKILL_FILE" ] && [ -f "$AGENTS_FILE" ]; then
   echo "⚠️ MANDATORY: Call Skill tool NOW → skill=\"workflow-coordinator\" — then let it route."

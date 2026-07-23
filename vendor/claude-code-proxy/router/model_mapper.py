@@ -1,7 +1,11 @@
 # router/model_mapper.py
 from __future__ import annotations
 
-KNOWN_PREFIXES = ("openai/", "anthropic/", "gemini/")
+# "openai/", "anthropic/", "gemini/" are this proxy's own 3 routing buckets.
+# "deepseek/", "groq/" are recognized so an already-prefixed ANALYSIS_MODEL/
+# COMPRESSOR_MODEL (litellm-native prefix) isn't double-prefixed with the
+# preferred_provider on top (see profile-envs/cloud.{deepseek,groq}.env).
+KNOWN_PREFIXES = ("openai/", "anthropic/", "gemini/", "deepseek/", "groq/")
 
 def has_provider_prefix(model: str) -> bool:
     return any(model.startswith(p) for p in KNOWN_PREFIXES)

@@ -14,12 +14,7 @@ from utils.schema_utils import (
     _convert_tool_cached,
     _gemini_schema_cache,
     _tool_conversion_cache,
-)
-from llm.transformers.universal_tool_extraction import (
-    extract_tool_calls_from_text,
-    strip_tool_call_xml,
-    recover_truncated_deterministic,
-    extract_xml_tools_from_passthrough_response,
+    is_server_tool,
 )
 from utils.tool_utils import (
     is_no_tools_model,
@@ -62,6 +57,19 @@ def _system_to_text(system: Any) -> str:
                 parts.append(b.get("text", ""))
         return "\n\n".join([p for p in parts if p]).strip()
     return ""
+
+
+# Import moved here (after `_system_to_text` is defined) to break a circular
+# import: llm.transformers.__init__ -> intent_classifier -> imports
+# `_system_to_text` back from this module. If this import runs before
+# `_system_to_text` is defined, the partially-initialized `llm.converters`
+# module doesn't have it yet and the import fails.
+from llm.transformers.universal_tool_extraction import (
+    extract_tool_calls_from_text,
+    strip_tool_call_xml,
+    recover_truncated_deterministic,
+    extract_xml_tools_from_passthrough_response,
+)
 
 
 def _content_blocks_to_text(content: Any) -> str:
@@ -377,6 +385,12 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_conte
         seen_names: set = set()
         for tool in anthropic_request.tools:
             tool_dict = to_dict(tool)
+            if is_server_tool(tool_dict):
+                # ADR-0029: Anthropic server-tools (web_search, etc.) have no
+                # input_schema and can't be represented as function-calling for
+                # a non-Anthropic backend — drop rather than crash or send a
+                # broken schema.
+                continue
             name = tool_dict.get("name", "")
             if name and name not in seen_names:
                 openai_tools.append(_convert_tool_cached(tool_dict, is_gemini_model))
@@ -384,7 +398,11 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest, model_conte
         litellm_request["tools"] = openai_tools
     elif anthropic_request.tools and no_tools:
         # Inject tool definitions as XML prompt in system message
-        tool_dicts = [to_dict(t) for t in anthropic_request.tools]
+        # ADR-0029: exclude Anthropic server-tools, same reasoning as above.
+        tool_dicts = [
+            d for d in (to_dict(t) for t in anthropic_request.tools)
+            if not is_server_tool(d)
+        ]
         tool_prompt = build_tool_prompt(tool_dicts)
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] = tool_prompt + "\n\n" + messages[0]["content"]

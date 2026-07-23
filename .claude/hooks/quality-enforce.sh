@@ -3,7 +3,9 @@
 # event: PreToolUse
 # matcher: Edit|Write
 # timeout: 5
-# Bloquea edits a código si CUALQUIER quality gate tiene errores pendientes en .claude/quality-state/
+# Bloquea edits al ARCHIVO específico si tiene quality errors pendientes en
+# .claude/quality-state/ — antes bloqueaba TODO el proyecto por un error en
+# cualquier archivo (la clave de estado era por proyecto, no por archivo).
 
 INPUT=$(cat)
 FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
@@ -14,9 +16,10 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
 STATE_DIR="$CWD/.claude/quality-state"
 [ -d "$STATE_DIR" ] || exit 0
 
-PROJECT_HASH=$(echo "$CWD" | cksum | cut -d' ' -f1)
+RELATIVE="${FILE#$CWD/}"
+FILE_HASH=$(echo "$RELATIVE" | cksum | cut -d' ' -f1)
 ERRORS=""
-for f in "$STATE_DIR"/*"-$PROJECT_HASH"; do
+for f in "$STATE_DIR"/*"-$FILE_HASH"; do
     [ -f "$f" ] || continue
     COUNT=$(cat "$f" 2>/dev/null || echo "0")
     [ "$COUNT" -gt "0" ] 2>/dev/null || continue
@@ -25,6 +28,6 @@ for f in "$STATE_DIR"/*"-$PROJECT_HASH"; do
 done
 
 [ -z "$ERRORS" ] && exit 0
-echo "BLOCKED: Quality errors pending:$ERRORS" >&2
-echo "Fix them and delete $STATE_DIR/ to unblock." >&2
+echo "BLOCKED: Quality errors pending in $RELATIVE:$ERRORS" >&2
+echo "Fix them and delete $STATE_DIR/*-$FILE_HASH to unblock." >&2
 exit 2

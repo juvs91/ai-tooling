@@ -54,7 +54,8 @@ class TestInjectCredentials:
         req = {}
         _inject_credentials(req, model="anthropic/claude-3", creds=_creds(anthropic_key="ak", anthropic_base="http://ant"))
         assert req["api_key"] == "ak"
-        assert req["api_base"] == "http://ant"
+        # ADR-0005: endpoint path (default /v1/messages) is appended to anthropic_base.
+        assert req["api_base"] == "http://ant/v1/messages"
 
     def test_anthropic_no_base(self):
         req = {}
@@ -97,7 +98,8 @@ class TestCredentialTransformer:
         ctx = TransformContext(litellm_request={})
         await t.transform(req, ctx)
         assert ctx.litellm_request["api_key"] == "ak"
-        assert ctx.litellm_request["api_base"] == "http://ant"
+        # ADR-0005: endpoint path (default /v1/messages) is appended to anthropic_base.
+        assert ctx.litellm_request["api_base"] == "http://ant/v1/messages"
 
     @pytest.mark.asyncio
     async def test_empty_model_uses_anthropic_fallback(self):

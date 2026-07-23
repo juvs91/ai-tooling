@@ -341,7 +341,7 @@ class TestAnalysisQualityStream:
         )
 
         with patch("proxy.proxy.run_messages", new_callable=AsyncMock) as mock_run, \
-             patch("llm.converters.convert_litellm_to_anthropic", return_value=good_response):
+             patch("llm.transformers.quality_refinement.convert_litellm_to_anthropic", return_value=good_response):
             mock_run.return_value = (False, MagicMock(), "primary")
 
             result = []

@@ -161,6 +161,25 @@ def clean_gemini_schema_cached(schema: Any) -> Any:
         return _gemini_schema_cache[key]
 
 
+# Anthropic server-side tools are resolved by Anthropic's own backend — the
+# client/proxy never executes them, and they carry no input_schema. They cannot
+# be represented as OpenAI function-calling or an XML tool prompt for a
+# non-Anthropic backend, so they're filtered out before conversion. See ADR-0029.
+_SERVER_TOOL_TYPE_PREFIXES = (
+    "web_search_",
+    "web_fetch_",
+    "bash_",
+    "code_execution_",
+    "text_editor_",
+)
+
+
+def is_server_tool(tool_dict: dict) -> bool:
+    """True if tool_dict is an Anthropic server-side tool (see ADR-0029)."""
+    tool_type = tool_dict.get("type") or ""
+    return tool_type.startswith(_SERVER_TOOL_TYPE_PREFIXES)
+
+
 def _convert_tool_cached(tool_dict: dict, is_gemini: bool) -> dict:
     """Convert Anthropic tool dict to OpenAI format with memoization."""
     name = tool_dict["name"]

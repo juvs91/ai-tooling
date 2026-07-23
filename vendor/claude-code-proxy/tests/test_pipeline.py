@@ -80,7 +80,7 @@ class TestTransformContext:
             "evidence_links", "citation_map", "grounding_score",
             "grounding_issues", "evidence_graph", "code_snippet_cache",
             # Plan mode lock (set by IntentClassifierTransformer)
-            "plan_mode_active",
+            "plan_mode_active", "plan_mode_source",
             # Ralph mode (set by IntentClassifierTransformer from PROXY_SESSION_MODE: ralph marker)
             "ralph_mode",
             # P3 — confidence scoring
@@ -90,6 +90,8 @@ class TestTransformContext:
             "adaptive_routing_reason", "model_quality_history",
             # P1 — stream buffering
             "stream_finish_reason", "stream_input_tokens", "stream_output_tokens",
+            # Proactive degradation detection (Priority 3)
+            "quality_history", "degradation_count", "last_degradation_turn",
         }
         assert names == expected
 

@@ -153,7 +153,6 @@ Claude Code ejecuta estos scripts automáticamente. **Contrato de input: JSON vi
 | `migration-gate.sh` | PostToolUse | Edit\|Write\|MultiEdit | Avisa cuando se edita un modelo SQLAlchemy sin correr `alembic revision` |
 | `verify-implementation.sh` | PostToolUse | Edit\|Write\|MultiEdit | Detecta funciones stub (`pass`/`TODO`/`NotImplemented`) en `.py` editados |
 | `edit-drift-detector.sh` | PostToolUse | Edit\|Write\|Bash | Rastrea edits vs test runs; advierte a 8/15/25 edits sin verificación |
-| `quality-gate.sh` | PostToolUse | Edit\|Write | Corre `ruff check` en `.py` modificados (solo avisa) |
 
 También activo vía `settings.json`: `npx block-no-verify@1.1.2` (PreToolUse/Bash) — bloquea `git --no-verify`.
 
@@ -209,6 +208,21 @@ Las partes específicas del proyecto van en `completion_checklist` del `task-sco
 2. El hook `scope-gate.sh` aplicará restricciones de write según el modo automáticamente
 3. Si no hay `task-scope.json`: comportamiento default (mode=full, sin restricciones extra)
 
+### ¿Qué cuenta como "iniciar una nueva tarea"? (evita pisar una tarea en curso)
+- **Nueva tarea** → escribe/sobreescribe `task-scope.json` cuando el pedido es un tema
+  distinto y no relacionado al `task_id` ya declarado (si existe). Señales: cambia de
+  dominio/carpeta objetivo, o el usuario dice explícitamente "ahora...", "otra cosa",
+  "nueva tarea".
+- **Continuación de la tarea actual** → si el pedido es corregir, refinar o seguir la
+  MISMA tarea (mismo `task_id`/mismo hilo de trabajo), NO reescribas `task-scope.json`
+  desde cero. Como mucho amplía `allowed_patterns` o actualiza campos puntuales.
+- **Antes de sobreescribir un `task-scope.json` existente**: léelo primero. Si no es obvio
+  si es la misma tarea o una nueva, pregunta al usuario antes de reemplazarlo.
+- **Si no se escribió `task-scope.json`** (se olvidó, falló, etc.): fallback seguro — sin
+  archivo, `scope-gate.sh` no restringe nada. El riesgo real es el opuesto: un scope viejo
+  que sobrevive y bloquea la tarea siguiente — por eso el Task Completion Gate lo limpia
+  automáticamente (ver abajo).
+
 ### Scope Discipline — la diferencia entre modos:
 - **analysis**: SOLO leer, contar, comparar, reportar. Write solo en `ai-notes/findings/` y `.claude/plans/`.
   **"Analizar X" ≠ "Documentar X".** No crear archivos fuera de esas rutas.
@@ -231,7 +245,9 @@ Las partes específicas del proyecto van en `completion_checklist` del `task-sco
 ### Task Completion Gate:
 - SIEMPRE correr `./scripts/task-verify.sh` antes de reportar la tarea como completa
 - Si exit 1: completar los ítems pendientes listados antes de reportar
-- Si exit 0: task-verify.sh indicará si hay tests a correr según modo:lenguaje
+- Si exit 0: task-verify.sh indicará si hay tests a correr según modo:lenguaje, y borra
+  automáticamente `.claude/task-scope.json` — el scope queda abierto para la siguiente
+  tarea sin intervención manual
 
 ### Instalación en un nuevo proyecto:
 1. Copiar este bloque al `CLAUDE.md` del proyecto

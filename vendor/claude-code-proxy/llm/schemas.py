@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 from typing import List, Dict, Any, Optional, Union, Literal
 
 
@@ -99,9 +99,16 @@ class Message(BaseModel):
     ]
 
 class Tool(BaseModel):
+    """Anthropic tool definition. `input_schema` is optional and `type`/extra
+    fields are preserved (not dropped) to support Anthropic server-side tools
+    (web_search_20250305, etc.) which have no input_schema — Anthropic resolves
+    them server-side. See ADR-0029."""
+    model_config = ConfigDict(extra="allow")
+
     name: str
     description: Optional[str] = None
-    input_schema: Dict[str, Any]
+    input_schema: Optional[Dict[str, Any]] = None
+    type: Optional[str] = None
 
 class ThinkingConfig(BaseModel):
     enabled: bool = True

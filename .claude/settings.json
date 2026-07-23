@@ -25,7 +25,7 @@
       "Bash(done)",
       "Bash(xargs:*)"
     ],
-    "deny": []
+    "deny": ["TaskOutput"]
   },
   "project": {
     "name": "AI-Tooling",
@@ -151,6 +151,28 @@
         "description": "Worktree isolation gate: advierte parallel(agent()) sin isolation: 'worktree'; redirige Agent→Workflow para paralelismo aislado"
       },
       {
+        "matcher": "Agent|EnterPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/skill-load-gate.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Skill load gate: bloquea Agent/EnterPlanMode si no se leyó ningún SKILL.md en la sesión"
+      },
+      {
+        "matcher": "Write|Edit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/protect-skill-gate-bypass.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Protect skill gate bypass: bloquea que el agente cree .claude/no-skill-gate o edite skill-load-gate.sh"
+      },
+      {
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           {
@@ -196,6 +218,17 @@
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/track-skill-load.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Track skill load: marca la sesión cuando se lee un SKILL.md, cualquier tool (para skill-load-gate.sh)"
+      },
       {
         "matcher": "Edit|Write",
         "hooks": [

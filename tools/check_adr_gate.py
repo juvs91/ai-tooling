@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Rutas guardadas — editar aquí para ajustar a tu proyecto
+# Rutas guardadas — fallback si no existe .claude/adr-gate.conf
 # ---------------------------------------------------------------------------
 
 GUARDED_PATTERNS = [
@@ -40,9 +41,41 @@ EXCLUSION_PATTERNS = [
     "*/test_*.py",
 ]
 
-ADR_PATTERN = "docs/adr/ADR-*.md"
+DEFAULT_ADR_PATH = "docs/adr"
+CONFIG_FILE = ".claude/adr-gate.conf"
 SKIP_TOKEN = "[skip-adr]"
 BYPASS_LOG = ".adr-gate-bypasses.log"
+
+
+def _load_conf_rules() -> tuple[list[tuple[str, str | None]] | None, str | None]:
+    """Parsea .claude/adr-gate.conf con la misma lógica que adr-gate.sh.
+
+    Formato: `PREFIJO [EXTENSION_REGEX]` por línea. `#` = comentario. Línea con
+    `:` = directiva (ej. `adr_path: ai-notes/adr`), no es una regla guardada.
+    Retorna (None, None) si el archivo no existe — señal para usar el fallback
+    hardcoded de GUARDED_PATTERNS/DEFAULT_ADR_PATH.
+    """
+    path = Path(CONFIG_FILE)
+    if not path.is_file():
+        return None, None
+    rules: list[tuple[str, str | None]] = []
+    adr_path: str | None = None
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" in line:
+            key, _, value = line.partition(":")
+            if key.strip() == "adr_path":
+                adr_path = value.strip().strip("/")
+            continue
+        parts = line.split(None, 1)
+        rules.append((parts[0], parts[1].strip() if len(parts) > 1 else None))
+    return rules, adr_path
+
+
+_CONF_RULES, _CONF_ADR_PATH = _load_conf_rules()
+ADR_PATTERN = f"{_CONF_ADR_PATH or DEFAULT_ADR_PATH}/ADR-*.md"
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +109,11 @@ def _is_excluded(path: str) -> bool:
 def _is_guarded(path: str) -> bool:
     if _is_excluded(path):
         return False
+    if _CONF_RULES is not None:
+        return any(
+            path.startswith(prefix) and (not ext or re.search(ext, path))
+            for prefix, ext in _CONF_RULES
+        )
     return any(fnmatch.fnmatch(path, pat) for pat in GUARDED_PATTERNS)
 
 

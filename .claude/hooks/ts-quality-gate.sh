@@ -18,11 +18,14 @@ command -v npx >/dev/null 2>&1 || exit 0
 
 STATE_DIR="$CWD/.claude/quality-state"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
-PROJECT_HASH=$(echo "$CWD" | cksum | cut -d' ' -f1)
-ERROR_FILE="$STATE_DIR/ts-$PROJECT_HASH"
 AUDIT_LOG="$CWD/.claude/quality-events.log"
 
 RELATIVE="${FILE#$CWD/}"
+# Clave de estado por ARCHIVO (no por proyecto) — así un error en un archivo no
+# bloquea ediciones a otros archivos sin relación. Antes usaba solo PROJECT_HASH,
+# lo que dejaba TODO el proyecto bloqueado por un error en cualquier archivo.
+FILE_HASH=$(echo "$RELATIVE" | cksum | cut -d' ' -f1)
+ERROR_FILE="$STATE_DIR/ts-$FILE_HASH"
 TS_OUTPUT=$(cd "$CWD" && npx tsc --noEmit 2>&1 || true)
 FILE_ERRORS=$(echo "$TS_OUTPUT" | grep "$RELATIVE" | grep -c "error TS" 2>/dev/null || echo "0")
 TS_CODES=$(echo "$TS_OUTPUT" | grep "$RELATIVE" | grep -o "TS[0-9]*" | sort -u | tr '\n' ',' | sed 's/,$//')

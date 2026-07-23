@@ -67,12 +67,16 @@ if echo "$COMMAND" | grep -qE 'git\s+clean\s+-[a-zA-Z]*f'; then
 fi
 
 # 5. rm -rf sobre un git worktree activo (Ref: ADR-0008)
+# Segmentado por &&/||/;/| — evita falso positivo cuando el path de un worktree
+# aparece en un comando encadenado distinto del que realmente ejecuta el rm -rf.
 if echo "$COMMAND" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f'; then
   for wt_path in $(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}'); do
-    if echo "$COMMAND" | grep -qF "$wt_path"; then
-      echo "BLOCKED: '$wt_path' es un git worktree activo. Usa: git worktree remove $wt_path" >&2
-      exit 2
-    fi
+    while IFS= read -r segment; do
+      if echo "$segment" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f' && echo "$segment" | grep -qF "$wt_path"; then
+        echo "BLOCKED: '$wt_path' es un git worktree activo. Usa: git worktree remove $wt_path" >&2
+        exit 2
+      fi
+    done < <(echo "$COMMAND" | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g')
   done
 fi
 

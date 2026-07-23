@@ -2,7 +2,7 @@
 > Aprendizajes iterativos del proyecto. Actualizar despues de cada sesion.
 
 ## Ultima actualizacion
-- Fecha: 2026-07-17
+- Fecha: 2026-07-22
 - Por: claude-sonnet-4-6 + jeguzman
 
 ---
@@ -606,3 +606,131 @@ contexto — y nuestro note (inyectado al final vía `ensure_system_note`) ganar
 
 **Regla futura:** Cuando el proxy agregue un enforcement note que intersecta con algo que CC
 también inyecta, verificar el CC binary con `strings` para validar que los valores coinciden.
+
+---
+
+## Session 2026-07-22: 93 tests fallando en el proxy — masking de un crash oculta 3 bugs reales
+
+**Contexto:** al arreglar el import circular de `test_converters.py`, correr la suite completa
+reveló `93 failed, 1098 passed`. Confirmado por `git stash`/`git stash pop`: preexistente, no
+causado por cambios de la sesión.
+
+### [P007] Un solo constructor roto puede enmascarar N bugs reales distintos
+
+**Síntoma:** 88 de 93 fallos mostraban el mismo error superficial:
+`TypeError: ClassifierConfig.__init__() missing 2 required positional arguments`.
+Parecía "un" bug (helper de test desactualizado tras agregarse circuit-breaker a
+`ClassifierConfig` — `config.py:106-107`, sin defaults).
+
+**Causa raíz real:** al arreglar el constructor (agregar `max_consecutive_errors=3,
+circuit_reset_seconds=60.0` a `_classifier_cfg()` en `tests/test_intent_classifier.py` y a
+4 sitios inline en `tests/test_plan_mode_guard.py`), 84→5 fallos — pero 5 tests que antes
+"fallaban por lo mismo" siguieron fallando por razones **completamente distintas y reales**:
+no estaban rotos por el mismo bug, estaban crasheando ANTES de llegar a su propia aserción.
+
+**Principio:** cuando muchos tests fallan con el MISMO stack trace superficial (un crash de
+construcción/fixture), arreglar esa causa común y volver a correr la suite — no asumir que el
+conteo bajó a 0 hasta confirmarlo. El crash compartido puede estar enmascarando bugs reales
+independientes que nunca llegaron a ejecutar su lógica.
+
+### [P008] Signal 4 (Implicit ExitPlanMode) no podía inferir `plan_mode_source` sin session_id
+
+**Síntoma:** 4 tests de `TestSignal4ImplicitExitPlanMode` seguían fallando tras P007. El
+escenario (real, reportado con Kimi K2): usuario hace `/plan`, modelo llama `EnterPlanMode`,
+escribe el plan, CC cambia a Autoedit sin llamar `ExitPlanMode` — el desbloqueo implícito
+(P0_UNLOCK, ADR-0008) nunca disparaba.
+
+**Causa raíz:** `llm/transformers/intent_classifier.py:532-547` — `_pm_source` solo se leía de
+`get_session_plan_mode_source(ctx.session_id)` (cache de sesión). Sin `session_id` (o cache
+vacío, ej. primera clasificación de una sesión completa en una sola llamada), `_pm_source`
+quedaba `None` para siempre, y Signal 4 nunca podía confirmar `source == "cc"` — aunque
+`EnterPlanMode` apareciera explícitamente en el historial de mensajes de la misma request.
+
+**Fix:** si `_pm_source is None` y `"EnterPlanMode" in _recent_tools` (ya computado para otro
+uso, ventana de 120 tool calls), inferir `_pm_source = "cc"` desde el historial, no solo desde
+cache/system-text del turno actual. 3 líneas, sin tocar ADR-0010 (proxy-initiated sigue
+bloqueado igual, ya que ahí `EnterPlanMode` nunca aparece).
+
+**Verificado:** los 8 tests de la clase (4 "fires" + 4 "blocked") pasan — confirmé explícitamente
+que los 4 "blocked" no se ven afectados porque su gate de intent (`ctx.intent in (BUILD, VERIFY)`)
+ya los excluye antes de llegar a este chequeo.
+
+### [P009] Ambigüedad PLAN/BUILD: el primer heurístico regresionó; el segundo (más preciso) funcionó
+
+**Síntoma:** `test_mixed_analysis_building_becomes_building` — texto con keywords de PLAN
+("arquitectónico") y BUILD ("fix") a la vez debía clasificar BUILD, pero
+`_regex_fallback_intent` (`router/llm_router.py`) tiene un empate explícito
+"is_planning and is_building → prefer PLAN".
+
+**Intento 1 (revertido):** `return "BUILD" if is_analysis else "PLAN"` en el empate. Pasó el
+test objetivo Y `test_model_router.py` completo, pero correr la suite COMPLETA reveló una
+regresión que ningún test individual mostraba: `test_router.py::test_regex_fallback_with_stripped_reminder`
+— `"Analiza la arquitectura del sistema y crea un plan"` (is_analysis=True también) dejó de
+clasificar PLAN. Ambos casos tienen la MISMA forma estructural (1 match planning + 1 match
+building + is_analysis=True) pero requieren resultados opuestos → `is_analysis` no discrimina.
+
+**Intento 2 (aplicado):** en vez de `is_analysis`, se necesitaba distinguir palabras de PLAN
+que son el OBJETO explícito del pedido ("plan", "planea", "diseña") de palabras que solo
+describen CÓMO investigar/construir ("arquitectónico", "análisis" como adjetivo/sustantivo
+incidental). Se agregó `STRONG_PLANNING_RE` (subset de `PLANNING_RE`: solo
+`plan|planning|planea\w*|planific\w*|dise[ñn]\w*|design`) y el empate ahora es:
+`"PLAN" if STRONG_PLANNING_RE.search(text) else "BUILD"`.
+- "crea un **plan**" → STRONG match → PLAN (correcto)
+- "Propón un fix" (sin STRONG match, solo "arquitectónico" en PLANNING_RE normal) → BUILD (correcto)
+
+**Verificado:** suite completa `1191 passed, 0 failed` (era `93 failed, 1098 passed` al inicio
+de la sesión). Los 2 casos que antes eran mutuamente excluyentes con el intento 1 ahora
+resuelven ambos correctamente.
+
+**Principio:** ante una regresión encontrada solo por la suite completa (no por el test que se
+estaba arreglando), no seguir iterando el MISMO heurístico — buscar una señal estructuralmente
+distinta que sí discrimine (aquí: "es el objeto del pedido" vs "describe el método"), y
+validarla contra AMBOS casos en conflicto antes de aplicar. Correr `pytest tests/ -q` completo
+después de CUALQUIER cambio a regex/lógica de clasificación compartida, nunca solo el archivo
+relacionado — el blast radius cruza archivos de test.
+
+**Estado final de la sesión:** 93/93 arreglados (`1191 passed, 0 failed`, era `93 failed, 1098
+passed`).
+
+### [P010] Sin `X-Session-ID`, `plan_mode_active` nunca persistía entre turnos — causa raíz de un incidente real de Plan Mode
+
+**Síntoma:** en una sesión real de Kimi K2 vía VS Code + proxy en school-system, el modelo nunca
+llamó `EnterPlanMode`/`ExitPlanMode` en 206 mensajes — ni una vez, sin errores, simplemente nunca
+lo intentó. En su lugar improvisó un workflow equivalente vía subagentes `Agent(Explore)` +
+`Agent(Plan)` y escribió el plan a mano con `Write`, sin usar el mecanismo nativo de Plan Mode.
+
+**Investigación (con evidencia real, no teoría):**
+- `AskUserQuestion` y `ExitWorktree` SÍ funcionaron sin que el modelo llamara `ToolSearch` en
+  ningún momento del transcript — descartando "falta ToolSearch" como causa.
+- `utils/tool_utils.py:178` (`validate_tool_name_with_deferred_bypass`) confirma que el proxy
+  YA trata los nombres de tools de workflow de CC como siempre-válidos independientemente de
+  `ToolSearch` — el supuesto "sin ToolSearch falla silenciosamente" no aplica a nivel proxy.
+- `curl http://127.0.0.1:8083/api/logs?n=500` (endpoint real del proxy) mostró
+  `"session_id":""` en las 88 entradas logueadas de esa sesión — el header `X-Session-ID`
+  (`server.py:251`) nunca llegó desde ese cliente (VS Code extension).
+- El intent real (clasificador LLM, `openai/deepseek-chat`, no el fallback regex) oscilaba
+  READ↔SYNTHESIZING↔PLAN↔BUILD turno a turno. `intent_classifier.py`'s Signal 3 (persistencia
+  de `plan_mode_active` vía cache de sesión) solo actuaba `if ctx.session_id:` — sin fallback,
+  a diferencia de `deferred_tools.py`, que YA tiene uno (`_compute_deferred_session_id`, hash
+  determinístico de los primeros 20 mensajes). Sin persistencia, cada vez que el clasificador
+  devolvía "PLAN" por un turno, `plan_mode_active` se activaba solo ESE turno y se perdía en el
+  siguiente.
+- `deferred_tools.py` (ADR-0012) quita `EnterPlanMode`/`ExitPlanMode` de `request.tools` cuando
+  `plan_mode_active=False and intent != "PLAN"` — con el flicker de arriba, esa condición era
+  cierta casi todo el tiempo. El modelo nunca tuvo una ventana estable para llamar la tool.
+
+**Fix:** `intent_classifier.py` ahora reusa `_compute_deferred_session_id` (importado de
+`deferred_tools.py`) — `effective_sid = ctx.session_id or _compute_deferred_session_id(messages)`
+al inicio de `transform()`, usado en las 5 llamadas al cache de plan-mode en vez de
+`ctx.session_id` directo. **ADR-0030.**
+
+**Verificado:** suite completa sin regresión (`1191 passed`). Repro manual: 2 turnos,
+`session_id=None` en ambos, mismo prefijo de conversación — turno 1 clasifica PLAN (activa
+`plan_mode_active`), turno 2 clasifica CHAT (antes del fix se perdía el estado) — confirmado que
+ahora persiste `True`.
+
+**Principio:** cuando un mecanismo de persistencia por sesión tiene un fallback ya resuelto en
+OTRO transformer del mismo pipeline (`deferred_tools.py`), y un transformer hermano
+(`intent_classifier.py`) implementa la MISMA necesidad sin ese fallback, es una señal de que el
+fallback debería vivir en un solo lugar compartido — la ausencia no es necesariamente
+intencional, puede ser simplemente que nadie lo propagó al segundo lugar que lo necesitaba.

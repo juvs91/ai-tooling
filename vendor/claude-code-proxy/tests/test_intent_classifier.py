@@ -16,8 +16,13 @@ from llm.transformers.intent_classifier import (
 from config import ClassifierConfig, PolicyConfig
 
 
-def _classifier_cfg(model="", api_key="", base_url=None, timeout=3.0):
-    return ClassifierConfig(model=model, api_key=api_key, base_url=base_url, timeout=timeout)
+def _classifier_cfg(model="", api_key="", base_url=None, timeout=3.0,
+                     max_consecutive_errors=3, circuit_reset_seconds=60.0):
+    return ClassifierConfig(
+        model=model, api_key=api_key, base_url=base_url, timeout=timeout,
+        max_consecutive_errors=max_consecutive_errors,
+        circuit_reset_seconds=circuit_reset_seconds,
+    )
 
 
 def _policy_cfg(analysis=False, threshold=5):
