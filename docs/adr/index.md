@@ -9,3 +9,5 @@
 | [ADR-0005](ADR-0005-configurable-anthropic-endpoint-path.md) | Configurable Anthropic Passthrough Endpoint Path | Accepted | 2026-05-26 | Proxy |
 | [ADR-0029](ADR-0029-strip-server-tools-for-non-anthropic-providers.md) | Strip Anthropic Server-Side Tools for Non-Anthropic Providers | Accepted | 2026-07-21 | Proxy |
 | [ADR-0030](ADR-0030-plan-mode-session-id-fallback.md) | Deterministic Session ID Fallback for Plan-Mode Persistence | Accepted | 2026-07-22 | Proxy |
+| [ADR-0031](ADR-0031-completion-claim-grounding.md) | Detect Ungrounded Completion Claims | Accepted | 2026-07-27 | Proxy |
+| [ADR-0032](ADR-0032-decompose-compressor-into-session-package.md) | Decompose `compressor.py` into a `session/` Package | Accepted | 2026-07-27 | Proxy |

@@ -12,26 +12,94 @@ Resilience layers:
   - Retry with exponential backoff (3 attempts per endpoint)
   - Circuit breaker: skip compressor for 60s after 5 consecutive failures
   - Fallback compressor: try a secondary endpoint if primary fails
+
+ADR-0032: session-state helpers (plan mode, deferred tools, quality history,
+grounding graph, completion claims) used to live inline in this file. They
+now live in `llm/session/*` and `utils/message_utils.py` — this module keeps
+only the compression algorithm itself, and re-exports everything else below
+so existing `from llm.compressor import ...` call sites keep working unchanged.
 """
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Optional, Dict
+from typing import Any, Optional
+
 import litellm
-from litellm import token_counter
+
 from utils.metrics import metrics
 from utils.utils import count_tokens_accurate  # toksum integration
 from llm.session_state import extract_session_state, inject_state_into_system_prompt, SessionState, extract_todo_state
 
+# ── Re-exports: session state, split out of this module (ADR-0032) ────────
+from llm.session.store import _CompressionCache, _session_cache, _state_lock, _compute_prefix_hash, _CACHE_PREFIX_SIZE
+from llm.session.plan_mode import (
+    get_session_plan_mode,
+    set_session_plan_mode,
+    get_session_plan_mode_source,
+    set_session_plan_mode_source,
+    get_session_plan_mode_events,
+)
+from llm.session.completion_claims import append_session_completion_claim, get_session_completion_claims
+from llm.session.quality_history import get_session_quality_history, append_session_quality
+from llm.session.deferred_tools_cache import get_session_deferred_tools, save_session_deferred_tools
+from llm.session.grounding import (
+    get_session_grounding_graph,
+    extend_session_grounding_graph,
+    get_session_read_files,
+    get_grounding_state,
+    _track_grounding_hop,
+    _prune_grounding_graph,
+)
+from llm.session.lifecycle import get_or_create_session, update_session, cleanup_expired_sessions
+from utils.message_utils import (
+    estimate_tools_tokens,
+    _find_safe_split_point,
+    _serialize_messages_for_summary,
+    _normalize_messages,
+    _detect_tool_inflation,
+    _split_conversation,
+    _trim_by_token_budget,
+    _enforce_message_cap,
+    _validate_tool_references,
+    _fix_orphan_tool_messages,
+    _needs_xml_reinforcement,
+)
 
-_MAX_SESSION_STATE_ENTITIES = 150  # cap entities per session to bound session_state size
-_MAX_CITATION_HISTORY = 200        # cap citation history per session
+__all__ = [
+    "compress_messages_if_needed",
+    "log_compaction",
+    # re-exported session state (ADR-0032) — kept for external call sites
+    "_CompressionCache",
+    "_session_cache",
+    "_state_lock",
+    "get_session_plan_mode",
+    "set_session_plan_mode",
+    "get_session_plan_mode_source",
+    "set_session_plan_mode_source",
+    "get_session_plan_mode_events",
+    "append_session_completion_claim",
+    "get_session_completion_claims",
+    "get_session_quality_history",
+    "append_session_quality",
+    "get_session_deferred_tools",
+    "save_session_deferred_tools",
+    "get_session_grounding_graph",
+    "extend_session_grounding_graph",
+    "get_session_read_files",
+    "get_grounding_state",
+    "_track_grounding_hop",
+    "_prune_grounding_graph",
+    "get_or_create_session",
+    "update_session",
+    "cleanup_expired_sessions",
+    "estimate_tools_tokens",
+    "_find_safe_split_point",
+    "_validate_tool_references",
+    "_fix_orphan_tool_messages",
+]
 
 
 # Circuit breaker state (module-level, persists across requests)
@@ -45,287 +113,6 @@ _CIRCUIT_BREAKER_COOLDOWN = 60.0  # seconds to skip compressor after circuit ope
 # session consumes ~30k tokens per compression call; 50k was exhausted in 2-3 successful calls.
 _COMPRESSION_TOKEN_BUDGET = int(os.getenv("COMPRESSION_TOKEN_BUDGET", "200000"))
 _compression_tokens_spent: dict[str, int] = {}  # session_id -> tokens spent
-
-# Lock for all module-level mutable state (_compression_cache, _consecutive_failures, _circuit_open_until)
-_state_lock = asyncio.Lock()
-
-
-# ── Compression result cache ──────────────────────────────────────────
-# CC is stateless: sends full conversation history on every request.
-# Without caching, the proxy re-compresses ~1700 identical messages via
-# a DeepSeek LLM call on every single request (2-5s + API cost each).
-# This cache stores the last compression summary and reuses it when the
-# same session sends a near-identical request.
-# Works for ALL providers (Z.AI Anthropic, Z.AI OpenAI, DeepSeek).
-
-# Session Management Enhancement (Phase 3):
-# - Supports multiple concurrent sessions with explicit session IDs
-# - Maintains conversation continuity across proxy restarts and profile changes
-# - Uses UUID-based session IDs passed via X-Session-ID HTTP header
-# - Cache TTL extended to 24 hours for longer-term persistence
-
-@dataclass
-class _CompressionCache:
-    summary: str = ""              # The compressed summary text
-    old_msg_count: int = 0         # How many old messages were compressed
-    timestamp: float = 0.0         # time.time() (Unix epoch) when cached
-    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))  # UUID-based session ID
-    prefix_hash: str = field(default_factory=lambda: hashlib.sha256(b"").hexdigest()[:16])  # For backward compatibility
-
-    # Grounding state (multi-hop evidence tracking)
-    grounding_graph: dict[str, dict] = field(default_factory=dict)
-    # Entity → {file, related, citations, code_snippet, last_seen}
-    verified_claims: set[str] = field(default_factory=set)
-    # Set of claim hashes that have been verified across conversation
-    citation_history: list[tuple[str, str]] = field(default_factory=list)
-    # List of (turn_id, citation) tuples for multi-hop tracking
-
-    # Deferred tools cache — persists CC's <available-deferred-tools> list
-    # across turns so injection never depends on CC re-sending the block.
-    deferred_tool_names: list[str] = field(default_factory=list)
-    # Plan mode state — persists across history truncation and proxy restarts.
-    # Set True on first EnterPlanMode/PLAN-intent turn; cleared on ExitPlanMode.
-    plan_mode_active: bool = False
-    # Origin of the current plan session: "cc" (CC /plan UI) or "proxy" (enforcement-initiated).
-    # Used by Signal 4 to prevent false-positive exits on proxy-initiated plans. See ADR-0010.
-    plan_mode_source: str | None = None
-    # Audit trail for plan mode activations/deactivations this session.
-    plan_mode_events: list[dict] = field(default_factory=list)
-
-    # Quality feedback loop (Item 4) — proxy-internal session history.
-    # Used by intent_enforcement.py to escalate enforcement when quality is consistently low.
-    # Populated by quality_refinement.py after every response that has a quality score.
-    quality_scores: list[float] = field(default_factory=list)  # last N quality scores (0.0–1.0)
-    session_stub_count: int = 0                                 # stubs detected so far in this session
-
-    # Priority 2: structured state (entities, decisions, phase checkpoints) extracted before
-    # each compression and injected back into the system prompt after reassembly.
-    session_state: Optional[dict] = None  # serialized SessionState.to_dict()
-
-_session_cache: Dict[str, _CompressionCache] = {}  # Multi-session support: session_id -> cache entry
-_SESSION_TTL = 604800.0          # 7 days — matches typical dev session rhythm (survive weekend gaps)
-_CACHE_MSG_TOLERANCE = 100   # Reuse if ≤100 new old messages since last compression
-_CACHE_PREFIX_SIZE = 20      # Hash first 20 messages for session identity
-
-# Disk persistence — survives uvicorn --reload and proxy restarts
-_SESSION_CACHE_FILE = os.environ.get("PROXY_SESSION_CACHE_FILE", "/tmp/proxy_session_cache.json")
-_SESSION_CACHE_MAX_MB = int(os.environ.get("PROXY_SESSION_CACHE_MAX_MB", "1024"))
-
-
-def _compute_prefix_hash(messages: list[dict], n: int = _CACHE_PREFIX_SIZE) -> str:
-    """Hash the first N messages to identify the conversation session."""
-    prefix = messages[:n]
-    raw = json.dumps(prefix, sort_keys=True, default=str)
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
-
-
-def _save_session_cache_to_disk() -> None:
-    """Persist _session_cache to JSON. Must be called within _state_lock.
-
-    Evicts expired sessions before saving so disk and in-memory cache stay clean.
-    Trims per-session fields that grow unbounded (session_state.entities, citation_history).
-    """
-    try:
-        now = time.time()
-        expired = [sid for sid, c in _session_cache.items() if now - c.timestamp >= _SESSION_TTL]
-        for sid in expired:
-            del _session_cache[sid]
-        if expired:
-            print(f"[session] Cache cleanup: removed {len(expired)} expired session(s)")
-
-        data = {}
-        for sid, c in _session_cache.items():
-            # Trim session_state.entities to prevent unbounded growth
-            ss = c.session_state
-            if ss and len(ss.get("entities", {})) > _MAX_SESSION_STATE_ENTITIES:
-                trimmed_entities = dict(list(ss["entities"].items())[-_MAX_SESSION_STATE_ENTITIES:])
-                ss = {**ss, "entities": trimmed_entities}
-
-            data[str(sid) if sid is not None else "__default__"] = {
-                "summary": c.summary,
-                "old_msg_count": c.old_msg_count,
-                "timestamp": c.timestamp,
-                "session_id": c.session_id,
-                "grounding_graph": c.grounding_graph,
-                "verified_claims": list(c.verified_claims),
-                "citation_history": c.citation_history[-_MAX_CITATION_HISTORY:],
-                "deferred_tool_names": c.deferred_tool_names,
-                "plan_mode_active": c.plan_mode_active,
-                "plan_mode_source": c.plan_mode_source,
-                "plan_mode_events": c.plan_mode_events[-50:],  # cap at 50 events
-                "quality_scores": c.quality_scores,
-                "session_stub_count": c.session_stub_count,
-                "session_state": ss,
-            }
-
-        with open(_SESSION_CACHE_FILE, "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        print(f"[session] Failed to persist cache to disk: {e}")
-
-
-def _load_session_cache_from_disk() -> None:
-    """Restore _session_cache from JSON on startup. Skips expired entries and clears if oversized."""
-    if not os.path.exists(_SESSION_CACHE_FILE):
-        return
-    try:
-        size_mb = os.path.getsize(_SESSION_CACHE_FILE) / (1024 * 1024)
-        if size_mb > _SESSION_CACHE_MAX_MB:
-            print(f"[session] Cache file {size_mb:.0f}MB exceeds {_SESSION_CACHE_MAX_MB}MB limit — clearing")
-            os.remove(_SESSION_CACHE_FILE)
-            return
-    except OSError:
-        pass
-    try:
-        with open(_SESSION_CACHE_FILE) as f:
-            data = json.load(f)
-        now = time.time()
-        loaded = 0
-        for raw_sid, entry in data.items():
-            ts = entry.get("timestamp", 0.0)
-            if now - ts >= _SESSION_TTL:
-                continue  # expired — skip
-            sid = None if raw_sid == "__default__" else raw_sid
-            _session_cache[sid] = _CompressionCache(
-                session_id=entry.get("session_id", str(raw_sid)),
-                summary=entry.get("summary", ""),
-                old_msg_count=entry.get("old_msg_count", 0),
-                timestamp=ts,
-                grounding_graph=entry.get("grounding_graph", {}),
-                verified_claims=set(entry.get("verified_claims", [])),
-                citation_history=entry.get("citation_history", []),
-                deferred_tool_names=entry.get("deferred_tool_names", []),
-                plan_mode_active=entry.get("plan_mode_active", False),
-                plan_modee_source=entry.get("plan_mode_source"),
-                plan_mode_events=entry.get("plan_mode_events", []),
-                quality_scores=entry.get("quality_scores", []),
-                session_stub_count=entry.get("session_stub_count", 0),
-                session_state=entry.get("session_state"),
-            )
-            loaded += 1
-        if loaded:
-            print(f"[session] Restored {loaded} session(s) from {_SESSION_CACHE_FILE}")
-            grounding_loaded = sum(1 for c in _session_cache.values() if c.grounding_graph)
-            if grounding_loaded:
-                print(f"[session] Restored grounding state for {grounding_loaded} session(s)")
-    except Exception as e:
-        print(f"[session] Failed to load cache from disk: {e}")
-    except Exception as e:
-        print(f"[session] Failed to load cache from disk: {e}")
-
-
-_load_session_cache_from_disk()  # restore sessions from previous proxy run
-
-
-async def get_session_plan_mode(session_id: str) -> bool:
-    """Return cached plan_mode_active for a session, or False if not found/expired."""
-    async with _state_lock:
-        entry = _session_cache.get(session_id)
-        if entry is not None and time.time() - entry.timestamp < _SESSION_TTL:
-            return entry.plan_mode_active
-    return False
-
-
-async def set_session_plan_mode(
-    session_id: str,
-    active: bool,
-    source: str | None = None,
-    signal: str = "?",
-) -> None:
-    """Persist plan_mode_active into the session cache for this session.
-
-    Args:
-        session_id: The session identifier.
-        active: True to activate plan mode, False to deactivate.
-        source: Origin of activation — "cc" (CC /plan UI) or "proxy" (enforcement).
-                Only used when active=True to set plan_mode_source.
-                When active=False, plan_mode_source is reset to None.
-        signal: Label identifying which signal triggered this change (for audit trail).
-    """
-    async with _state_lock:
-        entry = _session_cache.get(session_id)
-        if entry is not None:
-            prev = entry.plan_mode_active
-            entry.plan_mode_active = active
-            if active and source:
-                entry.plan_mode_source = source
-            elif not active:
-                entry.plan_mode_source = None
-            if prev != active:
-                action = "enter" if active else "exit"
-                entry.plan_mode_events.append({
-                    "turn": len(entry.plan_mode_events),  # event index (not message count)
-                    "action": action,
-                    "signal": signal,
-                })
-        else:
-            _session_cache[session_id] = _CompressionCache(
-                session_id=session_id,
-                timestamp=time.time(),
-                plan_mode_active=active,
-                plan_mode_source=source if active else None,
-                plan_mode_events=[{"turn": 0, "action": "enter" if active else "exit", "signal": signal}],
-            )
-        _save_session_cache_to_disk()
-
-
-async def get_session_plan_mode_source(session_id: str) -> str | None:
-    """Return the plan_mode_source ("cc", "proxy", or None) for a session."""
-    async with _state_lock:
-        entry = _session_cache.get(session_id)
-        if entry is not None and time.time() - entry.timestamp < _SESSION_TTL:
-            return entry.plan_mode_source
-    return None
-
-
-async def set_session_plan_mode_source(session_id: str, source: str | None) -> None:
-    """Update only plan_mode_source without changing plan_mode_active."""
-    async with _state_lock:
-        entry = _session_cache.get(session_id)
-        if entry is not None:
-            entry.plan_mode_source = source
-        else:
-            _session_cache[session_id] = _CompressionCache(
-                session_id=session_id,
-                timestamp=time.time(),
-                plan_mode_source=source,
-            )
-
-
-async def get_session_plan_mode_events(session_id: str) -> list[dict]:
-    """Return the plan_mode_events audit trail for a session."""
-    async with _state_lock:
-        entry = _session_cache.get(session_id)
-        if entry is not None and time.time() - entry.timestamp < _SESSION_TTL:
-            return list(entry.plan_mode_events)
-    return []
-
-
-async def get_session_quality_history(session_id: str) -> tuple[list[float], int]:
-    """Return (quality_scores, session_stub_count) for a session."""
-    async with _state_lock:
-        entry = _session_cache.get(session_id)
-        if entry is not None and time.time() - entry.timestamp < _SESSION_TTL:
-            return list(entry.quality_scores), entry.session_stub_count
-    return [], 0
-
-
-async def append_session_quality(session_id: str, quality_score: float, stub_delta: int = 0) -> None:
-    """Append quality_score and accumulate stubs into the session cache.
-
-    Keeps only the last 10 scores to bound memory and keep averages current.
-    Persists to disk immediately so the history survives proxy reloads.
-    """
-    async with _state_lock:
-        entry = _session_cache.get(session_id)
-        if entry is None:
-            entry = _CompressionCache(session_id=session_id, timestamp=time.time())
-            _session_cache[session_id] = entry
-        entry.quality_scores.append(quality_score)
-        if len(entry.quality_scores) > 10:
-            entry.quality_scores = entry.quality_scores[-10:]
-        entry.session_stub_count += stub_delta
-        _save_session_cache_to_disk()
 
 
 _COMPRESS_PROMPT = (
@@ -342,227 +129,13 @@ _COMPRESS_PROMPT = (
 )
 
 
-# _count_message_tokens() replaced by count_tokens_accurate() from utils/utils.py
-# This provides toksum integration with LiteLLM fallback and character approximation
-# All usages replaced below
-
-
-def estimate_tools_tokens(tools: list[dict] | None) -> int:
-    """Estimate token overhead from OpenAI-format tool definitions."""
-    if not tools:
-        return 0
-    total_chars = 0
-    for tool in tools:
-        try:
-            total_chars += len(json.dumps(tool))
-        except Exception:
-            total_chars += 500  # conservative fallback per tool
-    return total_chars // 3
-
-
-def _find_safe_split_point(conversation: list[dict], keep_recent: int) -> int:
-    """Find split point that preserves tool_use/tool_result pairs.
-
-    When compressing, we split conversation into old (compressed) and recent
-    (kept intact). If a role:"tool" message in recent references a tool_call_id
-    from an assistant message in old, the API rejects with error 2013.
-
-    This function scans backward from the naive split to include any assistant
-    messages whose tool_calls are referenced by tool messages in recent.
-    """
-    if len(conversation) <= keep_recent:
-        return 0
-
-    split = len(conversation) - keep_recent
-
-    # Collect tool_call_ids referenced in the recent portion
-    referenced_ids = set()
-    for msg in conversation[split:]:
-        if msg.get("role") == "tool":
-            tid = msg.get("tool_call_id")
-            if tid:
-                referenced_ids.add(tid)
-
-    if not referenced_ids:
-        return split
-
-    # Scan backward from split to find their parent assistant messages
-    for i in range(split - 1, -1, -1):
-        msg = conversation[i]
-        if msg.get("role") == "assistant" and "tool_calls" in msg:
-            for tc in msg.get("tool_calls", []):
-                tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                if tc_id in referenced_ids:
-                    split = i
-                    referenced_ids.discard(tc_id)
-        if not referenced_ids:
-            break
-
-    return split
-
-
-def _serialize_messages_for_summary(messages: list[dict], max_chars: int = 50000) -> str:
-    """Serialize messages to text for the compressor, truncating large outputs.
-
-    Tool results get higher char limits (6000) to preserve file contents and
-    error messages that are critical for continued tool use.
-    """
-    lines = []
-    chars = 0
-    for msg in messages:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "") or ""
-        # Tool results get higher limit — they contain file contents/errors
-        # that are critical for the model to continue working correctly
-        limit = 6000 if role == "tool" else 3000
-        if len(content) > limit:
-            keep_end = min(1000, limit // 4)
-            keep_start = limit - keep_end - 30  # 30 chars for truncation marker
-            content = content[:keep_start] + "\n...[truncated]...\n" + content[-keep_end:]
-        line = f"[{role}]: {content}"
-        if chars + len(line) > max_chars:
-            lines.append("[...earlier messages omitted...]")
-            break
-        lines.append(line)
-        chars += len(line)
-    return "\n\n".join(lines)
-
-
-def _normalize_messages(messages: list[dict]) -> list[dict]:
-    """
-    Normalize messages to ensure consistent schema before processing.
-
-    Preserves tool_calls and tool_call_id for tool reference validation.
-    Pure normalization logic, no hardcoded values.
-    """
-    normalized = []
-    for m in messages:
-        role = m.get("role", "user")
-        normalized_msg = {
-            "role": role,
-            "content": m.get("content", "")
-        }
-        # Preserve tool_calls for assistant messages (needed for tool reference validation)
-        if role == "assistant" and "tool_calls" in m:
-            normalized_msg["tool_calls"] = m["tool_calls"]
-        # Preserve tool_call_id for tool messages (needed for tool reference validation)
-        if role == "tool" and "tool_call_id" in m:
-            normalized_msg["tool_call_id"] = m["tool_call_id"]
-        normalized.append(normalized_msg)
-    return normalized
-
-
-def _detect_tool_inflation(messages: list[dict], tool_inflation_threshold: int) -> bool:
-    """
-    Detect tool message inflation in the conversation.
-
-    Returns True if tool count > threshold, False otherwise.
-    Tracks detection in metrics.
-    """
-    tool_count = sum(
-        1 for m in messages
-        if m.get("role") == "tool"
-    )
-    is_inflated = tool_count > tool_inflation_threshold
-    if is_inflated:
-        metrics.compression_tool_inflation_detected += 1
-    return is_inflated
-
-
-def _split_conversation(
-    messages: list[dict],
-    model_context_window: int,
-    summary_trigger_ratio: float,
-    recent_window_ratio: float,
-    message_threshold: int = 20,  # Use message count threshold for early compression
-    avg_tokens_per_msg: float = 300.0,  # Dynamic: computed from actual session data
-) -> tuple[list[dict], list[dict]]:
-    """
-    Split conversation into old (to be summarized) and recent (to keep intact).
-
-    All thresholds are calculated dynamically from config ratios - no magic numbers.
-    avg_tokens_per_msg is passed from compress_messages() using actual token count /
-    message count, so the recent window adapts to the real session density.
-    """
-    # Calculate dynamic thresholds from config ratios
-    summary_trigger_tokens = int(model_context_window * summary_trigger_ratio)
-    recent_window_tokens = int(model_context_window * recent_window_ratio)
-
-    # Use actual avg tok/msg (not hardcoded 300) — analysis sessions average 700+ tok/msg
-    # (tool results + file reads), which would inflate recent_window_msgs to 300 with the
-    # old assumption and swallow the entire conversation into the "recent" window.
-    recent_window_msgs = max(10, int(recent_window_tokens / avg_tokens_per_msg))
-
-    # Not enough messages to split — all messages fall inside the recent window.
-    # NOTE: do NOT add message_threshold here; that's the trigger threshold (checked
-    # upstream in compress_messages). Adding it here blocked compression for all sessions
-    # under (message_threshold + recent_window_msgs) = 510 messages.
-    if len(messages) <= recent_window_msgs:
-        return [], messages
-
-    # Split into old and recent
-    # Keep last recent_window_msgs messages as recent, everything else as old
-    split_point = len(messages) - recent_window_msgs
-    old_messages = messages[:split_point]
-    recent_messages = messages[split_point:]
-
-    print(f"[compress] Split conversation: {len(old_messages)} old messages, {len(recent_messages)} recent messages "
-          f"(threshold={message_threshold}, keep_recent={recent_window_msgs}, "
-          f"summary_trigger_tokens={summary_trigger_tokens}, recent_window_tokens={recent_window_tokens})")
-
-    return old_messages, recent_messages
-
-
-def _trim_by_token_budget(
-    messages: list[dict],
-    max_tokens: int,
-    target_model: str = "",
-) -> list[dict]:
-    """
-    Remove oldest messages until token budget fits.
-
-    max_tokens is passed from caller (calculated from config).
-    Tracks aggressive trims in metrics.
-    """
-    current_tokens = count_tokens_accurate(messages, model=target_model)
-    if current_tokens <= max_tokens:
-        return messages
-
-    print(f"[compress] Token budget exceeded: {current_tokens} > {max_tokens}, trimming...")
-
-    # Remove oldest messages until we fit the budget
-    trimmed = messages.copy()
-    while len(trimmed) > 10:  # Keep at least 10 messages minimum
-        current_tokens = count_tokens_accurate(trimmed, model=target_model)
-        if current_tokens <= max_tokens:
-            break
-        trimmed.pop(0)
-
-    new_tokens = count_tokens_accurate(trimmed, model=target_model)
-    metrics.compression_aggressive_trims += 1
-    print(f"[compress] Trimmed to {len(trimmed)} messages: {current_tokens} → {new_tokens} tokens")
-    return trimmed
-
-
-def _enforce_message_cap(
-    messages: list[dict],
-    max_messages: int,
-) -> list[dict]:
-    """
-    Enforce hard message cap.
-
-    max_messages is passed from caller (calculated from config).
-    Tracks message cap enforcement in metrics.
-    """
-    if len(messages) <= max_messages:
-        return messages
-
-    print(f"[compress] Message cap exceeded: {len(messages)} > {max_messages}, enforcing cap...")
-    metrics.compression_message_cap_enforced += 1
-    # Keep only the most recent max_messages
-    capped = messages[-max_messages:]
-    print(f"[compress] Capped to {len(capped)} messages")
-    return capped
+_XML_REINFORCEMENT = (
+    "[REMINDER] Tool format:\n"
+    '<tool_call name="Read">\n<input>\n{"file_path": "/path"}\n</input>\n</tool_call>\n'
+    "Parameters MUST be JSON inside <input> tags. "
+    "NEVER use XML parameter tags like <file_path> or <content> or <parameter name=\"X\">. "
+    "Use ONLY <tool_call> and <input> tags.\n\n"
+)
 
 
 async def _apply_preserved_state(
@@ -937,73 +510,6 @@ async def _llm_compress(
     return None
 
 
-def _validate_tool_references(messages: list[dict]) -> bool:
-    """Verify all tool_call_ids in role:tool have matching assistant tool_calls.
-
-    Returns True if all references are valid, False if orphans exist.
-    Only relevant for OpenAI-format messages (native tool models).
-    For no-tools models, role:"tool" messages don't exist so this is a no-op.
-    """
-    available_ids = set()
-    for msg in messages:
-        if msg.get("role") == "assistant" and "tool_calls" in msg:
-            for tc in msg.get("tool_calls", []):
-                tid = tc.get("id", "") if isinstance(tc, dict) else ""
-                if tid:
-                    available_ids.add(tid)
-    for msg in messages:
-        if msg.get("role") == "tool":
-            tid = msg.get("tool_call_id", "")
-            if tid and tid != "unknown" and tid not in available_ids:
-                return False
-    return True
-
-
-def _fix_orphan_tool_messages(messages: list[dict]) -> list[dict]:
-    """Convert orphaned role:tool messages to role:user with text content.
-
-    Safety net: if _find_safe_split_point missed an orphan (e.g. due to
-    cache reuse), this converts dangling tool results to user messages
-    so the API doesn't reject with error 2013.
-    """
-    available_ids = set()
-    for msg in messages:
-        if msg.get("role") == "assistant" and "tool_calls" in msg:
-            for tc in msg.get("tool_calls", []):
-                tid = tc.get("id", "") if isinstance(tc, dict) else ""
-                if tid:
-                    available_ids.add(tid)
-    result = []
-    for msg in messages:
-        if msg.get("role") == "tool":
-            tid = msg.get("tool_call_id", "")
-            if tid and tid != "unknown" and tid not in available_ids:
-                result.append({
-                    "role": "user",
-                    "content": f"[Tool result for {tid}]: {msg.get('content', '')}",
-                })
-                continue
-        result.append(msg)
-    return result
-
-
-_XML_REINFORCEMENT = (
-    "[REMINDER] Tool format:\n"
-    '<tool_call name="Read">\n<input>\n{"file_path": "/path"}\n</input>\n</tool_call>\n'
-    "Parameters MUST be JSON inside <input> tags. "
-    "NEVER use XML parameter tags like <file_path> or <content> or <parameter name=\"X\">. "
-    "Use ONLY <tool_call> and <input> tags.\n\n"
-)
-
-
-def _needs_xml_reinforcement(system_msg: Optional[dict]) -> bool:
-    """Check if system message contains XML tool prompt (needs reinforcement after compression)."""
-    if not system_msg:
-        return False
-    content = system_msg.get("content", "")
-    return "<tool_call" in content
-
-
 def _reassemble_with_summary(
     system_msg: Optional[dict],
     summary: str,
@@ -1055,376 +561,6 @@ def _reassemble_trimmed(
         print("[compress] WARNING: orphan tool references detected after trimming, fixing...")
         result = _fix_orphan_tool_messages(result)
     return result
-
-# ── Session management functions (Phase 3 Enhancement) ──
-
-async def get_or_create_session(session_id: str, messages: list[dict]) -> Optional[str]:
-    """
-    Retrieve cached summary for a session, or create a new session if it doesn't exist.
-
-    Args:
-        session_id: UUID-based session identifier
-        messages: Current conversation messages
-
-    Returns:
-        Cached summary string if session exists and is valid, None otherwise
-    """
-    now = time.time()
-    async with _state_lock:
-        session = _session_cache.get(session_id)
-        if session is not None:
-            # Check if session is still valid (within TTL)
-            if now - session.timestamp < _SESSION_TTL:
-                age = int(now - session.timestamp)
-                print(f"[session] Cache hit: session_id={session_id[:8]}... age={age}s summary_len={len(session.summary)}")
-                metrics.compression_cache_hits += 1
-                return session.summary
-            else:
-                print(f"[session] Session expired: session_id={session_id[:8]}... age={age}s")
-                metrics.compression_cache_misses += 1
-                _session_cache.pop(session_id, None)
-                return None
-
-        # Create new session
-        print(f"[session] New session created: session_id={session_id[:8]}...")
-        metrics.compression_cache_misses += 1
-        # Note: Session will be updated with compression summary after compression completes
-        return None
-
-async def update_session(session_id: str, summary: str, old_count: int) -> None:
-    """
-    Update an existing session with new compression summary.
-
-    Args:
-        session_id: UUID-based session identifier
-        summary: Compressed conversation summary
-        old_count: Number of old messages that were compressed
-    """
-    now = time.time()
-    async with _state_lock:
-        existing = _session_cache.get(session_id)
-        _session_cache[session_id] = _CompressionCache(
-            session_id=session_id,
-            summary=summary,
-            old_msg_count=old_count,
-            timestamp=now,
-            deferred_tool_names=existing.deferred_tool_names if existing else [],
-        )
-        print(f"[session] Session updated: session_id={session_id[:8]}... old_count={old_count} summary_len={len(summary)}")
-        _save_session_cache_to_disk()
-
-async def cleanup_expired_sessions() -> None:
-    """
-    Remove expired sessions from cache to prevent memory leaks.
-    Should be called periodically (e.g., every hour).
-    """
-    now = time.time()
-    async with _state_lock:
-        expired_sessions = [
-            session_id for session_id, session in _session_cache.items()
-            if now - session.timestamp >= _SESSION_TTL
-        ]
-
-        if expired_sessions:
-            for session_id in expired_sessions:
-                session = _session_cache.pop(session_id, None)
-                age = int(now - session.timestamp)
-                print(f"[session] Cleaned up expired session: session_id={str(session_id)[:8]}... age={age}s")
-
-            if expired_sessions:
-                print(f"[session] Cleanup completed: removed {len(expired_sessions)} expired sessions")
-                metrics.record("sessions_cleaned", len(expired_sessions))
-                _save_session_cache_to_disk()
-        else:
-            pass
-
-    evicted = metrics.evict_old_sessions()
-    if evicted:
-        print(f"[session] Evicted {evicted} stale telemetry sessions from metrics index")
-
-
-async def get_session_deferred_tools(session_id: str) -> list[str]:
-    """Return cached deferred tool names for a session, or [] if not found/expired."""
-    async with _state_lock:
-        session = _session_cache.get(session_id)
-        if session is not None and time.time() - session.timestamp < _SESSION_TTL:
-            return list(session.deferred_tool_names)
-    return []
-
-
-async def save_session_deferred_tools(session_id: str, tool_names: list[str]) -> None:
-    """Persist deferred tool names into the session cache for this session."""
-    async with _state_lock:
-        session = _session_cache.get(session_id)
-        if session is not None:
-            session.deferred_tool_names = list(tool_names)
-        else:
-            _session_cache[session_id] = _CompressionCache(
-                session_id=session_id,
-                timestamp=time.time(),
-                deferred_tool_names=list(tool_names),
-            )
-        _save_session_cache_to_disk()
-
-
-# =============================================================================
-# Evidence Graph Persistence (Priority 4 — session-level grounding continuity)
-# =============================================================================
-
-async def get_session_grounding_graph(session_id: str) -> dict:
-    """Return the full persisted grounding graph for a session.
-
-    Used by GroundingValidatorTransformer to restore historical file evidence
-    after compression removes old tool_result messages from context.
-    """
-    if not session_id:
-        return {}
-    async with _state_lock:
-        entry = _session_cache.get(session_id)
-        if entry is not None and time.time() - entry.timestamp < _SESSION_TTL:
-            return dict(entry.grounding_graph)
-    return {}
-
-
-async def extend_session_grounding_graph(
-    session_id: str,
-    new_entities: dict,
-    new_snippets: dict,
-) -> None:
-    """Merge new entities + snippets into the session's persistent grounding graph.
-
-    New entries take precedence. Existing entries get updated citations and last_verified.
-    Persists to disk immediately so evidence survives proxy reloads and compressions.
-    """
-    if not session_id:
-        return
-    try:
-        async with _state_lock:
-            entry = _session_cache.get(session_id)
-            if entry is None:
-                entry = _CompressionCache(session_id=session_id, timestamp=time.time())
-                _session_cache[session_id] = entry
-            now = time.time()
-            for entity, data in new_entities.items():
-                if entity not in entry.grounding_graph:
-                    entry.grounding_graph[entity] = {
-                        **data,
-                        "first_seen": now,
-                        "last_verified": now,
-                    }
-                else:
-                    existing = entry.grounding_graph[entity]
-                    existing["last_verified"] = now
-                    # Merge citations (deduplicate)
-                    merged_cits = list(set(existing.get("citations", []) + data.get("citations", [])))
-                    existing["citations"] = merged_cits
-                    # Update snippet only if new one is available
-                    if data.get("code_snippet"):
-                        existing["code_snippet"] = data["code_snippet"]
-            # Also persist code snippets for file evidence (mapped by file_path)
-            for file_path, snippet in new_snippets.items():
-                # Store as a special "$file:" key for raw file lookup
-                key = f"$file:{file_path}"
-                if key not in entry.grounding_graph:
-                    entry.grounding_graph[key] = {
-                        "file": file_path,
-                        "related": [],
-                        "citations": [],
-                        "code_snippet": snippet,
-                        "first_seen": now,
-                        "last_verified": now,
-                    }
-            _save_session_cache_to_disk()
-    except Exception as exc:
-        print(f"[grounding] extend_session_grounding_graph failed: {exc}")
-
-
-async def get_session_read_files(session_id: str) -> set[str]:
-    """Return the set of file paths that were read in this session (from grounding graph).
-
-    Used by GroundingValidatorTransformer to validate citations against historically
-    read files even after compression removed the original tool_result messages.
-    """
-    if not session_id:
-        return set()
-    async with _state_lock:
-        entry = _session_cache.get(session_id)
-        if entry is None or time.time() - entry.timestamp >= _SESSION_TTL:
-            return set()
-        return {
-            v["file"]
-            for k, v in entry.grounding_graph.items()
-            if k.startswith("$file:") and v.get("file")
-        }
-
-
-# =============================================================================
-# Multi-Hop Grounding Tracking (CAREFUL IMPLEMENTATION)
-# =============================================================================
-
-async def _track_grounding_hop(
-    session_id: str,
-    entity_a: str,
-    entity_b: str,
-    evidence: list[str],
-    code_snippet: str = "",
-) -> None:
-    """
-    Track a multi-hop grounding relationship across conversation turns.
-
-    Example: entity_a = "AuthService" → entity_b = "validateToken()"
-
-    CAREFUL IMPLEMENTATION NOTES:
-    - Only track if evidence is verified (citations exist in tool results)
-    - Limit graph size to prevent memory bloat (max 100 entities)
-    - Use claim hashes (not full text) to save memory
-    - Prune old entries when cache is compressed
-    - Never let grounding errors break the proxy (catch all exceptions)
-    - Creates session if it doesn't exist (for testing and edge cases)
-
-    Args:
-        session_id: UUID-based session identifier
-        entity_a: Source entity name (e.g., class name, function name)
-        entity_b: Target entity name (e.g., called function, related class)
-        evidence: List of citation strings (e.g., ["(auth.py:42)", "(validator.py:123)"])
-        code_snippet: Actual code snippet from file (first 500 chars)
-    """
-    try:
-        # Guard: Don't track if no verified evidence
-        if not evidence:
-            return
-
-        async with _state_lock:
-            # Create session if it doesn't exist
-            if session_id not in _session_cache:
-                _session_cache[session_id] = _CompressionCache(
-                    session_id=session_id,
-                    summary="",
-                    old_msg_count=0,
-                    timestamp=time.time()
-                )
-
-            session = _session_cache.get(session_id)
-            if session is None:
-                return
-
-            # Guard: Limit graph size
-            max_entities = int(os.environ.get("GROUNDING_GRAPH_MAX_ENTITIES", "100"))
-            if len(session.grounding_graph) >= max_entities:
-                # Prune oldest entries (simple LRU by last_seen)
-                oldest_entity = min(
-                    session.grounding_graph.keys(),
-                    key=lambda k: session.grounding_graph[k].get("last_seen", 0)
-                )
-                del session.grounding_graph[oldest_entity]
-                print(f"[grounding] Pruned entity: {oldest_entity} (graph size {max_entities} reached)")
-
-            # Track entity A
-            if entity_a not in session.grounding_graph:
-                session.grounding_graph[entity_a] = {
-                    "file": "",
-                    "related": [],
-                    "citations": [],
-                    "code_snippet": "",
-                    "last_seen": time.time()
-                }
-
-            # Track relationship A → B
-            if entity_b not in session.grounding_graph[entity_a]["related"]:
-                session.grounding_graph[entity_a]["related"].append(entity_b)
-
-            # Track evidence and code snippet
-            session.grounding_graph[entity_a]["citations"].extend(evidence)
-            if code_snippet and not session.grounding_graph[entity_a]["code_snippet"]:
-                session.grounding_graph[entity_a]["code_snippet"] = code_snippet
-
-            # Update last seen timestamp
-            session.grounding_graph[entity_a]["last_seen"] = time.time()
-
-            # Add to verified claims (hash of claim for memory efficiency)
-            for citation in evidence:
-                claim_hash = hashlib.sha256(citation.encode()).hexdigest()[:16]
-                session.verified_claims.add(claim_hash)
-
-            print(f"[grounding] Tracked: {entity_a} → {entity_b} (evidence: {evidence[:2]})")
-    except Exception as e:
-        print(f"[grounding] Error tracking grounding hop: {e}")
-        # Never let grounding errors break the proxy
-
-
-async def _prune_grounding_graph(session_id: str) -> None:
-    """
-    Prune old entries from the grounding graph when compression happens.
-
-    Removes entities with no recent citations (older than 10 minutes).
-    This prevents memory bloat while preserving active evidence.
-
-    Args:
-        session_id: UUID-based session identifier
-    """
-    try:
-        prune_age = int(os.environ.get("GROUNDING_GRAPH_PRUNE_AGE", "600"))  # 10 minutes
-        now = time.time()
-
-        async with _state_lock:
-            session = _session_cache.get(session_id)
-            if session is None:
-                return
-
-            # Initialize grounding_graph if not exists
-            if not hasattr(session, "grounding_graph") or session.grounding_graph is None:
-                session.grounding_graph = {}
-
-            # Prune old entities
-            entities_to_prune = []
-            for entity, data in list(session.grounding_graph.items()):
-                if entity == "grounding_graph":
-                    continue
-                if now - data.get("last_seen", 0) > prune_age:
-                    entities_to_prune.append(entity)
-
-            for entity in entities_to_prune:
-                del session.grounding_graph[entity]
-                print(f"[grounding] Pruned old entity: {entity} (age > {prune_age}s)")
-
-            if entities_to_prune:
-                print(f"[grounding] Pruned {len(entities_to_prune)} old entities from grounding graph")
-    except Exception as e:
-        print(f"[grounding] Error pruning grounding graph: {e}")
-        # Never let grounding errors break the proxy
-
-
-async def get_grounding_state(session_id: str) -> dict:
-    """
-    Retrieve the grounding state for a session.
-
-    Returns a copy of the grounding graph to avoid mutations.
-
-    Args:
-        session_id: UUID-based session identifier
-
-    Returns:
-        Dictionary with grounding state:
-        {
-            "grounding_graph": {entity: {file, related, citations, code_snippet}},
-            "verified_claims": set of claim hashes,
-            "citation_history": list of (turn_id, citation) tuples
-        }
-    """
-    try:
-        async with _state_lock:
-            session = _session_cache.get(session_id)
-            if session is None:
-                return {"grounding_graph": {}, "verified_claims": set(), "citation_history": []}
-
-            return {
-                "grounding_graph": session.grounding_graph.copy(),
-                "verified_claims": session.verified_claims.copy(),
-                "citation_history": list(session.citation_history),
-            }
-    except Exception as e:
-        print(f"[grounding] Error getting grounding state: {e}")
-        return {"grounding_graph": {}, "verified_claims": set(), "citation_history": []}
 
 
 # =============================================================================

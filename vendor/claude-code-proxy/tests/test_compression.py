@@ -352,10 +352,11 @@ class TestSessionQualityTracking:
     async def test_quality_fields_persisted_to_disk(self, isolate_session_cache, tmp_path, monkeypatch):
         """Disk cache file must include quality_scores and session_stub_count."""
         import json
+        import llm.session.store as session_store
         comp = isolate_session_cache
-        # _SESSION_CACHE_FILE is a module-level constant — patch it directly
+        # _SESSION_CACHE_FILE now lives in llm.session.store (ADR-0032) — patch it there
         cache_file = str(tmp_path / "disk_cache.json")
-        monkeypatch.setattr(comp, "_SESSION_CACHE_FILE", cache_file)
+        monkeypatch.setattr(session_store, "_SESSION_CACHE_FILE", cache_file)
         await comp.append_session_quality("sess-persist", 0.72, stub_delta=3)
         with open(cache_file) as f:
             data = json.load(f)

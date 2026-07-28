@@ -12,6 +12,7 @@ citations to files read before a compression boundary still validate.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os as _os
 import re
@@ -44,6 +45,112 @@ def _extract_edit_paths(response_content: list) -> set:
         # New file creation (Write to non-existent path) needs no prior Read
         and not (block["name"] == "Write" and not _os.path.exists(path))
     }
+
+
+# ── Completion-claim grounding (ADR-0031) ────────────────────────────────────
+# Detects "ya arreglé X" / "fixed X" style claims and cross-checks them against
+# actual Edit/Write/MultiEdit activity. Two signals, strong preferred over weak:
+#   1. Strong: a delimited ```task-completion JSON block (model self-report).
+#   2. Weak: regex fallback over free text, only when no block is present.
+
+_TASK_COMPLETION_BLOCK_RE = re.compile(r'```task-completion\s*\n(.*?)\n```', re.DOTALL)
+
+_COMPLETION_VERB_RE = re.compile(
+    r'\b(fixed|resolved|corrected|completed|closed|arregl\w*|correg\w*|resolv\w*|'
+    r'cerr\w*|complet\w*)\b',
+    re.IGNORECASE,
+)
+_BARE_FILE_PATH_RE = re.compile(r'\b([\w][\w/-]*\.\w{1,10})\b')
+# Only split on sentence-ending punctuation followed by an uppercase letter (incl.
+# common Spanish accented capitals) — a bare "." followed by whitespace+lowercase
+# is almost always a file extension continuing mid-sentence ("use-toast.ts y
+# también..."), not a real sentence boundary. Avoids severing verb from path.
+_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])')
+
+
+def _extract_completion_report(content: list) -> dict | None:
+    """Strong signal: find, parse, and STRIP the delimited task-completion block.
+
+    Mutates the matching text block's "text" field in place to remove it — this
+    is proxy-internal bookkeeping and must never reach the user. Returns the
+    parsed {"completed": bool, "files_modified": [...]} dict, or None if no
+    valid block is present.
+    """
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        text = block.get("text", "")
+        match = _TASK_COMPLETION_BLOCK_RE.search(text)
+        if not match:
+            continue
+        block["text"] = text[: match.start()] + text[match.end():]
+        try:
+            report = json.loads(match.group(1))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("[grounding] task-completion block present but invalid JSON")
+            return None
+        return report if isinstance(report, dict) else None
+    return None
+
+
+def _extract_completion_claims(text: str) -> list[tuple[str, str]]:
+    """Weak-signal fallback: sentences with a completion verb + a file mention.
+
+    Only meant to run when no structured task-completion block is present —
+    free-text pattern matching is inherently more fragile than a fixed delimited
+    format. Returns [(claim_text, file_path), ...].
+    """
+    claims = []
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        if not _COMPLETION_VERB_RE.search(sentence):
+            continue
+        # A single claim sentence may mention several files ("cerré A y B") —
+        # capture all of them, not just the first (search() would miss the rest).
+        for path_match in _BARE_FILE_PATH_RE.finditer(sentence):
+            claims.append((sentence.strip(), path_match.group(1)))
+    return claims
+
+
+def _extract_all_edited_paths(messages: list) -> set[str]:
+    """Return every Edit/Write/MultiEdit target path across the WHOLE conversation.
+
+    Generalizes _extract_edit_paths (single response) to full history — a
+    completion claim may reference an edit from an earlier turn (e.g. a final
+    summary turn), not just the current response. See ADR-0031.
+    """
+    paths: set[str] = set()
+    for msg in messages or []:
+        if bget(msg, "role") != "assistant":
+            continue
+        content = bget(msg, "content") or []
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if bget(block, "type") != "tool_use":
+                continue
+            if bget(block, "name") not in _WRITE_TOOL_NAMES:
+                continue
+            path = (bget(block, "input") or {}).get("file_path", "")
+            if path:
+                paths.add(path)
+    return paths
+
+
+def _path_matches_any(claimed_path: str, edited_paths: set) -> bool:
+    """True if claimed_path exactly matches or is a path-suffix of any edited path.
+
+    Handles claims using a short/relative mention ("use-toast.ts") against edits
+    that used a fuller path ("hooks/use-toast.ts").
+    """
+    if claimed_path in edited_paths:
+        return True
+    return any(
+        edited == claimed_path or edited.endswith("/" + claimed_path)
+        for edited in edited_paths
+    )
+
 
 # Claim pattern: sentence with citation
 # Matches: "The function X does Y (file.py:123)" - claims with citations
@@ -134,6 +241,13 @@ class GroundingValidatorTransformer(Transformer):
             logger.debug("[grounding] No response text to validate (tool-only response)")
             return
 
+        # ADR-0031: strong signal — parse + strip the task-completion block (if
+        # present) before any further text-based extraction, so its JSON content
+        # is never mistaken for prose citations/claims below.
+        completion_report = _extract_completion_report(getattr(request, "content", None) or [])
+        if completion_report is not None:
+            response_text = self._extract_response_text(request)  # re-derive: block stripped in place
+
         # Step 1: Extract citations from response
         citations = self._extract_citations(response_text)
         logger.info("[grounding] Found %d citations in response", len(citations))
@@ -176,6 +290,53 @@ class GroundingValidatorTransformer(Transformer):
 
         # Step 7: Build multi-hop evidence graph
         self._build_evidence_graph(ctx, messages, citations)
+
+        # Step 8: Completion-claim verification (ADR-0031)
+        # Strong signal (task-completion block) takes precedence; the weak regex
+        # fallback only runs when no block was present, to avoid double-counting
+        # the same claim under both signals.
+        completion_entries: list[tuple[str, str, str]] = []
+        if completion_report is not None:
+            if completion_report.get("completed"):
+                for fp in completion_report.get("files_modified", []) or []:
+                    if isinstance(fp, str) and fp:
+                        completion_entries.append((f"task-completion: {fp}", fp, "strong"))
+        else:
+            for claim_text, file_path in _extract_completion_claims(response_text):
+                completion_entries.append((claim_text, file_path, "weak"))
+
+        if completion_entries:
+            edited_paths = _extract_all_edited_paths(messages)
+            for claim_text, file_path, signal in completion_entries:
+                verified = _path_matches_any(file_path, edited_paths)
+                if not verified:
+                    ctx.unverified_completion_claims.append({
+                        "claim_text": claim_text[:200],
+                        "file_path": file_path,
+                        "signal": signal,
+                    })
+                    ctx.grounding_issues.append(
+                        f"Completion claim ({signal}) references '{file_path}' but no "
+                        "Edit/Write/MultiEdit targeted that file in this conversation."
+                    )
+                    ensure_system_note(
+                        ctx,
+                        f"[grounding-warn] Unverified completion claim ({signal}): you "
+                        f"referenced '{file_path}' as fixed/completed, but no "
+                        "Edit/Write/MultiEdit touched that file in this conversation. "
+                        "If it's actually done, verify with Read/grep; if not, do it "
+                        "now before claiming completion.",
+                    )
+                if ctx.session_id:
+                    try:
+                        from llm.compressor import append_session_completion_claim
+                        asyncio.create_task(
+                            append_session_completion_claim(
+                                ctx.session_id, claim_text[:200], file_path, verified, signal,
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning("[grounding] Failed to schedule completion-claim persistence: %s", exc)
 
         # Priority 4: flag stale evidence entries (>30min without verification)
         _stale_threshold_secs = 1800

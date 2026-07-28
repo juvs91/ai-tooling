@@ -314,7 +314,8 @@ class TestAdaptiveQualityEnforcement:
     def isolate_session(self, monkeypatch, tmp_path):
         """Each test gets a clean session cache."""
         import llm.compressor as comp
-        monkeypatch.setattr(comp, "_SESSION_CACHE_FILE", str(tmp_path / "cache.json"))
+        import llm.session.store as session_store
+        monkeypatch.setattr(session_store, "_SESSION_CACHE_FILE", str(tmp_path / "cache.json"))
         comp._session_cache.clear()
 
     @pytest.mark.asyncio

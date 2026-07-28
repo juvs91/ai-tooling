@@ -93,6 +93,11 @@ class TransformContext:
     # Cache of code snippets from tool results for verification
     # Key: file_path → Value: relevant code snippet (first 500 chars)
 
+    unverified_completion_claims: list[dict] = field(default_factory=list)
+    # Completion claims ("ya arreglé X" / task-completion block) with no matching
+    # Edit/Write/MultiEdit for the referenced file anywhere in the conversation.
+    # Each entry: {"claim_text": str, "file_path": str, "signal": "strong"|"weak"}
+
     # Set by IntentClassifierTransformer — True when PROXY_SESSION_MODE: ralph
     # detected in system prompt. Downstream transformers use this to suppress
     # AskUserQuestion calls and make autonomous best-effort decisions.

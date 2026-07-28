@@ -58,6 +58,26 @@ Sync automático via `sync_skills.sh` (throttle 24h). Force: `bash .agents/sync_
 - Do NOT use MCP tools autonomously. Only call MCP tools when the user explicitly requests it (e.g., "busca en Jira", "consulta la base de datos", "busca en la web"). Nunca invoques MCP tools de forma proactiva sin una petición directa del usuario.
 - Do NOT read the same file more than twice consecutively. Re-reading the same file in a loop is a bug — break it and move on.
 
+## Python — Imports a nivel de módulo (NO dentro de funciones)
+
+**Los imports dentro del cuerpo de una función/método deben evitarse a toda costa.**
+Un import local casi siempre es síntoma de que el módulo está mal diseñado — típicamente
+un ciclo de dependencias oculto (A necesita B y B necesita A). La solución correcta casi
+nunca es "mover el import adentro de la función", es **extraer la responsabilidad
+compartida a un tercer módulo** que ambos puedan importar sin ciclo (ver ADR-0032 en
+`vendor/claude-code-proxy` como ejemplo: estado de sesión compartido se extrajo a
+`llm/session/*` en vez de resolver el ciclo con imports diferidos).
+
+- Antes de escribir `from x import y` dentro de una función: para y pregunta *por qué*
+  A y B se necesitan mutuamente. Resuelve el ciclo real, no lo escondas.
+- Si tras el análisis el import local es genuinamente inevitable (caso raro), el
+  comentario debe explicar el ciclo específico que evita — no un genérico
+  "avoid circular dependency" sin más detalle.
+- **Por qué importa**: los imports locales rompen el análisis estático — Pyright/Pylance
+  no los rastrea bien y genera falsos positivos de "unused" en símbolos privados
+  (`_prefijo`) que sí se usan, solo que vía import diferido en otro archivo. También
+  ocultan el grafo de dependencias real del proyecto a simple vista.
+
 ## Feedback Loop
 - At the end of every session, update `ai-notes/AI_LEARNING.md` with:
   - Technical decisions made and why

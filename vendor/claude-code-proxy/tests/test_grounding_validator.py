@@ -351,3 +351,135 @@ async def test_extract_entities_from_file():
     entities = transformer._extract_entities_from_file("src/utils/token_validator.py")
     assert "TokenValidator" in entities
     assert "token_validator" in entities
+
+
+# ── Completion-claim grounding (ADR-0031) ────────────────────────────────────
+
+def _edit_message(file_path: str, tool_id: str = "e1") -> dict:
+    return {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "name": "Edit", "id": tool_id,
+             "input": {"file_path": file_path, "old_string": "a", "new_string": "b"}}
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_strong_signal_verified():
+    """task-completion block whose files_modified match a real Edit → no issue."""
+    transformer = GroundingValidatorTransformer()
+    ctx = TransformContext()
+    request = MockRequest(
+        content=[{
+            "type": "text",
+            "text": (
+                "Ya arreglé todo.\n"
+                "```task-completion\n"
+                '{"completed": true, "files_modified": ["hooks/use-schedules.ts"]}\n'
+                "```\n"
+            ),
+        }],
+        messages=[_edit_message("hooks/use-schedules.ts")],
+    )
+    await transformer.transform(request, ctx)
+    assert ctx.unverified_completion_claims == []
+    # The structured block must be stripped from what the user sees.
+    assert "task-completion" not in request.content[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_strong_signal_unverified():
+    """task-completion block claiming a file with NO matching Edit → flagged."""
+    transformer = GroundingValidatorTransformer()
+    ctx = TransformContext()
+    request = MockRequest(
+        content=[{
+            "type": "text",
+            "text": (
+                "Ya arreglé todo.\n"
+                "```task-completion\n"
+                '{"completed": true, "files_modified": ["hooks/use-toast.ts"]}\n'
+                "```\n"
+            ),
+        }],
+        messages=[_edit_message("hooks/use-schedules.ts")],  # different file
+    )
+    await transformer.transform(request, ctx)
+    assert len(ctx.unverified_completion_claims) == 1
+    entry = ctx.unverified_completion_claims[0]
+    assert entry["file_path"] == "hooks/use-toast.ts"
+    assert entry["signal"] == "strong"
+    assert any("Completion claim (strong)" in issue for issue in ctx.grounding_issues)
+
+
+@pytest.mark.asyncio
+async def test_weak_signal_verified():
+    """Free-text completion claim backed by a real Edit → no issue."""
+    transformer = GroundingValidatorTransformer()
+    ctx = TransformContext()
+    request = MockRequest(
+        content=[{"type": "text", "text": "Ya arreglé el bug en use-schedules.ts, todo listo."}],
+        messages=[_edit_message("hooks/use-schedules.ts")],
+    )
+    await transformer.transform(request, ctx)
+    assert ctx.unverified_completion_claims == []
+
+
+@pytest.mark.asyncio
+async def test_weak_signal_unverified_reproduces_kimi_case():
+    """Reproduces the real Kimi failure: claims 2 files fixed, only 1 was edited.
+
+    'use-schedules.ts' had a real Edit; 'use-toast.ts' did not (fabricated claim).
+    """
+    transformer = GroundingValidatorTransformer()
+    ctx = TransformContext()
+    request = MockRequest(
+        content=[{
+            "type": "text",
+            "text": "Ya cerré use-schedules.ts y también fixed use-toast.ts, todo listo.",
+        }],
+        messages=[_edit_message("hooks/use-schedules.ts")],
+    )
+    await transformer.transform(request, ctx)
+    assert len(ctx.unverified_completion_claims) == 1
+    assert ctx.unverified_completion_claims[0]["file_path"] == "use-toast.ts"
+    assert ctx.unverified_completion_claims[0]["signal"] == "weak"
+
+
+@pytest.mark.asyncio
+async def test_strong_signal_suppresses_weak_regex_fallback():
+    """When a task-completion block is present, the weak regex must NOT also run
+    (avoids double-counting the same claim under both signals)."""
+    transformer = GroundingValidatorTransformer()
+    ctx = TransformContext()
+    request = MockRequest(
+        content=[{
+            "type": "text",
+            "text": (
+                "Ya arreglé el bug.\n"
+                "```task-completion\n"
+                '{"completed": true, "files_modified": ["hooks/use-schedules.ts"]}\n'
+                "```\n"
+            ),
+        }],
+        messages=[_edit_message("hooks/use-schedules.ts")],
+    )
+    await transformer.transform(request, ctx)
+    # Only the strong-signal entry could ever be produced here; if the weak regex
+    # also ran on the pre-strip text it would double up on the same claim.
+    assert len(ctx.unverified_completion_claims) == 0
+
+
+@pytest.mark.asyncio
+async def test_suffix_path_matching():
+    """A claim mentioning a short path ('use-toast.ts') must match an Edit that
+    used a fuller path ('hooks/use-toast.ts')."""
+    transformer = GroundingValidatorTransformer()
+    ctx = TransformContext()
+    request = MockRequest(
+        content=[{"type": "text", "text": "Ya arreglé el bug en use-toast.ts."}],
+        messages=[_edit_message("hooks/use-toast.ts")],
+    )
+    await transformer.transform(request, ctx)
+    assert ctx.unverified_completion_claims == []

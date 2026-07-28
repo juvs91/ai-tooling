@@ -1,6 +1,7 @@
 ---
 name: workflow-coordinator
 description: Expert workflow coordinator that detects intent, routes to appropriate workflows, and enforces guard rails. Ensures tickets are planned before implementation, plans are approved before execution, and reviews are completed before merge.
+model: haiku
 allowed-tools:
   - Read
   - Write
