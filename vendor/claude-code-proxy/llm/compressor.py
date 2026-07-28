@@ -43,6 +43,7 @@ from llm.session.plan_mode import (
     get_session_plan_mode_events,
 )
 from llm.session.completion_claims import append_session_completion_claim, get_session_completion_claims
+from llm.session.generality_claims import append_session_generality_claim, get_session_generality_claims
 from llm.session.quality_history import get_session_quality_history, append_session_quality
 from llm.session.deferred_tools_cache import get_session_deferred_tools, save_session_deferred_tools
 from llm.session.grounding import (
@@ -82,6 +83,8 @@ __all__ = [
     "get_session_plan_mode_events",
     "append_session_completion_claim",
     "get_session_completion_claims",
+    "append_session_generality_claim",
+    "get_session_generality_claims",
     "get_session_quality_history",
     "append_session_quality",
     "get_session_deferred_tools",

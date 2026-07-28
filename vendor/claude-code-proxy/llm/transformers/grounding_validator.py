@@ -152,6 +152,70 @@ def _path_matches_any(claimed_path: str, edited_paths: set) -> bool:
     )
 
 
+# ── Generality-claim grounding (ADR-0033) ────────────────────────────────────
+# Detects "todos los callers respetan X" / "every consumer does Y" style claims and
+# cross-checks them against Grep/Glob/Bash-grep evidence anywhere in the conversation.
+# Weaker signal than completion-claim grounding by design: it can only prove that NO
+# search happened, never that a search was sufficient — see ADR-0033's rationale.
+
+_GENERALITY_MARKER_RE = re.compile(
+    r'\b(todos?|todas?|casi\s+todos?|siempre|en\s+la\s+pr[aá]ctica|cada\s+vez|'
+    r'every|all|always|everywhere|virtually\s+all)\b',
+    re.IGNORECASE,
+)
+_USAGE_SCOPE_RE = re.compile(
+    r'\b(caller[s]?|consumer[s]?|consumidor(?:es)?|llamador(?:es)?|uso[s]?|'
+    r'usage[s]?|invocaci[oó]n(?:es)?|call\s*site[s]?|codebase|c[oó]digo\s+entero)\b',
+    re.IGNORECASE,
+)
+
+_SEARCH_TOOL_NAMES = frozenset({"Grep", "Glob"})
+_BASH_GREP_RE = re.compile(r'\b(grep|rg|ag)\b')
+
+
+def _extract_generality_claims(text: str) -> list[str]:
+    """Sentences asserting universal/generality behavior about callers/usages.
+
+    Requires BOTH a generality marker (todos/siempre/every/all/...) AND a usage-scope
+    noun (caller/consumer/uso/...) in the SAME sentence — mirrors
+    _extract_completion_claims's verb+path co-occurrence design, to avoid false
+    positives like "arreglé todos los tests" (ADR-0031's territory, not this one).
+    """
+    return [
+        sentence.strip()
+        for sentence in _SENTENCE_SPLIT_RE.split(text)
+        if _GENERALITY_MARKER_RE.search(sentence) and _USAGE_SCOPE_RE.search(sentence)
+    ]
+
+
+def _has_search_tool_evidence(messages: list) -> bool:
+    """True if a Grep/Glob tool_use, or a Bash tool_use running grep/rg/ag, appears
+    ANYWHERE in the conversation.
+
+    Conversation-wide, not per-claim — search evidence isn't tied to any single
+    claim. Includes Bash-grep because agents frequently search via shell rather than
+    the dedicated Grep/Glob tool; without this branch, false positives would be
+    constant.
+    """
+    for msg in messages or []:
+        if bget(msg, "role") != "assistant":
+            continue
+        content = bget(msg, "content") or []
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if bget(block, "type") != "tool_use":
+                continue
+            name = bget(block, "name")
+            if name in _SEARCH_TOOL_NAMES:
+                return True
+            if name == "Bash":
+                command = (bget(block, "input") or {}).get("command", "")
+                if _BASH_GREP_RE.search(command):
+                    return True
+    return False
+
+
 # Claim pattern: sentence with citation
 # Matches: "The function X does Y (file.py:123)" - claims with citations
 # Skips: "I will..." "Let me..." - planning statements without claims
@@ -337,6 +401,42 @@ class GroundingValidatorTransformer(Transformer):
                         )
                     except Exception as exc:
                         logger.warning("[grounding] Failed to schedule completion-claim persistence: %s", exc)
+
+        # Step 9: Generality-claim verification (ADR-0033)
+        # One evidence check per response (not per-claim) — search evidence isn't
+        # tied to any single claim, it's conversation-wide.
+        generality_claims = _extract_generality_claims(response_text)
+        if generality_claims:
+            has_search_evidence = _has_search_tool_evidence(messages)
+            if not has_search_evidence:
+                for claim_text in generality_claims:
+                    ctx.unverified_generality_claims.append({
+                        "claim_text": claim_text[:200],
+                        "signal": "weak",
+                    })
+                ctx.grounding_issues.append(
+                    "Generality claim without any Grep/Glob/grep evidence in this "
+                    f"conversation: '{generality_claims[0][:100]}...'"
+                )
+                ensure_system_note(
+                    ctx,
+                    "[grounding-warn] Unverified generality claim: you asserted "
+                    "something is true for 'all/every/always' callers/usages without "
+                    "any Grep/Glob search in this conversation. This only confirms NO "
+                    "search happened — if you already searched, this is a false "
+                    "positive; if you haven't, verify before asserting broadly.",
+                )
+            if ctx.session_id:
+                for claim_text in generality_claims:
+                    try:
+                        from llm.compressor import append_session_generality_claim
+                        asyncio.create_task(
+                            append_session_generality_claim(
+                                ctx.session_id, claim_text[:200], has_search_evidence, "weak",
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning("[grounding] Failed to schedule generality-claim persistence: %s", exc)
 
         # Priority 4: flag stale evidence entries (>30min without verification)
         _stale_threshold_secs = 1800

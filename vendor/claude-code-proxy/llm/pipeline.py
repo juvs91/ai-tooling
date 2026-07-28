@@ -98,6 +98,11 @@ class TransformContext:
     # Edit/Write/MultiEdit for the referenced file anywhere in the conversation.
     # Each entry: {"claim_text": str, "file_path": str, "signal": "strong"|"weak"}
 
+    unverified_generality_claims: list[dict] = field(default_factory=list)
+    # Generality claims ("todos los callers respetan X", "every consumer does Y") with
+    # zero Grep/Glob/Bash-grep evidence anywhere in the conversation (ADR-0033).
+    # Each entry: {"claim_text": str, "signal": "weak"}
+
     # Set by IntentClassifierTransformer — True when PROXY_SESSION_MODE: ralph
     # detected in system prompt. Downstream transformers use this to suppress
     # AskUserQuestion calls and make autonomous best-effort decisions.

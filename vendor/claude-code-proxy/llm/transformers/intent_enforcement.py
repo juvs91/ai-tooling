@@ -142,6 +142,29 @@ class IntentEnforcementTransformer(Transformer):
             except Exception as exc:
                 logger.debug("[adaptive-quality] session history unavailable: %s", exc)
 
+            # Adaptive generality-claim enforcement (ADR-0033) — escalates when the
+            # model has repeatedly made unverified "all callers/usages" claims this
+            # session. Sibling to the adaptive-quality block above: same session-
+            # history pattern, same escalation threshold convention (>= 2).
+            try:
+                from llm.compressor import get_session_generality_claims
+                claims = await get_session_generality_claims(session_id)
+                unverified = [c for c in claims if not c.get("verified")]
+                if len(unverified) >= 2:
+                    ensure_system_note(
+                        request,
+                        f"[SESSION-GENERALITY] This session has {len(unverified)} unverified "
+                        f"generality claims (e.g. \"{unverified[-1]['claim_text'][:80]}\"...). "
+                        "Before asserting something is true for all callers/usages, run "
+                        "Grep/Glob across the actual call sites first.",
+                    )
+                    logger.info(
+                        "[adaptive-generality] session=%s unverified=%d — escalated enforcement",
+                        session_id[:8], len(unverified),
+                    )
+            except Exception as exc:
+                logger.debug("[adaptive-generality] session history unavailable: %s", exc)
+
         # Inject intent-specific prompt into request.system
         prompt = self._get_enforcement_prompt(intent, ctx, request=request)
         if prompt:

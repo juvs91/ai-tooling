@@ -60,6 +60,12 @@ class _CompressionCache:
     # {"turn": int, "claim_text": str, "file_path": str, "verified": bool,
     #  "signal": "strong"|"weak", "timestamp": float}
 
+    # Generality-claim audit trail (ADR-0033) — "todos los callers respetan X" style
+    # claims checked against Grep/Glob/Bash-grep evidence in the conversation.
+    generality_claims: list[dict] = field(default_factory=list)
+    # {"turn": int, "claim_text": str, "verified": bool, "signal": "weak",
+    #  "timestamp": float}
+
     # Quality feedback loop (Item 4) — proxy-internal session history.
     # Used by intent_enforcement.py to escalate enforcement when quality is consistently low.
     # Populated by quality_refinement.py after every response that has a quality score.
@@ -130,6 +136,7 @@ def _save_session_cache_to_disk() -> None:
                 "plan_mode_source": c.plan_mode_source,
                 "plan_mode_events": c.plan_mode_events[-50:],  # cap at 50 events
                 "completion_claims": c.completion_claims[-50:],  # cap at 50 events
+                "generality_claims": c.generality_claims[-50:],  # cap at 50 events
                 "quality_scores": c.quality_scores,
                 "session_stub_count": c.session_stub_count,
                 "session_state": ss,
@@ -176,6 +183,7 @@ def _load_session_cache_from_disk() -> None:
                 plan_mode_source=entry.get("plan_mode_source"),
                 plan_mode_events=entry.get("plan_mode_events", []),
                 completion_claims=entry.get("completion_claims", []),
+                generality_claims=entry.get("generality_claims", []),
                 quality_scores=entry.get("quality_scores", []),
                 session_stub_count=entry.get("session_stub_count", 0),
                 session_state=entry.get("session_state"),

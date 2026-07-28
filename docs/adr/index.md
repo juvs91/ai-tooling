@@ -11,3 +11,4 @@
 | [ADR-0030](ADR-0030-plan-mode-session-id-fallback.md) | Deterministic Session ID Fallback for Plan-Mode Persistence | Accepted | 2026-07-22 | Proxy |
 | [ADR-0031](ADR-0031-completion-claim-grounding.md) | Detect Ungrounded Completion Claims | Accepted | 2026-07-27 | Proxy |
 | [ADR-0032](ADR-0032-decompose-compressor-into-session-package.md) | Decompose `compressor.py` into a `session/` Package | Accepted | 2026-07-27 | Proxy |
+| [ADR-0033](ADR-0033-generality-claim-grounding.md) | Detect Ungrounded Generality Claims | Accepted | 2026-07-27 | Proxy |

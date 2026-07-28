@@ -411,3 +411,62 @@ class TestAdaptiveQualityEnforcement:
         text = _to_text(req.system) or ""
         assert "CRITICAL" in text
         assert "STRICT" in text
+
+
+# ── Adaptive generality-claim enforcement (ADR-0033) ─────────────────────────
+
+class TestAdaptiveGeneralityEnforcement:
+    """Adaptive enforcement escalates when the session has repeated unverified
+    generality claims — sibling to TestAdaptiveQualityEnforcement, same pattern."""
+
+    @pytest.fixture(autouse=True)
+    def isolate_session(self, monkeypatch, tmp_path):
+        """Each test gets a clean session cache."""
+        import llm.compressor as comp
+        import llm.session.store as session_store
+        monkeypatch.setattr(session_store, "_SESSION_CACHE_FILE", str(tmp_path / "cache.json"))
+        comp._session_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_two_unverified_claims_trigger_note(self):
+        from llm.compressor import append_session_generality_claim
+        sid = "gen-enforce-test"
+        await append_session_generality_claim(sid, "todos los callers respetan X", False, "weak")
+        await append_session_generality_claim(sid, "every consumer does Y", False, "weak")
+
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="BUILD", session_id=sid)
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Edit")], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system) or ""
+        assert "SESSION-GENERALITY" in text
+
+    @pytest.mark.asyncio
+    async def test_one_unverified_claim_no_escalation(self):
+        """Below threshold (< 2 unverified claims) must NOT trigger escalation."""
+        from llm.compressor import append_session_generality_claim
+        sid = "gen-enforce-one"
+        await append_session_generality_claim(sid, "todos los callers respetan X", False, "weak")
+
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="BUILD", session_id=sid)
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Edit")], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system) or ""
+        assert "SESSION-GENERALITY" not in text
+
+    @pytest.mark.asyncio
+    async def test_verified_claims_dont_count_toward_threshold(self):
+        """Claims persisted with verified=True (search evidence existed) must not
+        count toward the unverified-claims escalation threshold."""
+        from llm.compressor import append_session_generality_claim
+        sid = "gen-enforce-verified"
+        await append_session_generality_claim(sid, "todos los callers respetan X", True, "weak")
+        await append_session_generality_claim(sid, "every consumer does Y", True, "weak")
+
+        t = IntentEnforcementTransformer(enabled=True)
+        ctx = TransformContext(intent="BUILD", session_id=sid)
+        req = SimpleNamespace(system=None, tools=[SimpleNamespace(name="Edit")], messages=[])
+        await t.transform(req, ctx)
+        text = _to_text(req.system) or ""
+        assert "SESSION-GENERALITY" not in text

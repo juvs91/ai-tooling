@@ -80,6 +80,7 @@ class TestTransformContext:
             "evidence_links", "citation_map", "grounding_score",
             "grounding_issues", "evidence_graph", "code_snippet_cache",
             "unverified_completion_claims",
+            "unverified_generality_claims",
             # Plan mode lock (set by IntentClassifierTransformer)
             "plan_mode_active", "plan_mode_source",
             # Ralph mode (set by IntentClassifierTransformer from PROXY_SESSION_MODE: ralph marker)

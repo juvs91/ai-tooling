@@ -483,3 +483,91 @@ async def test_suffix_path_matching():
     )
     await transformer.transform(request, ctx)
     assert ctx.unverified_completion_claims == []
+
+
+# ── Generality-claim grounding (ADR-0033) ────────────────────────────────────
+
+def _grep_message(tool_id: str = "g1") -> dict:
+    return {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "name": "Grep", "id": tool_id,
+             "input": {"pattern": "useApiData"}}
+        ],
+    }
+
+
+def _bash_grep_message(tool_id: str = "b1") -> dict:
+    return {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "name": "Bash", "id": tool_id,
+             "input": {"command": "grep -rn 'useApiData' app/"}}
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_generality_claim_without_search_evidence_flagged():
+    """'Todos los callers respetan X' with zero Grep/Glob/Bash-grep in the
+    conversation → flagged, and persisted with verified=False."""
+    transformer = GroundingValidatorTransformer()
+    ctx = TransformContext(session_id="gen-test-1")
+    request = MockRequest(
+        content=[{
+            "type": "text",
+            "text": "En la práctica, todos los callers respetan el contrato del hook.",
+        }],
+        messages=[{"role": "user", "content": "revisa el hook"}],
+    )
+    await transformer.transform(request, ctx)
+    assert len(ctx.unverified_generality_claims) == 1
+    assert ctx.unverified_generality_claims[0]["signal"] == "weak"
+    assert any("Generality claim" in issue for issue in ctx.grounding_issues)
+
+
+@pytest.mark.asyncio
+async def test_generality_claim_with_native_grep_evidence_not_flagged():
+    """Same claim, but a Grep tool_use exists somewhere in the conversation →
+    not flagged (search evidence is conversation-wide, not per-claim)."""
+    transformer = GroundingValidatorTransformer()
+    ctx = TransformContext(session_id="gen-test-2")
+    request = MockRequest(
+        content=[{
+            "type": "text",
+            "text": "En la práctica, todos los callers respetan el contrato del hook.",
+        }],
+        messages=[_grep_message()],
+    )
+    await transformer.transform(request, ctx)
+    assert ctx.unverified_generality_claims == []
+
+
+@pytest.mark.asyncio
+async def test_generality_claim_with_bash_grep_evidence_not_flagged():
+    """A Bash tool_use running `grep` counts as search evidence too — agents
+    frequently search via shell rather than the dedicated Grep/Glob tool."""
+    transformer = GroundingValidatorTransformer()
+    ctx = TransformContext(session_id="gen-test-3")
+    request = MockRequest(
+        content=[{
+            "type": "text",
+            "text": "Every consumer of this hook always respects the contract.",
+        }],
+        messages=[_bash_grep_message()],
+    )
+    await transformer.transform(request, ctx)
+    assert ctx.unverified_generality_claims == []
+
+
+@pytest.mark.asyncio
+async def test_no_generality_marker_no_effect():
+    """Plain text with no generality/universality marker → no effect at all."""
+    transformer = GroundingValidatorTransformer()
+    ctx = TransformContext(session_id="gen-test-4")
+    request = MockRequest(
+        content=[{"type": "text", "text": "Corregí el bug en auth.py."}],
+        messages=[{"role": "user", "content": "arregla el bug"}],
+    )
+    await transformer.transform(request, ctx)
+    assert ctx.unverified_generality_claims == []
