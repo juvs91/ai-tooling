@@ -33,7 +33,7 @@ fi
 ADR_PATH="docs/adr"
 CONFIG_FILE=".claude/adr-gate.conf"
 if [ -f "$CONFIG_FILE" ] && grep -qE '^adr_path:' "$CONFIG_FILE" 2>/dev/null; then
-  ADR_PATH=$(grep -E '^adr_path:' "$CONFIG_FILE" | head -1 | sed 's/^adr_path:[[:space:]]*//' | tr -d '/')
+  ADR_PATH=$(grep -E '^adr_path:' "$CONFIG_FILE" | head -1 | sed 's/^adr_path:[[:space:]]*//' | sed 's:/*$::')
 fi
 
 # ── Rutas que SIEMPRE se permiten ─────────────────────────────────────────────
