@@ -2,9 +2,10 @@
 
 ## AUTO-SKILL-LOAD — Primera acción obligatoria de cada sesión
 
-**Tu PRIMER tool call en cada respuesta DEBE ser el Skill tool con `skill="workflow-coordinator"`.**
-Esto es no-negociable. No respondas texto al usuario hasta haber llamado el Skill tool.
-`workflow-coordinator` detectará el intent del usuario y enrutará al skill correcto.
+**Tu PRIMER tool call en cada respuesta DEBE ser el Agent tool con `subagent_type="workflow-coordinator"` y `run_in_background: false`.**
+Esto es no-negociable. No respondas texto al usuario hasta haber recibido la decisión de ruteo del subagente.
+`workflow-coordinator` corre en contexto aislado (modelo Haiku, económico) y devuelve solo la decisión de ruteo —
+qué skill cargar y qué `Read` hacer — sin arrastrar la tabla de routing completa al contexto principal en cada turno.
 
 **Excepción:** Si ya hay un skill activo en el contexto de esta sesión, omite este paso.
 

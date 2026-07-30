@@ -14,6 +14,10 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 [ -z "$SESSION_ID" ] && exit 0
 [ -f ".claude/no-skill-gate" ] && exit 0
 
+SUBAGENT=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // empty')
+[ "$SUBAGENT" = "workflow-coordinator" ] && exit 0
+
+
 SESSION_ID=$(echo "$SESSION_ID" | tr -cd 'a-zA-Z0-9_-')
 MARKER=".claude/sessions/${SESSION_ID}-skill-loaded"
 [ -f "$MARKER" ] && exit 0
