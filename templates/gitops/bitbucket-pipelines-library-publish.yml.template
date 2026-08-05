@@ -40,6 +40,20 @@ definitions:
 
     - &install-make "apt-get update --quiet && apt-get install -y make --quiet"
 
+    # Guard: Bitbucket NO soporta clases de caracteres ([0-9]) en patrones de tag —
+    # solo * y ** (verificado contra la doc oficial + foro de Atlassian, 2026-08-05).
+    # Por eso el patrón 'python-auth@*' matchea TAMBIÉN los tags de bookkeeping que
+    # crea `release.sh promote/hotfix` (-dev.N/-rc.N/-hotfix.N). No se puede filtrar
+    # en el YAML — se valida en bash, como PRIMER paso de cada *-publish-tag, ANTES
+    # de autenticar con GCP. exit 0 (no falla en rojo) porque no es un error: es un
+    # tag de bookkeeping que legítimamente no debe publicar nada.
+    - &reject-suffixed-tag |
+      if echo "$BITBUCKET_TAG" | grep -qE -- '-(dev|rc|hotfix)\.[0-9]+$'; then
+        echo "Tag $BITBUCKET_TAG tiene sufijo -dev/-rc/-hotfix — es bookkeeping de"
+        echo "release.sh promote/hotfix, no un tag de publish. Saltando sin error."
+        exit 0
+      fi
+
     - &go-publish-setup |
         apk add --no-cache go make
         gcloud components install package-go-module --quiet
@@ -83,6 +97,7 @@ definitions:
         image: google/cloud-sdk:slim
         oidc: true
         script:
+          - *reject-suffixed-tag
           - *gcp-auth
           - apt-get install -y make python3 python3-pip --quiet
           - cd python/auth
@@ -129,6 +144,7 @@ definitions:
         image: google/cloud-sdk:slim
         oidc: true
         script:
+          - *reject-suffixed-tag
           - *gcp-auth
           - curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y make nodejs --quiet
           - TOKEN=$(gcloud auth print-access-token)
@@ -171,6 +187,7 @@ definitions:
         image: gcr.io/google.com/cloudsdktool/google-cloud-cli:alpine
         oidc: true
         script:
+          - *reject-suffixed-tag
           - *gcp-auth
           - *go-publish-setup
           - VERSION="v${BITBUCKET_TAG#go-auth@}" make publish

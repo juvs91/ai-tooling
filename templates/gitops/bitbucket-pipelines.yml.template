@@ -39,7 +39,39 @@ definitions:
 
 pipelines:
 
+  # ─── tag-multi-dev: generar tags -dev para TODOS los proyectos de una vez
+  # (reemplaza el auto-deploy-en-push que tenía este template). Dispara
+  # manualmente desde la UI de Bitbucket. NO deploya directamente — solo
+  # genera y empuja tags `<proyecto>@<version-real-del-manifiesto>-dev.<build>`;
+  # el push de cada tag dispara automáticamente el pipeline de "tags:
+  # '*@*-dev.*'" (abajo), que es la ÚNICA fuente de verdad de "cómo deployar
+  # a dev". No duplica lógica de deploy aquí.
+  #
+  # Deliberadamente NO existe un "tag-multi-prod": prod es siempre uno por
+  # uno vía `release.sh tag <proyecto>` — bulk-promover a producción violaría
+  # la independencia de despliegue entre proyectos (pilar #1 de ADR-0007).
+  # El propio `release.sh cmd_tag` nunca acepta más de un proyecto a la vez,
+  # a propósito.
+  custom:
+    tag-multi-dev:
+      - step:
+          name: Generar tags -dev para todos los proyectos
+          script:
+            - git fetch --unshallow || true
+            - CURRENT_VERSION_A=$(node -p "require('./projects/proyecto-a/package.json').version")
+            - git tag "proyecto-a@${CURRENT_VERSION_A}-dev.${BITBUCKET_BUILD_NUMBER}" -m "Manual dev build"
+            - git push origin "proyecto-a@${CURRENT_VERSION_A}-dev.${BITBUCKET_BUILD_NUMBER}"
+            - CURRENT_VERSION_B=$(node -p "require('./projects/proyecto-b/package.json').version")
+            - git tag "proyecto-b@${CURRENT_VERSION_B}-dev.${BITBUCKET_BUILD_NUMBER}" -m "Manual dev build"
+            - git push origin "proyecto-b@${CURRENT_VERSION_B}-dev.${BITBUCKET_BUILD_NUMBER}"
+
   # ─── Push a trunk (main) ────────────────────────────────────────────────
+  # Solo quality gate (build+test) — NUNCA deploy. Los ambientes se definen
+  # por tag/pipeline manual, jamás por push a una rama (ADR-0007: "los
+  # ambientes son pipelines, no ramas"). Mismo principio que ya aplicaba
+  # `commons` en su bitbucket-pipelines.yml (branches: main: solo corre
+  # tests, nunca despliega) — este template genérico tenía la inconsistencia,
+  # corregida aquí para que ambos sigan la misma teoría "todo por tags".
   branches:
     main:
       - step: *setup-git
@@ -73,33 +105,6 @@ pipelines:
                 - pnpm install --frozen-lockfile
                 - pnpm build
                 - pnpm test
-
-      # Deploy automático a DEV después de que los builds pasan
-      - parallel:
-          - step:
-              name: Deploy proyecto-a → DEV
-              condition:
-                changesets:
-                  includePaths:
-                    - "projects/proyecto-a/**"
-                    - "shared/libs/**"
-              deployment: Dev
-              script:
-                - ./scripts/deploy.sh proyecto-a dev
-                # El pipeline crea el tag dev automáticamente
-                - git tag "proyecto-a@${BITBUCKET_BUILD_NUMBER}-dev.1" -m "Auto dev build"
-                - git push origin "proyecto-a@${BITBUCKET_BUILD_NUMBER}-dev.1" || true
-
-          - step:
-              name: Deploy proyecto-b → DEV
-              condition:
-                changesets:
-                  includePaths:
-                    - "projects/proyecto-b/**"
-                    - "shared/libs/**"
-              deployment: Dev
-              script:
-                - ./scripts/deploy.sh proyecto-b dev
 
   # ─── Feature branches ───────────────────────────────────────────────────
   'feature/*':
