@@ -98,4 +98,17 @@ Archivos modificados:
 **Validación:** la lógica de `_replicate_sparse_checkout()` y el fix de `clean` se reprodujeron y
 verificaron primero en un repo git aislado (sandbox, fuera de este repositorio) con 7 escenarios
 (add-branch con sparse activo/inactivo, add sobre rama existente, rm, clean con/sin candidatos,
-prune, list) antes de aplicarse aquí.
+prune, list) antes de aplicarse aquí. Repetido en vivo contra el `release.sh` real (clon temporal)
+antes del commit.
+
+### Addendum (mismo día, post-commit): bug real encontrado al comitear
+
+Al comitear este trabajo, el pre-commit hook reportó "Archivos guardados: 0" pese a que
+`.agents/skills/.../SKILL.md` estaba staged. Causa: `tools/check_adr_gate.py::_normalise()`
+usaba `p.lstrip("./")`, que quita un *set* de caracteres (`.` y `/`), no el prefijo literal
+`"./"` — para una ruta que empieza con punto (`.agents/skills/...`) esto se come el punto
+inicial y rompe el match contra el guarded pattern. El hook bash paralelo (`adr-gate.sh`, que
+usa `${FILE#./}`) nunca tuvo este bug. Corregido con un loop `while p.startswith("./")`. Mismo
+bug encontrado y corregido en `commons/tools/check_adr_gate.py` (heredado al portarlo en esta
+misma homologación) y en `wpc-backend/tools/check_adr_gate.py` (variante más simple, ahí
+explotable en producción real). Ver `ai-notes/AI_LEARNING.md` P019.

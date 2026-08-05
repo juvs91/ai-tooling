@@ -93,7 +93,14 @@ def _normalise(path: str) -> str:
     p = path.strip().replace("\\", "/")
     if p.startswith("/") or ".." in p.split("/"):
         return ""
-    return p.lstrip("./")
+    # NO usar p.lstrip("./") — lstrip toma un set de caracteres, no un prefijo
+    # literal: en una ruta como ".agents/skills/x.md" se come el "." inicial
+    # (queda "agents/skills/x.md"), rompiendo el match contra rutas guardadas
+    # que empiezan con punto. Hallazgo real (ADR-0048/ADR-0011): el gate de
+    # .agents/skills/**/*.md quedaba silenciosamente inerte en check_adr_gate.py.
+    while p.startswith("./"):
+        p = p[2:]
+    return p
 
 
 def _split_file_list(raw: str) -> list[str]:

@@ -955,6 +955,26 @@ que un `bash -n` (solo sintaxis) no detecta, hace falta ejecutar el flujo real c
 la condición sea verdadera. Fix: agregar `|| true` al final de esa línea. Ver `ADR-0048`
 (ai-tooling) / `ADR-0011` (commons).
 
+### [P019] `str.lstrip("./")` no quita un prefijo literal — quita un SET de caracteres, y eso rompía el ADR gate para rutas con punto inicial
+
+Encontrado al comitear el trabajo de homologación con `commons`: el pre-commit hook reportó
+"Archivos guardados: 0" pese a que `.agents/skills/.../SKILL.md` estaba staged y es
+justamente el guarded pattern principal de `check_adr_gate.py`. Causa: `_normalise()` usaba
+`p.lstrip("./")` para quitar un prefijo `./` — pero `str.lstrip(chars)` quita repetidamente
+cualquier carácter del set `{'.', '/'}` desde la izquierda, no el substring literal `"./"`. Para
+una ruta como `.agents/skills/x.md`, eso se come el punto inicial (queda `agents/skills/x.md`),
+y el `fnmatch` contra `.agents/skills/**/*.md` deja de matchear — el gate quedaba
+silenciosamente inerte para exactamente la ruta más sensible que protege. El hook bash paralelo
+(`adr-gate.sh`, que usa `${FILE#./}` — expansión de parámetro con prefijo literal, no
+`lstrip`) nunca tuvo este bug; solo el `.py` (usado por el hook crudo de pre-commit y por CI).
+Mismo bug encontrado y corregido en `commons/tools/check_adr_gate.py` (lo heredó al portarlo
+en esta misma sesión) y en `wpc-backend/tools/check_adr_gate.py` (variante más simple, mismo
+bug, ahí sí explotable en producción porque `.agents/skills/**/*.md` es uno de sus 2 únicos
+guarded patterns hardcodeados). Fix: reemplazar por un loop `while p.startswith("./"): p = p[2:]`.
+**Lección:** `str.lstrip`/`str.rstrip` con un string de múltiples caracteres NO hacen strip de
+prefijo/sufijo literal — es un error de Python común y fácil de no notar porque el caso feliz
+(rutas sin punto inicial) funciona bien. Ver `ADR-0048` (ai-tooling) / `ADR-0011` (commons).
+
 ### Nota histórica: "deagentic"/"Keystone" no eran referencias externas — eran nombres viejos sin renombrar
 
 `git log --all --grep="deagentic"` encontró el commit real
