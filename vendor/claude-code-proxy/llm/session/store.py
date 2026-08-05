@@ -66,6 +66,14 @@ class _CompressionCache:
     # {"turn": int, "claim_text": str, "verified": bool, "signal": "weak",
     #  "timestamp": float}
 
+    # State-assertion audit trail (ADR-0036) — findings from the unified
+    # state-assertion verification framework (deferred-tool denial, plan-state
+    # contradiction, no-progress loops, etc.), persisted per session for
+    # cross-turn escalation (see count_recent_assertion_events).
+    state_assertion_events: list[dict] = field(default_factory=list)
+    # {"turn": int, "rule_id": str, "subject": str, "verdict": str,
+    #  "correction_note": str, "timestamp": float}
+
     # Quality feedback loop (Item 4) — proxy-internal session history.
     # Used by intent_enforcement.py to escalate enforcement when quality is consistently low.
     # Populated by quality_refinement.py after every response that has a quality score.
@@ -137,6 +145,7 @@ def _save_session_cache_to_disk() -> None:
                 "plan_mode_events": c.plan_mode_events[-50:],  # cap at 50 events
                 "completion_claims": c.completion_claims[-50:],  # cap at 50 events
                 "generality_claims": c.generality_claims[-50:],  # cap at 50 events
+                "state_assertion_events": c.state_assertion_events[-50:],  # cap at 50 events
                 "quality_scores": c.quality_scores,
                 "session_stub_count": c.session_stub_count,
                 "session_state": ss,
@@ -184,6 +193,7 @@ def _load_session_cache_from_disk() -> None:
                 plan_mode_events=entry.get("plan_mode_events", []),
                 completion_claims=entry.get("completion_claims", []),
                 generality_claims=entry.get("generality_claims", []),
+                state_assertion_events=entry.get("state_assertion_events", []),
                 quality_scores=entry.get("quality_scores", []),
                 session_stub_count=entry.get("session_stub_count", 0),
                 session_state=entry.get("session_state"),

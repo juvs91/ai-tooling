@@ -1,3 +1,8 @@
+---
+name: frontend-analysis
+description: Use when analyzing, auditing, or documenting a Next.js/React frontend by zones (routes, domain components, UI primitives, shared lib, hooks) via parallel worktree-isolated agents. Do NOT use the Agent tool directly for parallel frontend analysis — use the Workflow tool instead.
+version: "1.0.0"
+---
 # Skill: Frontend Analysis
 
 **Cuándo cargar:** Cuando la tarea es analizar, auditar o documentar el frontend de un proyecto Next.js/React.  

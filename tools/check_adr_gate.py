@@ -1,8 +1,12 @@
 """
 check_adr_gate.py — ADR-first gate enforcer para ai-tooling.
 
-Verifica que cualquier cambio a rutas guardadas (vendor/ proxy core, .agents/skills/)
-venga acompañado de un nuevo ADR en docs/adr/.
+Verifica que cualquier cambio a rutas guardadas venga acompañado de un nuevo ADR en
+docs/adr/. Las rutas guardadas se leen desde .claude/adr-gate.conf (mismo archivo y mismo
+formato "PREFIJO [EXTENSION_REGEX]" que usa .claude/hooks/adr-gate.sh, incluyendo la
+directiva opcional `adr_path:`). Si ese archivo no existe o no es legible, se usan los
+defaults hardcodeados de este repo (vendor/claude-code-proxy/, .agents/skills/) — ver
+GUARDED_PATTERNS.
 
 Exit codes:
   0  — gate pasado (no hay archivos guardados, o ADR presente, o skip flag)
@@ -20,6 +24,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -121,6 +126,56 @@ def _is_new_adr(path: str) -> bool:
     return fnmatch.fnmatch(path, ADR_PATTERN)
 
 
+_ADR_NAME_RE = re.compile(r"ADR-(\d+)-.*\.md$")
+
+
+def _check_adr_sequence(new_files: list[str]) -> list[str]:
+    """Valida que cada ADR nuevo en new_files use exactamente max(existentes)+1 —
+    ni hueco, ni número reutilizado/duplicado. Editar un ADR ya existente no pasa por
+    aquí (solo se evalúan archivos reportados como nuevos). Retorna una lista de
+    mensajes de error (vacía si todo está en orden)."""
+    adr_dir = _CONF_ADR_PATH or DEFAULT_ADR_PATH
+    prefix = f"{adr_dir}/"
+    candidates = sorted(f for f in new_files if f.startswith(prefix) and _ADR_NAME_RE.search(f))
+    if not candidates:
+        return []
+
+    all_files: dict[str, int] = {}
+    adr_path = Path(adr_dir)
+    if adr_path.is_dir():
+        for f in adr_path.glob("ADR-*.md"):
+            m = _ADR_NAME_RE.match(f.name)
+            if m:
+                all_files[f"{adr_dir}/{f.name}"] = int(m.group(1))
+
+    errors = []
+    for candidate in candidates:
+        others_max = max((n for path, n in all_files.items() if path != candidate), default=0)
+        expected = others_max + 1
+        m = _ADR_NAME_RE.search(candidate)
+        new_num = int(m.group(1))
+        if new_num != expected:
+            errors.append(
+                f"{candidate}: usa ADR-{new_num:04d}, pero el siguiente número válido es "
+                f"ADR-{expected:04d} (último existente: ADR-{others_max:04d})"
+            )
+    return errors
+
+
+def _staged_files(diff_filter: str | None = None) -> list[str]:
+    """Fallback para invocaciones sin --changed-files (ej. pre-commit framework con
+    pass_filenames: false, que no pasa argumentos al entry point). Usa git diff --cached
+    directamente, igual que ya hace a mano el hook crudo de tools/install_hooks.sh."""
+    cmd = ["git", "diff", "--cached", "--name-only"]
+    if diff_filter:
+        cmd.append(f"--diff-filter={diff_filter}")
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return _split_file_list(out.stdout)
+
+
 def _record_bypass(reason: str, guarded: list[str], msg: str) -> None:
     ts = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
     files_snippet = ", ".join(guarded[:5])
@@ -148,6 +203,20 @@ def run_gate(
     print("=" * 60)
     print("ADR GATE — verificando cambios a rutas guardadas")
     print("=" * 60)
+
+    skip_requested = skip_flag or SKIP_TOKEN in (commit_message or "")
+
+    sequence_errors = _check_adr_sequence(new_files)
+    if sequence_errors and not skip_requested:
+        print("\n[FAIL] Numeración de ADR no secuencial:")
+        for err in sequence_errors:
+            print(f"  - {err}")
+        print("\nArreglo trivial: agrega [skip-adr] al commit message.")
+        return 1
+    if sequence_errors and skip_requested:
+        print("\n[WARN] Numeración de ADR no secuencial, pero bypass solicitado:")
+        for err in sequence_errors:
+            print(f"  - {err}")
 
     guarded_changed = [f for f in changed_files if _is_guarded(f)]
 
@@ -219,14 +288,28 @@ def main() -> None:
     parser.add_argument("--skip-adr", action="store_true", default=False)
     args = parser.parse_args()
 
-    if args.changed_files.strip():
+    had_explicit_changed = bool(args.changed_files.strip())
+
+    if had_explicit_changed:
         changed_files = _split_file_list(args.changed_files)
     elif not sys.stdin.isatty():
         changed_files = _split_file_list(sys.stdin.read())
     else:
         changed_files = []
 
-    new_files = _split_file_list(args.new_files) if args.new_files.strip() else []
+    if not changed_files and not had_explicit_changed:
+        # Ni --changed-files ni stdin trajeron nada (ej. invocado por el framework
+        # `pre-commit`, que corre el entry point con pass_filenames: false y stdin no
+        # es un tty pero tampoco trae nada útil) — calcular directamente lo staged en
+        # vez de asumir silenciosamente "sin archivos".
+        changed_files = _staged_files()
+
+    if args.new_files.strip():
+        new_files = _split_file_list(args.new_files)
+    elif not had_explicit_changed:
+        new_files = _staged_files(diff_filter="A")
+    else:
+        new_files = []
 
     sys.exit(
         run_gate(

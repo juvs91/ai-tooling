@@ -30,16 +30,26 @@ Your primary responsibility is to ensure that any new capability added to the re
 ## Your Protocol
 
 ### Phase 1 — Architectural Review & ADR (MANDATORY)
-Before writing any code for a new tool, OR making any changes to an existing tool, you MUST consult the **Architect Agent**.
-1. Propose the tool's design (or the proposed change), boundaries, and CLI contract to the Architect.
-2. Determine the correct domain path for the tool (e.g., `software/discovery`, `hardware/wireless`, `infrastructure`).
-3. The Architect will review the design or modification against the system architecture.
-4. Once approved, you MUST create a new Architecture Decision Record (ADR) detailing the design decisions or changes. **For every single change made to a tool, a new ADR must be written.** Store it strictly in `tools/[domain]/[subdomain]/[tool name]/ADR/[adrnumber]_[name]_adr.md`.
+Before writing any code for a new tool, OR making any changes to an existing tool, consulta el
+skill **`architect`** (no un `Agent`-subagent — no existe como `subagent_type` invocable; es un
+skill como este mismo, se carga con `Read` de `.agents/skills/software/architecture/architect/SKILL.md`
+vía el routing normal de `workflow-coordinator`).
+1. Propose the tool's design (or the proposed change) and its CLI contract.
+2. El skill `architect` revisa el diseño contra la arquitectura del sistema.
+3. Once reviewed, create a new ADR in `docs/adr/ADR-NNNN-<titulo>.md` (número secuencial siguiente
+   al último existente — ver `docs/adr/index.md`). **Esta es la convención real del repo**, no una
+   carpeta `ADR/` anidada dentro de `tools/`.
 
 ### Phase 2 — Write, Update, or Merge the Tool
-1. **Develop/Refine**: Write or update the script in its dedicated domain directory: `tools/[domain]/[subdomain]/[tool name]/`. Ensure it takes parameterized arguments and uses cross-platform libraries.
-2. **Testing (MANDATORY)**: Every tool MUST have its own suite of tests located within its directory (e.g., `tools/[domain]/[subdomain]/[tool name]/tests/`). You must write tests that cover the happy path, edge cases, and ensure the CLI contract is upheld before committing.
-3. **Merge if Necessary**: If a similar tool exists in the domain, update it rather than creating a new file. Ensure the CLI contract remains backward compatible. Remember: even merges require a new ADR in Phase 1 and updated tests.
+1. **Develop/Refine**: escribe o actualiza el script como archivo plano bajo `tools/<tool_name>.py`
+   (convención real de este repo — ver `check_adr_gate.py`, `check_skill_frontmatter.py`,
+   `check_adr_sections.py`). Ensure it takes parameterized arguments and uses cross-platform
+   libraries.
+2. **Testing (MANDATORY)**: cada tool tiene su test en `tools/tests/test_<tool_name>.py`. You must
+   write tests that cover the happy path, edge cases, and ensure the CLI contract is upheld.
+3. **Merge if Necessary**: If a similar tool exists, update it rather than creating a new file.
+   Ensure the CLI contract remains backward compatible. Remember: even merges require a new ADR
+   in Phase 1 and updated tests.
 
 ### Phase 3 — Update the Tool Index
 You MUST document the new or updated tool in the central Tool Index (`docs/tools/index.md`). For each tool, the entry must provide:
@@ -48,13 +58,21 @@ You MUST document the new or updated tool in the central Tool Index (`docs/tools
 - **Constraints**: Limitations, required dependencies, or unsupported edge cases.
 - **Use case**: A concrete example of what the tool accomplishes.
 
-### Phase 4 — Commit the Tool
-Stage and commit the tool, its ADR, and the index update. Use a semantic commit message: `feat(tools): add [tool-name] for [purpose]` or `feat(tools): merge [tool-a] and [tool-b]`.
+### Phase 4 — Commit the Tool (solo si el usuario lo pide explícitamente)
+**No hagas `git commit`/`git push` como parte de este protocolo.** La regla del repo (ver
+`CLAUDE.md`/harness) es no commitear nunca sin pedido explícito del usuario — eso tiene prioridad
+sobre esta instrucción. Deja el tool, su ADR y el índice sin commitear, y avísale al usuario que
+están listos. Si el usuario pide el commit, usa un mensaje semántico:
+`feat(tools): add [tool-name] for [purpose]`.
 
-### Phase 5 — Upstream Auto-Push (Deagentic)
-If the tool is general-purpose, it must be shared upstream.
-1. Document the generic version of the tool in `docs/upstream_contributions/`.
-2. Automatically commit and push the generalized tool to the central `deagentic` repository so it is globally available.
+### Phase 5 — Contribución upstream (si aplica)
+No existe ningún repo `deagentic` — nunca existió en este entorno. `ai-tooling` (este mismo repo)
+**es** la fuente canónica de skills/tools que se sincroniza hacia repos hermanos (`wpc-backend`,
+etc. vía `sync_skills.sh` / `cornerstone-agents`, ver ADR-0042/ADR-0043). Si estás trabajando
+DENTRO de `ai-tooling`, esta fase es un no-op — el tool ya está en su lugar canónico. Si estás
+trabajando en OTRO repo (ej. `wpc-backend`) y el tool es genérico/reutilizable, documenta esa
+intención y pregúntale al usuario si quiere que se contribuya de vuelta a `ai-tooling` — nunca lo
+hagas automáticamente.
 
 ## Collaboration & Learning Mandate
 

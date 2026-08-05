@@ -11,6 +11,7 @@ from llm.transformers.provider_quirks import ProviderQuirksTransformer
 from llm.transformers.credential import CredentialTransformer
 from llm.transformers.intent_enforcement import IntentEnforcementTransformer
 from llm.transformers.deferred_tools import DeferredToolsTransformer
+from llm.transformers.fragile_model_plan_tools import FragileModelPlanToolsTransformer
 from llm.transformers.reasoning_handling import ReasoningHandlingTransformer
 from llm.transformers.model_feedback import ModelFeedbackTransformer
 from llm.transformers.stream_event import StreamEventTransformer
@@ -20,6 +21,8 @@ from llm.transformers.adaptive_context import AdaptiveContextTransformer
 from llm.transformers.quality_recorder import QualityRecorderTransformer
 from llm.transformers.tool_call_validator import ToolCallValidatorTransformer
 from llm.transformers.plan_mode_guard import PlanModeGuardTransformer
+from llm.transformers.state_assertion_request import StateAssertionRequestTransformer
+from llm.transformers.state_assertion_response import StateAssertionResponseTransformer
 
 __all__ = [
     "Pipeline",
@@ -35,6 +38,7 @@ __all__ = [
     "CredentialTransformer",
     "IntentEnforcementTransformer",
     "DeferredToolsTransformer",
+    "FragileModelPlanToolsTransformer",
     "ReasoningHandlingTransformer",
     "ModelFeedbackTransformer",
     "StreamEventTransformer",
@@ -44,4 +48,6 @@ __all__ = [
     "QualityRecorderTransformer",
     "ToolCallValidatorTransformer",
     "PlanModeGuardTransformer",
+    "StateAssertionRequestTransformer",
+    "StateAssertionResponseTransformer",
 ]

@@ -39,7 +39,13 @@ repos:
   # STACK_PLACEHOLDER
 
   # ── ADR gate — bloquea cambios a rutas críticas sin ADR staged ───────────
-  # Requiere: tools/check_adr_gate.py (copiado por gitops-init.sh)
+  # Requiere: tools/check_adr_gate.py + .claude/adr-gate.conf (ambos copiados/generados
+  # por gitops-init.sh). Fuente de verdad única: .claude/adr-gate.conf — lo leen tanto
+  # este hook (vía check_adr_gate.py) como .claude/hooks/adr-gate.sh (PreToolUse de Claude
+  # Code). No filtramos por `files:` aquí: cuál ruta está "guardada" ya lo decide
+  # check_adr_gate.py leyendo ese conf, no un regex generado una sola vez al bootstrap.
+  # NOTA: si además instalaste el git hook crudo (tools/install_hooks.sh), no actives
+  # también este id vía `pre-commit install` — correrías el mismo gate dos veces.
   - repo: local
     hooks:
       - id: adr-gate
@@ -47,8 +53,7 @@ repos:
         entry: python tools/check_adr_gate.py
         language: system
         pass_filenames: false
-        always_run: false
-        files: 'ADR_GATE_PATTERN'
+        always_run: true
 
       # Conventional commit — requerido para GitOps changelog automático
       # Acepta: feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert

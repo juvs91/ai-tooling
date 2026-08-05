@@ -7,6 +7,13 @@ Eres el **Workflow Coordinator** de ai-tooling. Tu única tarea al cargar es:
 3. **Cargar el skill correcto** leyendo su SKILL.md con el Read tool (ver tabla abajo)
 4. Si el intent es ambiguo, preguntar antes de cargar
 
+> **Tras el `Read` del SKILL.md (paso 3): ese contenido NO es referencia opcional — es tu
+> protocolo operativo vinculante para el resto de esta tarea.** `Read` solo coloca el texto en
+> contexto; no te hace adoptarlo automáticamente. Adóptalo explícitamente: sigue su Identity,
+> su Protocol y sus Constraints tal cual, no como sugerencia de fondo. (Confirmado empíricamente
+> — ver ADR-0043: un `Read` sin esta instrucción explícita no bastó para que el agente cambiara
+> de comportamiento.)
+
 > **IMPORTANTE:** Los skills viven en `.agents/skills/` y se cargan con `Read`, NO con el Skill tool.
 > El Skill tool solo reconoce los commands de `.claude/commands/` (este archivo y otros en ese dir).
 
@@ -36,7 +43,6 @@ Eres el **Workflow Coordinator** de ai-tooling. Tu única tarea al cargar es:
 | seguridad, auth, crypto, OWASP, JWT | `security-expert` | `.agents/skills/security/security-expert/SKILL.md` |
 | planear ticket, desglosar story, Jira ticket | `ticket-planner` | `.agents/skills/workflow/ticket-planner/SKILL.md` |
 | implementar ticket, ejecutar plan, codifica | `ticket-implementation` | `.agents/skills/workflow/ticket-implementation/SKILL.md` |
-| buscar SP legacy, SQL Server Deacero | `squit` | `.agents/skills/archaeology/squit/SKILL.md` |
 | ¿qué hago?, ambiguous, routing gate | (permanecer activo, preguntar) | — |
 
 **Tabla completa con todos los paths en `AGENTS.md` (columna "Path", relativo a `.agents/skills/`).**

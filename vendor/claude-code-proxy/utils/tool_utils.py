@@ -143,6 +143,43 @@ def is_no_tools_model(model: str) -> bool:
     return any(pattern in model_lower for pattern in patterns)
 
 
+@lru_cache(maxsize=1)
+def _load_fragile_orchestration_models() -> FrozenSet[str]:
+    """Load and validate FRAGILE_ORCHESTRATION_MODELS from env. Cached via lru_cache(1).
+
+    Unlike NO_TOOLS_MODELS (default empty — a per-deployment capability fact),
+    this defaults to "kimi": the fragility is already-documented evidence
+    (ADR-0009, ADR-0037), not a hypothetical needing opt-in configuration.
+    """
+    raw = os.environ.get("FRAGILE_ORCHESTRATION_MODELS", "kimi").strip()
+    if not raw:
+        return frozenset()
+
+    models = frozenset(
+        m.strip().lower()
+        for m in raw.split(",")
+        if m.strip() and len(m.strip()) > 2
+    )
+    if models:
+        print(f"[fragile-orchestration] Loaded FRAGILE_ORCHESTRATION_MODELS: {', '.join(sorted(models))}")
+    return models
+
+
+def is_fragile_orchestration_model(model: str) -> bool:
+    """Check if model matches any pattern in FRAGILE_ORCHESTRATION_MODELS.
+
+    Deliberately separate from is_no_tools_model — the two are orthogonal facts
+    about a model (native tool-calling capability vs. documented
+    orchestration-reasoning fragility, ADR-0037). Conflating them would silently
+    change behavior for deployments that set NO_TOOLS_MODELS for unrelated reasons.
+    """
+    patterns = _load_fragile_orchestration_models()
+    if not patterns:
+        return False
+    model_lower = str(model or "").lower()
+    return any(pattern in model_lower for pattern in patterns)
+
+
 def normalize_tool_name(name: str) -> str:
     """Normalize legacy tool names (Task → Agent)."""
     legacy_to_agent = {

@@ -2,12 +2,25 @@
 
 ## AUTO-SKILL-LOAD — Primera acción obligatoria de cada sesión
 
-**Tu PRIMER tool call en cada respuesta DEBE ser el Agent tool con `subagent_type="workflow-coordinator"` y `run_in_background: false`.**
-Esto es no-negociable. No respondas texto al usuario hasta haber recibido la decisión de ruteo del subagente.
-`workflow-coordinator` corre en contexto aislado (modelo Haiku, económico) y devuelve solo la decisión de ruteo —
-qué skill cargar y qué `Read` hacer — sin arrastrar la tabla de routing completa al contexto principal en cada turno.
+**Cuando `skill-autoload.sh` emita el recordatorio (una vez por sesión), tu SIGUIENTE tool call DEBE ser el
+Skill tool con `skill="workflow-coordinator"`.**
+Esto es no-negociable. No respondas texto al usuario hasta haber recibido la decisión de ruteo.
+`workflow-coordinator` (Skill tool → `.claude/commands/workflow-coordinator.md`, wrapper delgado de ~90 líneas,
+NO el protocolo completo de `.agents/skills/workflow/workflow-coordinator/SKILL.md`) lee la tabla de routing de
+AGENTS.md y devuelve qué skill cargar y qué `Read` hacer. Gracias a `skill-autoload.sh` esto ocurre una sola vez
+por sesión, no en cada turno.
 
 **Excepción:** Si ya hay un skill activo en el contexto de esta sesión, omite este paso.
+
+**Costo — no re-invoques `Skill(workflow-coordinator)` a mitad de sesión:** el fix stateful de
+`skill-autoload.sh` solo garantiza que el *reminder automático* no se repita — no impide que el
+propio modelo decida volver a llamar `Skill(skill="workflow-coordinator")` para un intent nuevo,
+y cada invocación reinyecta el wrapper completo (~9,000 caracteres, ~2,300-2,700 tokens), costo
+medido y confirmado en ADR-0043. Si la tabla de routing ya está en tu contexto (de la primera
+carga de esta sesión), NO vuelvas a invocar `Skill(workflow-coordinator)` para rutear un nuevo
+intent — compara directamente contra esa tabla ya cargada y haz `Read` del `SKILL.md` de destino.
+Solo re-invoca `Skill(workflow-coordinator)` si la tabla de routing genuinamente no está ya en tu
+contexto (ej. tras compactación de contexto).
 
 ---
 
@@ -199,7 +212,7 @@ echo '{"tool_name":"Edit","tool_input":{"file_path":"/path/pyproject.toml","old_
 |--------|----------|
 | `check-mcp-status.sh` | Check health of all MCP services |
 | `cloudsql-mcp.sh` | Wrapper for CloudSQL MCP (switches WPC_ENV) |
-| `task-verify.sh` | Verifica completitud de tarea vs `.claude/task-scope.json`; exit 0 = completa |
+| `task-verify.sh` | Verifica completitud de tarea vs el `task-scope.json` de la sesión actual; exit 0 = completa |
 | `install-hooks.sh` | Distribuye hooks/scripts con `# distributable: true` a otro proyecto. **Correr tras actualizar hooks en ai-tooling.** |
 
 ## Agent Skills
@@ -217,7 +230,19 @@ Aplica en CUALQUIER proyecto. Copia este bloque a `CLAUDE.md` de cada proyecto.
 Las partes específicas del proyecto van en `completion_checklist` del `task-scope.json`, no aquí.
 
 ### Iniciar una tarea con scope declarado:
-1. Antes de empezar, escribe `.claude/task-scope.json`:
+> **El scope file es POR SESIÓN, no por proyecto (ADR-0041).** Cada sesión de Claude Code
+> tiene el suyo — así dos sesiones simultáneas sobre el mismo repo nunca se pisan. Ruta
+> real: `.claude/sessions/${SESSION_ID}-task-scope.json`, resuelta por
+> `.claude/hooks/task-scope-lib.sh`. `intent-bootstrap.sh` lo crea solo en el primer
+> prompt de cada sesión — normalmente NO hace falta escribir este archivo a mano.
+
+1. Si necesitas escribirlo/editarlo manualmente (excepción, no el flujo normal), resuelve
+   la ruta primero — NUNCA hardcodees `.claude/task-scope.json`:
+   ```bash
+   source .claude/hooks/task-scope-lib.sh
+   SCOPE_FILE=$(scope_file_for_session "." "${CLAUDE_CODE_SESSION_ID:-}")
+   ```
+   y escribe `$SCOPE_FILE` con:
    ```json
    {
      "task_id": "<descripción-fecha>",
@@ -226,8 +251,12 @@ Las partes específicas del proyecto van en `completion_checklist` del `task-sco
      "completion_checklist": ["<comando>  # descripción", ...]
    }
    ```
-2. El hook `scope-gate.sh` aplicará restricciones de write según el modo automáticamente
-3. Si no hay `task-scope.json`: comportamiento default (mode=full, sin restricciones extra)
+2. El hook `scope-gate.sh` aplica las restricciones sobre el scope file de LA SESIÓN
+   ACTUAL (resuelto igual que en el paso 1) automáticamente
+3. Sin scope file para la sesión actual: comportamiento default (mode=full, sin
+   restricciones extra). `.claude/task-scope.json` (ruta fija) es el fallback legacy para
+   cuando no hay `session_id`/`CLAUDE_CODE_SESSION_ID` disponible — no es "el" scope de tu
+   sesión, no lo edites como tal.
 
 ### ¿Qué cuenta como "iniciar una nueva tarea"? (evita pisar una tarea en curso)
 - **Nueva tarea** → escribe/sobreescribe `task-scope.json` cuando el pedido es un tema
@@ -267,10 +296,11 @@ Las partes específicas del proyecto van en `completion_checklist` del `task-sco
 - SIEMPRE correr `./scripts/task-verify.sh` antes de reportar la tarea como completa
 - Si exit 1: completar los ítems pendientes listados antes de reportar
 - Si exit 0: task-verify.sh indicará si hay tests a correr según modo:lenguaje, y borra
-  automáticamente `.claude/task-scope.json` — el scope queda abierto para la siguiente
-  tarea sin intervención manual
+  automáticamente el scope file de la sesión actual — el scope queda abierto para la
+  siguiente tarea sin intervención manual
 
 ### Instalación en un nuevo proyecto:
 1. Copiar este bloque al `CLAUDE.md` del proyecto
 2. Copiar `scripts/task-verify.sh` de `ai-tooling/scripts/` al proyecto
-3. Copiar `.claude/hooks/scope-gate.sh` de `ai-tooling/.claude/hooks/` al proyecto
+3. Copiar `.claude/hooks/scope-gate.sh` y `.claude/hooks/task-scope-lib.sh` de
+   `ai-tooling/.claude/hooks/` al proyecto

@@ -66,7 +66,7 @@ if echo "$COMMAND" | grep -qE 'git\s+clean\s+-[a-zA-Z]*f'; then
   exit 2
 fi
 
-# 5. rm -rf sobre un git worktree activo (Ref: ADR-0008)
+# 5. rm -rf sobre un git worktree activo (Ref: ADR-0044)
 # Segmentado por &&/||/;/| — evita falso positivo cuando el path de un worktree
 # aparece en un comando encadenado distinto del que realmente ejecuta el rm -rf.
 if echo "$COMMAND" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f'; then

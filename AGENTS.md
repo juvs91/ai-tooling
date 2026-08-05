@@ -79,7 +79,6 @@ Paths son relativos a `.agents/skills/`.
 | planear ticket, desglosar story, Jira ticket, "quiero implementar X" | **ticket-planner** — Planificación Jira: 11-fuentes context, grokking refinement, pasos atómicos. | `workflow/ticket-planner/SKILL.md` | Tareas mid-impl |
 | implementar ticket, ejecutar plan, "implementa X", "codifica Y" | **ticket-implementation** — 7-hop multihop grounding: ejecución atómica con verificación iterativa. | `workflow/ticket-implementation/SKILL.md` | Sin plan previo |
 | ¿qué hago?, ambiguous intent, routing, workflow gate | **workflow-coordinator** — Detecta intent, verifica estado del workflow, enruta al command apropiado. | `workflow/workflow-coordinator/SKILL.md` | — |
-| buscar stored procedure legacy, SP SQL Server, legacy business logic | **squit** — Búsqueda semántica de SPs legacy de Deacero (5.7M objetos SQL). | `archaeology/squit/SKILL.md` | — |
 <!-- ROUTING_TABLE_END -->
 
 ### Compound Tasks — Skills que se apilan
@@ -167,7 +166,6 @@ docs/adr/                     <-  open ADR ONLY when a decision is made
 | API | `mcp-server-patterns` | Building MCP servers (stdio vs HTTP, tools, resources) |
 | Go | `golang-patterns` | Idiomatic Go: interfaces, errors, concurrency |
 | Go | `golang-testing` | Go tests, table-driven tests, benchmarks |
-| Archaeology | `squit` | Semantic search of Deacero legacy SQL (5.7M objects) |
 
 Full skill index: `.agents/skills/skills.md`
 

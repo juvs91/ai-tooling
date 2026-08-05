@@ -47,88 +47,30 @@ Intent detected → Read SKILL.md via Read tool (path from AGENTS.md)
 Target skill handles user request
 ```
 
-### Intent → Skill Mapping (from AGENTS.md)
+## Routing Table — Fuente única de verdad
 
-**CRITICAL:** This skill MUST read `AGENTS.md` and extract the routing table between `<!-- ROUTING_TABLE_START -->` and `<!-- ROUTING_TABLE_END -->` (lines 22-66).
+**La tabla completa de routing vive en `AGENTS.md`, entre `<!-- ROUTING_TABLE_START -->` y
+`<!-- ROUTING_TABLE_END -->`.** No la dupliques ni la re-narres aquí — cualquier copia local
+se desincroniza con el tiempo. Columnas: **Triggers** (keywords/patrones), **Skill**, **Path**
+(relativo a `.agents/skills/`), **No usar para** (exclusiones).
 
-**The routing table in AGENTS.md has 45+ skills with specific triggers. Use that table, not this simplified summary.**
+> El Skill tool (`/skill <nombre>`) solo reconoce archivos en `.claude/commands/`.
+> Los agent skills en `.agents/skills/` se cargan SIEMPRE con el Read tool: `Read .agents/skills/<path>`.
 
-**Simplified Reference (full table in AGENTS.md):**
+## Intent Detection
 
-| Intent Category | Example Skills | AGENTS.md Triggers |
-|-----------------|---------------|-------------------|
-| **New Feature** | brainstorming, architect | "nueva feature", "diseñar algo", ambiguous |
-| **Backend Code** | senior-backend, python-testing | "FastAPI", "Python", "endpoint", "pytest" |
-| **Frontend Code** | senior-frontend, nextjs | "React", "Next.js", "componente", "TypeScript" |
-| **Discovery** | software-archeologist, retro-engineer | "reverse engineer", "analizar codebase", "trazar" |
-| **Planning** | ticket-planner | "planear ticket", "desglosar story", "Jira ticket" |
-| **Implementation** | ticket-implementation | "implementar ticket", "codifica", "ejecutar plan" |
-| **Review** | code-reviewer, security-review | "review PR", "revisar código", "code review" |
-| **Documentation** | documentation-lookup, adr-writer | "docs de librería", "ADR", "documentar decisión" |
+Analiza el mensaje del usuario contra estas categorías (y luego, con más precisión, contra la
+columna "Triggers" de AGENTS.md):
 
-**How to Read AGENTS.md Routing Table:**
-
-1. **Parse the table structure:**
-   ```markdown
-   | Triggers | Skill — Capacidad que activa | Path | No usar para |
-   ```
-
-2. **Match user message against "Triggers" column:**
-   - Check for keyword matches (e.g., "implementar" → ticket-implementation)
-   - Check for domain keywords (e.g., "FastAPI" → senior-backend)
-   - Check for intent patterns (e.g., "¿cómo funciona?" → inquiry)
-
-3. **Extract skill path:**
-   - Use the "Path" column to locate SKILL.md
-   - Example: `workflow/ticket-planner/SKILL.md`
-
-4. **Load skill via Read tool (NOT Skill tool):**
-   ```
-   Read .agents/skills/<path-from-AGENTS.md>
-   ```
-   The Skill tool only recognizes commands in `.claude/commands/`. All agent skills
-   live in `.agents/skills/` and must be loaded with the Read tool directly.
-
-**Note:** If intent is ambiguous, workflow-coordinator remains loaded to assist with routing.
-
-### Detection from User Message
-
-Analyze the first message for patterns:
-
-- **Implementation:** "implement", "code", "build", "fix", "create function"
-- **Planning:** "plan", "break down", "how should I", "design"
+- **Implementation:** "implement", "code", "build", "fix", "create function", "develop", "solve"
+- **Planning:** "plan", "break down", "how should I", "what's the approach", "design"
 - **Inquiry:** "how", "what", "why", "explain", "understand"
 - **Review:** "review", "check", "verify", "validate"
 
----
+Contexto adicional a considerar: ticket ID o identificador de feature (ej. ARP-123), backend vs
+frontend (paths/keywords), dominio específico (pricing, auth, DB, etc.), indicadores de urgencia.
 
-## Core Expertise
-
-### Intent Detection
-
-Analyze user's request to determine their intent:
-
-**Implementation Patterns:**
-- Keywords: "implement", "code", "develop", "build", "fix", "solve"
-- Directives: "Create a function", "Add a feature", "Fix the bug in..."
-- Context: References to specific files, components, or functionality
-
-**Planning Patterns:**
-- Keywords: "plan", "break down", "how should I", "what's the approach"
-- Directives: "Create a plan for...", "Break down this ticket..."
-- Context: Ticket ID without implementation details
-
-**Inquiry Patterns:**
-- Keywords: "how", "what", "why", "explain", "understand"
-- Directives: "How does this work?", "What does this function do?"
-- Context: Questions about existing code or architecture
-
-**Review Patterns:**
-- Keywords: "review", "check", "verify", "validate"
-- Directives: "Review my changes", "Check this implementation"
-- Context: Requests for code review or quality checks
-
-### Workflow States
+## Workflow States
 
 A ticket progresses through these states:
 
@@ -177,151 +119,26 @@ Invoke this skill when:
 
 ## Workflow
 
-### Step 0: Verify Skills Loaded & Read Routing Table
+### Step 0-1: Leer AGENTS.md y encontrar el match
 
-**IMPORTANT:** Before any work, you MUST read AGENTS.md and extract the routing table.
+**IMPORTANT:** Antes de cualquier trabajo, debes leer `AGENTS.md` completo y extraer la tabla
+de routing entre `<!-- ROUTING_TABLE_START -->` y `<!-- ROUTING_TABLE_END -->`.
 
-**Action:**
-1. **Read AGENTS.md** (entire file, lines 1-250)
-2. **Extract routing table** from lines 22-66 (between `<!-- ROUTING_TABLE_START -->` and `<!-- ROUTING_TABLE_END -->`)
-3. **Parse table structure:**
-   - Column 1: **Triggers** (keywords/patterns that activate the skill)
-   - Column 2: **Skill** (name and description)
-   - Column 3: **Path** (location of SKILL.md relative to `.agents/skills/`)
-   - Column 4: **No usar para** (when NOT to use this skill)
+**Algoritmo de matching:**
+1. Tokeniza el mensaje del usuario (keywords, ticket IDs, paths, verbos de intent).
+2. Compara contra la columna "Triggers" de cada fila, case-insensitive.
+3. Prioriza por orden de la tabla — primer match gana.
+4. Extrae de la fila ganadora: nombre del skill, path (columna "Path"), exclusiones ("No usar para").
+5. Si ya hay un skill cargado en contexto que coincide con el intent detectado, no recargues nada.
+6. Si el intent es genuinamente ambiguo entre 2+ filas, dilo explícitamente y pregunta al usuario
+   antes de cargar cualquier skill.
 
-**Check if skill already loaded:**
-- Verify if any skill is already loaded in context
-- If yes, check if it matches the detected intent
-- If no, proceed to load appropriate skill
-
-**How to Parse Routing Table:**
-
+**Ejemplo de salida esperada:**
 ```
-| Triggers | Skill — Capacidad que activa | Path | No usar para |
-|---|---|---|---|
-| nueva feature, "quiero hacer X" | **brainstorming** | `core/brainstorming/SKILL.md` | Cambios mid-impl |
-| FastAPI, Python service | **senior-backend** | `software/backend/senior-backend/SKILL.md` | Go code |
-| planear ticket, Jira ticket | **ticket-planner** | `workflow/ticket-planner/SKILL.md` | Tareas mid-impl |
-| implementar ticket, ejecutar | **ticket-implementation** | `workflow/ticket-implementation/SKILL.md` | Sin plan previo |
-```
-
-**Matching Algorithm:**
-1. Extract user message keywords and intent
-2. Compare against "Triggers" column (case-insensitive)
-3. Find first match (table is ordered by priority)
-4. Extract skill name and path from matched row
-5. Load skill using Read tool: `Read .agents/skills/<path>`
-
-**Example output after reading AGENTS.md:**
-```
-📚 Routing Table Loaded: 45 skills from AGENTS.md (lines 22-66)
-
-🔍 Analyzing user message against triggers...
-✅ Match found: "implementar ARP-123" → ticket-implementation
-
-📋 Skill: ticket-implementation
+🔍 Analizando triggers... ✅ Match: "implementar ARP-123" → ticket-implementation
 📍 Path: workflow/ticket-implementation/SKILL.md
-🔀 Loading: Read .agents/skills/workflow/ticket-implementation/SKILL.md
+🔀 Read .agents/skills/workflow/ticket-implementation/SKILL.md
 ```
-
-### Step 1: Detect Intent Using AGENTS.md Triggers
-
-**IMPORTANT:** Intent detection MUST use the triggers from AGENTS.md routing table (lines 22-66).
-
-**Detection Process:**
-
-1. **Extract user message keywords:**
-   - Tokenize user message into words/phrases
-   - Identify domain-specific terms (ticket IDs, file paths, technical terms)
-   - Identify intent verbs (implementar, planear, revisar, analizar, etc.)
-
-2. **Match against AGENTS.md "Triggers" column:**
-   - Compare user keywords against each row's triggers
-   - Use case-insensitive matching
-   - Prioritize by table order (first match wins)
-   - Consider context (backend vs frontend, code vs docs)
-
-3. **Extract matched skill information:**
-   - Skill name (e.g., "ticket-implementation")
-   - Skill path (e.g., "workflow/ticket-implementation/SKILL.md")
-   - Exclusion criteria ("No usar para" column)
-
-**Trigger Categories from AGENTS.md:**
-
-| Category | Triggers | Skill |
-|----------|----------|-------|
-| **Feature Design** | "nueva feature", "quiero hacer X", "diseñar algo", "ambiguous request" | brainstorming |
-| **Tools** | "nuevo script", "herramienta", "automation", "utility", "parser" | tool-writer |
-| **Learning** | "aprendí algo", "nuevo patrón", "problema recurrente" | learning-protocol |
-| **Architecture** | "diseño de sistema", "componentes", "boundaries", "trade-offs" | architect |
-| **ADR** | "ADR", "architecture decision record", "documentar decisión" | adr-writer |
-| **Reverse Eng** | "reverse engineer", "analizar codebase", "execution graph", "call tree" | software-archeologist |
-| **Backtrack** | "backtrack", "trazar comportamiento", "de dónde viene X" | retro-engineer |
-| **Unknown Domain** | "sistema desconocido", "código nunca visto", "unfamiliar codebase" | unknown-domain-protocol |
-| **Backend** | "FastAPI", "Python service", "Pydantic", "async Python", "endpoint", "router" | senior-backend |
-| **Python Tests** | "pytest", "fixtures", "mock", "async test", "conftest", "parametrize" | python-testing |
-| **TDD** | "escribir tests", "TDD", "test-first", "agregar cobertura", "fix bug", "nueva feature" | tdd-workflow |
-| **BDD** | "Gherkin", "BDD", "feature file", "given/when/then", "behavioral spec" | bdd-writer |
-| **Code Review** | "review PR", "revisar código", "/code-review", "revisar PR", "code review" | code-review |
-| **Quality Review** | "audit diff", "revisar calidad", "code reviewer", "antes de merge" | code-reviewer |
-| **Verification** | "verificar implementación", "pre-PR", "quality gate", "terminé de implementar" | verification-loop |
-| **Standards** | "linting", "formateo", "coding standards", "ruff", "estilo de código" | coding-standards |
-| **Frontend** | "React", "Next.js", "TypeScript", "Tailwind", "componente", "hook", "props" | senior-frontend |
-| **Next.js** | "App Router", "server component", "RSC", "client component", "Next.js routing" | nextjs |
-| **Database** | "base de datos", "SQL", "schema", "migración", "AlloyDB", "ORM", "Alembic" | database-expert |
-| **CI/CD** | "CI/CD", "pipeline", "Docker", "deploy", "Bitbucket Pipelines", "Cloud Run" | gitops-expert |
-| **Planning** | "planear ticket", "desglosar story", "Jira ticket", "quiero implementar X" | ticket-planner |
-| **Implementation** | "implementar ticket", "ejecutar plan", "implementa X", "codifica Y" | ticket-implementation |
-| **Routing** | "¿qué hago?", "ambiguous intent", "routing", "workflow gate" | workflow-coordinator |
-
-**Detection Examples:**
-
-```
-User message: "Implementar ARP-123 con FastAPI"
-Keywords: ["implementar", "ARP-123", "FastAPI"]
-Matches:
-  - "implementar" → ticket-implementation (row 62)
-  - "FastAPI" → python-senior-backend (row 39)
-First match: ticket-implementation
-Action: Read .agents/skills/workflow/ticket-implementation/SKILL.md
-```
-
-```
-User message: "¿Cómo funciona el cálculo de precios?"
-Keywords: ["¿cómo", "funciona", "cálculo", "precios"]
-Matches:
-  - "¿cómo funciona" → inquiry pattern (no direct trigger)
-  - Domain: pricing system
-Intent: Inquiry → software-archeologist (for codebase analysis)
-Action: Read .agents/skills/software/discovery/software-archeologist/SKILL.md
-```
-
-```
-User message: "Diseñar nueva API de precios"
-Keywords: ["diseñar", "nueva", "API", "precios"]
-Matches:
-  - "diseñar algo" → brainstorming (row 30)
-First match: brainstorming
-Action: Read .agents/skills/core/brainstorming/SKILL.md
-```
-
-**Primary Intent Classification:**
-
-Based on AGENTS.md triggers, classify into:
-
-1. **Design/Planning** → brainstorming, ticket-planner, architect
-2. **Implementation** → ticket-implementation, senior-backend, senior-frontend
-3. **Discovery/Inquiry** → software-archeologist, documentation-lookup
-4. **Review/Quality** → code-reviewer, verification-loop, security-review
-5. **Infrastructure** → database-expert, gitops-expert
-6. **Process/Workflow** → workflow-coordinator, learning-protocol
-
-**Secondary Detection:**
-- Ticket ID or feature identifier (e.g., ARP-123)
-- Backend vs frontend (analyze file paths, keywords)
-- Specific domain (pricing, auth, database, etc.)
-- Urgency or priority indicators
 
 ### Step 2: Check Prerequisites
 
@@ -344,190 +161,15 @@ Based on AGENTS.md triggers, classify into:
 
 **IMPORTANT:** Route directly to skills from AGENTS.md routing table, NOT enhanced commands.
 
-**Routing Algorithm:**
+1. Identifica el skill matcheado en Step 0-1.
+2. Extrae el path desde la columna "Path" de AGENTS.md (relativo a `.agents/skills/`).
+3. Carga el skill con el Read tool: `Read .agents/skills/<path>` — **nunca** con el Skill tool
+   (ese solo ve `.claude/commands/`).
+4. Entrega el contexto al skill cargado.
 
-1. **Identify matched skill from Step 1**
-2. **Extract skill path from AGENTS.md** (column "Path", relative to `.agents/skills/`)
-3. **Load skill via Read tool:** `Read .agents/skills/<path>`
-   - Do NOT use the Skill tool — it only sees `.claude/commands/`, not `.agents/skills/`
-4. **Hand off context** to loaded skill
-
-**Common Routing Scenarios:**
-
-**Scenario A: New Feature (No Code Yet)**
-```
-User: "Quiero agregar un endpoint de precios"
-Triggers: "nueva feature", "quiero hacer X", "endpoint"
-Match: brainstorming (row 30)
-Action: Read .agents/skills/core/brainstorming/SKILL.md
-
-Brainstorming will:
-  - Gate de diseño obligatorio
-  - Transformar idea en spec aprobada
-  - CERO código hasta aprobación
-```
-
-**Scenario B: Jira Ticket Implementation (No Plan)**
-```
-User: "Implementar ARP-123"
-Triggers: "implementar ticket" (row 62)
-Match: ticket-planner (row 61)
-Action: Read .agents/skills/workflow/ticket-planner/SKILL.md
-
-ticket-planner will:
-  - Planificar Jira con 11-fuentes context
-  - Crear plan en ai-specs/changes/[ticket-id]_[backend|frontend].md
-  - Luego cargar ticket-implementation
-```
-
-**Scenario C: Jira Ticket Implementation (Plan Exists)**
-```
-User: "Implementar ARP-123"
-Check: ai-specs/changes/ARP-123_backend.md exists?
-  - YES → Skip planning, go to implementation
-  - NO → Go to Scenario B
-
-Action: Read .agents/skills/workflow/ticket-implementation/SKILL.md
-
-ticket-implementation will:
-  - Ejecutar plan via 7-hop multihop grounding
-  - Verificación iterativa
-  - Tests + commit
-```
-
-**Scenario D: Codebase Analysis**
-```
-User: "¿Cómo funciona el cálculo de precios?"
-Triggers: "reverse engineer", "analizar codebase" (row 36)
-Match: software-archeologist (row 36)
-Action: Read .agents/skills/software/discovery/software-archeologist/SKILL.md
-
-software-archeologist will:
-  - Ingeniería inversa: execution graph
-  - Call trees, API inventory
-  - Findings ledger
-```
-
-**Scenario E: Backend Implementation**
-```
-User: "Crear endpoint FastAPI para precios"
-Triggers: "FastAPI", "endpoint" (row 39)
-Match: python-senior-backend (row 39)
-Action: Read .agents/skills/backend/python-senior-backend/SKILL.md
-
-python-senior-backend will:
-  - SOLID, DRY, async patterns
-  - JWT/OAuth, rate limiting
-  - Caching, middleware
-```
-
-**Scenario F: Frontend Implementation**
-```
-User: "Crear componente React para precios"
-Triggers: "React", "componente" (row 49)
-Match: senior-frontend (row 49)
-Action: Read .agents/skills/frontend/senior-frontend/SKILL.md
-
-senior-frontend will:
-  - Component optimization
-  - Bundle, accessibility
-  - TypeScript patterns
-```
-
-**Scenario G: Code Review**
-```
-User: "Review mis cambios en feature/ARP-123"
-Triggers: "review PR", "revisar código" (row 43)
-Match: code-reviewer (row 44)
-Action: Read .agents/skills/software/quality/code-reviewer/SKILL.md
-
-code-reviewer will:
-  - Quality/security review
-  - ADR coverage check
-  - Pre-merge validation
-```
-
-**Scenario H: Inquiry About Documentation (Context7)**
-```
-User: "¿Cómo se usa Alembic?"
-Triggers: "docs de librería", "look up API"
-Match: context7 MCP (mcp__context7__resolve-library-id + mcp__context7__query-docs)
-Action: usar mcp__context7 directamente (no hay SKILL.md para esto)
-
-Context7 will:
-  - Buscar docs actualizadas de la librería
-  - Proporcionar ejemplos actualizados
-```
-
-**Scenario I: Architecture Question**
-```
-User: "¿Qué patrón usar para precios?"
-Triggers: "diseño de sistema", "componentes", "boundaries" (row 33)
-Match: architect (row 33)
-Action: Read .agents/skills/software/architecture/architect/SKILL.md
-
-architect will:
-  - Evaluar trade-offs
-  - Escribir ADR si es decisión nueva
-  - Revisar diseño ANTES de codificar
-```
-
-**Scenario J: ADR Required**
-```
-User: "Documentar decisión de arquitectura"
-Triggers: "ADR", "architecture decision record" (row 34)
-Match: adr-writer (row 34)
-Action: Read .agents/skills/software/architecture/adr-writer/SKILL.md
-
-adr-writer will:
-  - Capturar decisión en formato MADR
-  - Inmutables (se superseden, nunca editan)
-```
-
-**Compound Tasks (Multiple Skills):**
-
-From AGENTS.md lines 68-76, when multiple skills apply:
-
-```
-Example: "Migrar stored procedure de precios a FastAPI"
-
-Order of loading (Read each SKILL.md in sequence):
-1. Read .agents/skills/core/brainstorming/SKILL.md            (feature nueva)
-2. Read .agents/skills/software/discovery/software-archeologist/SKILL.md (análisis legacy)
-3. Read .agents/skills/backend/python-senior-backend/SKILL.md (FastAPI implementation)
-4. Read .agents/skills/backend/python-testing/SKILL.md        (tests)
-5. Read .agents/skills/quality/tdd-workflow/SKILL.md          (TDD approach)
-6. Read .agents/skills/core/learning-protocol/SKILL.md        (closing session)
-```
-
-**Domain-Specific Routing:**
-
-| Domain | Keywords | Skills (paths en .agents/skills/) |
-|--------|----------|-----------------------------------|
-| **Pricing** | "precios", "cascade", "descuento" | infrastructure/database-expert, backend/python-senior-backend |
-| **Auth/Security** | "auth", "JWT", "OAuth", "seguridad" | security/security-expert, backend/python-senior-backend |
-| **Database** | "SQL", "query", "migración", "AlloyDB" | infrastructure/database-expert |
-| **Frontend** | "React", "Next.js", "UI", "componente" | frontend/senior-frontend, frontend/nextjs |
-| **Testing** | "test", "pytest", "coverage" | backend/python-testing, quality/tdd-workflow |
-| **CI/CD** | "deploy", "pipeline", "Docker" | infrastructure/gitops-expert |
-| **Legacy SQL** | "stored procedure", "SQL Server" | archaeology/squit, sql/deacero-tech-dos |
-
-**Skill Loading — Método correcto:**
-
-```
-Read .agents/skills/<path-from-AGENTS.md>
-```
-
-**Ejemplos:**
-- `Read .agents/skills/workflow/ticket-planner/SKILL.md`
-- `Read .agents/skills/backend/python-senior-backend/SKILL.md`
-- `Read .agents/skills/software/discovery/software-archeologist/SKILL.md`
-- `Read .agents/skills/software/quality/code-reviewer/SKILL.md`
-
-> El Skill tool (`/skill <nombre>`) solo reconoce archivos en `.claude/commands/`.
-> Los agent skills en `.agents/skills/` se cargan SIEMPRE con el Read tool.
-
-**NEVER use enhanced commands directly** - let skills orchestrate themselves.
+**Compound tasks** (varias skills en secuencia, ej. "migrar SP legacy a FastAPI"): lee cada
+`SKILL.md` relevante en el orden en que se necesitan — discovery → implementación → testing —
+en vez de intentar resolverlo con un solo skill.
 
 ### Step 4: Execute with Validation
 
@@ -598,12 +240,9 @@ Blocking Rule: [rule]
 2. [Step 2]
 ```
 
-### Example Outputs (Using AGENTS.md Routing)
+### Example Output (caso completo: no hay plan, usuario quiere implementar)
 
-**Scenario 1: No plan, wants to implement**
 ```
-📚 Routing Table Loaded: 45 skills from AGENTS.md (lines 22-66)
-
 🔍 Intent Detection: IMPLEMENTATION
 📋 Ticket: ARP-1
 🎯 Domain: BACKEND
@@ -611,10 +250,10 @@ Blocking Rule: [rule]
 
 ⚠️ No implementation plan found for ARP-1
 
-🔍 Analyzing triggers: "implementar" → ticket-planner (row 61)
+🔍 Analizando triggers: "implementar" → ticket-planner
 📍 Path: workflow/ticket-planner/SKILL.md
 
-✅ Creating plan first...
+✅ Creando plan primero...
 🔀 Read .agents/skills/workflow/ticket-planner/SKILL.md
 
 ─────────────────────────────
@@ -631,149 +270,10 @@ Blocking Rule: [rule]
 ─────────────────────────────
 ```
 
-**Scenario 2: Plan exists, wants to implement**
-```
-📚 Routing Table Loaded: 45 skills from AGENTS.md (lines 22-66)
-
-🔍 Intent Detection: IMPLEMENTATION
-📋 Ticket: ARP-1
-🎯 Domain: BACKEND
-📍 Current State: PLANNED
-
-✅ Found plan: ai-specs/changes/ARP-1_backend.md
-
-🔍 Analyzing triggers: "implementar" → ticket-implementation (row 62)
-📍 Path: workflow/ticket-implementation/SKILL.md
-
-🔀 Read .agents/skills/workflow/ticket-implementation/SKILL.md
-
-─────────────────────────────
-[Skill: ticket-implementation activo]
-─────────────────────────────
-```
-
-**Scenario 3: Inquiry about codebase**
-```
-📚 Routing Table Loaded: 45 skills from AGENTS.md (lines 22-66)
-
-🔍 Intent Detection: INQUIRY
-❓ Question: "¿Cómo funciona el cálculo de precios?"
-
-🔍 Analyzing triggers:
-  - "¿cómo funciona" → inquiry pattern
-  - "cálculo de precios" → domain-specific
-  - Match: software-archeologist (row 36)
-  - Triggers: "reverse engineer", "analizar codebase"
-  - Path: software/discovery/software-archeologist/SKILL.md
-
-🔀 Read .agents/skills/software/discovery/software-archeologist/SKILL.md
-
-─────────────────────────────
-[Skill: software-archeologist activo]
-─────────────────────────────
-
-📊 Gathering context...
-- Execution graph analysis
-- Call tree mapping
-- API inventory
-- Findings ledger: docs/findings/FINDINGS.md
-
-✅ Analysis complete: [detailed findings]
-```
-
-**Scenario 4: New feature (ambiguous)**
-```
-📚 Routing Table Loaded: 45 skills from AGENTS.md (lines 22-66)
-
-🔍 Intent Detection: DESIGN
-❓ Request: "Quiero agregar una funcionalidad de precios"
-
-🔍 Analyzing triggers:
-  - "quiero hacer X" → brainstorming (row 30)
-  - "nueva feature" → brainstorming (row 30)
-  - Match: brainstorming
-  - Path: core/brainstorming/SKILL.md
-
-🔀 Read .agents/skills/core/brainstorming/SKILL.md
-
-─────────────────────────────
-[Skill: brainstorming activo]
-─────────────────────────────
-
-⚠️ DESIGN GATE ACTIVE
-─────────────────────
-
-📌 Brainstorming mode: NO code until design is approved
-
-1. ✅ Exploring requirements...
-2. ✅ Analyzing constraints...
-3. ✅ Proposing solutions...
-4. ⏳ Awaiting user approval...
-
-🚫 CODE BLOCKED: Design must be approved first
-```
-
-**Scenario 5: Backend FastAPI implementation**
-```
-📚 Routing Table Loaded: 45 skills from AGENTS.md (lines 22-66)
-
-🔍 Intent Detection: IMPLEMENTATION
-💻 Technology: FastAPI / Python
-🎯 Domain: BACKEND
-
-🔍 Analyzing triggers:
-  - "FastAPI" → python-senior-backend (row 39)
-  - "Python service" → python-senior-backend (row 39)
-  - Match: python-senior-backend
-  - Path: backend/python-senior-backend/SKILL.md
-
-🔀 Read .agents/skills/backend/python-senior-backend/SKILL.md
-
-─────────────────────────────
-[Skill: python-senior-backend activo]
-─────────────────────────────
-
-🐍 Python/FastAPI Expert Mode Active
-─────────────────────────────
-
-✓ SOLID principles
-✓ Async patterns
-✓ JWT/OAuth
-✓ Rate limiting
-✓ Caching strategies
-✓ Middleware design
-```
-
-**Scenario 6: Code review request**
-```
-📚 Routing Table Loaded: 45 skills from AGENTS.md (lines 22-66)
-
-🔍 Intent Detection: REVIEW
-📝 Scope: PR / code changes
-
-🔍 Analyzing triggers:
-  - "review PR" → code-review (row 43)
-  - "antes de merge" → code-reviewer (row 44)
-  - Match: code-reviewer (quality/security focused)
-  - Path: software/quality/code-reviewer/SKILL.md
-
-🔀 Read .agents/skills/software/quality/code-reviewer/SKILL.md
-
-─────────────────────────────
-[Skill: code-reviewer activo]
-─────────────────────────────
-
-🔍 Code Review Active
-─────────────────────
-
-✓ Quality check
-✓ Security analysis
-✓ ADR coverage verification
-✓ Correctness validation
-✓ Performance review
-
-📊 Review Report: [findings and recommendations]
-```
+Si el plan ya existía, el paso de `ticket-planner` se omite y se va directo a
+`ticket-implementation`. El mismo patrón (detectar trigger → resolver path en AGENTS.md →
+`Read` el SKILL.md correspondiente) aplica igual para inquiry (→ software-archeologist),
+diseño ambiguo (→ brainstorming), review (→ code-reviewer), o cualquier otra fila de la tabla.
 
 ## Notes
 
@@ -785,62 +285,3 @@ Blocking Rule: [rule]
 - The skill is **state-aware** - tracks ticket progression
 - Intent detection uses **pattern matching** on user requests
 - Routing is **deterministic** - same input always routes to same workflow
-
-## Enhanced Commands vs Skills
-
-### Why Route to Skills Directly?
-
-This workflow-coordinator routes to `/skill <name>` instead of enhanced commands (e.g., `/plan-backend-ticket-enhanced`) for three key reasons:
-
-**1. Composability**
-- Skills are atomic, reusable capabilities
-- Enhanced commands are thin orchestrators that combine skills
-- Direct skill routing enables flexible composition
-
-**2. Transparency**
-- Skills contain actual expertise and instructions
-- Enhanced commands are just wrappers around skills
-- Routing directly to skills makes flow explicit
-
-**3. Flexibility**
-- Skills can be combined dynamically
-- Enhanced commands have fixed orchestration patterns
-- workflow-coordinator can make routing decisions based on AGENTS.md
-
-### Enhanced Commands as Thin Orchestrators
-
-Enhanced commands in `code_standards/ai-specs/.commands/` work like this:
-
-```
-/plan-backend-ticket-enhanced
-    ↓ (orchestrates)
-ticket-planner + backend-developer skills
-    ↓ (create)
-Implementation plan + technical design
-```
-
-workflow-coordinator bypasses the orchestrator and routes directly:
-
-```
-User request → workflow-coordinator → /skill <name>
-```
-
-### Mapping: Enhanced Commands → Skills
-
-| Enhanced Command | Skills Used | Direct Route (Read tool) |
-|-----------------|-------------|--------------------------|
-| `plan-backend-ticket-enhanced` | ticket-planner + backend-developer | `Read .agents/skills/workflow/ticket-planner/SKILL.md` |
-| `develop-backend-enhanced` | ticket-implementation + python-senior-backend | `Read .agents/skills/workflow/ticket-implementation/SKILL.md` |
-| `plan-frontend-ticket-enhanced` | ticket-planner + frontend-developer | `Read .agents/skills/workflow/ticket-planner/SKILL.md` |
-| `develop-frontend-enhanced` | ticket-implementation + senior-frontend | `Read .agents/skills/workflow/ticket-implementation/SKILL.md` |
-| `enforce-workflow` | workflow-coordinator | Skill tool: `/skill workflow-coordinator` (existe en `.claude/commands/`) |
-
-**When to use enhanced commands:**
-- Complex workflows that require multiple skills in sequence
-- Pre-defined orchestration patterns
-- When you need the enhanced command's specific workflow
-
-**When workflow-coordinator routes directly:**
-- Simple skill activation based on intent
-- When AGENTS.md routing table directly maps to a skill
-- User requests focused on single domain expertise

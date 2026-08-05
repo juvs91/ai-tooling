@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # scripts/gitops-init.sh
+# distributable: true
 #
 # Bootstrap GitOps Monorepo para un proyecto existente.
 # Copia release.sh, genera .pre-commit-config.yaml según stack detectado,
@@ -130,25 +131,25 @@ git -C "$TARGET_DIR" rev-parse --git-dir &>/dev/null \
 [[ -f "$TEMPLATES_DIR/.pre-commit-config.yaml.template" ]] \
   || die "no encontré templates/gitops/.pre-commit-config.yaml.template en $REPO_ROOT"
 
-# Genera el patrón del ADR gate según estructura del proyecto
-generate_adr_pattern() {
+# Genera las reglas del ADR gate según estructura del proyecto, en el formato
+# "PREFIJO EXTENSION_REGEX" que leen tanto .claude/hooks/adr-gate.sh (Claude Code)
+# como tools/check_adr_gate.py (git pre-commit) — se escriben a .claude/adr-gate.conf,
+# la única fuente de verdad compartida por ambas capas (ver ADR-0035).
+generate_adr_gate_rules() {
   local target="$1"
-  local patterns=()
+  local rules=()
 
-  [[ -d "$target/vendor" ]]   && patterns+=("vendor/.*\\.py")
-  [[ -d "$target/src" ]]      && patterns+=("src/.*\\.py")
-  [[ -d "$target/projects" ]] && patterns+=("projects/.*\\.(py|ts|go)")
-  [[ -d "$target/.agents" ]]  && patterns+=("\\.agents/skills/.*\\.md")
+  [[ -d "$target/vendor" ]]   && rules+=("vendor/ \\.py\$")
+  [[ -d "$target/src" ]]      && rules+=("src/ \\.py\$")
+  [[ -d "$target/projects" ]] && rules+=("projects/ \\.(py|ts|go)\$")
+  [[ -d "$target/.agents" ]]  && rules+=(".agents/skills/ \\.md\$")
 
-  if [[ ${#patterns[@]} -eq 0 ]]; then
-    echo "(?x)^(\\.agents/skills/.*\\.md)$"
+  if [[ ${#rules[@]} -eq 0 ]]; then
+    echo ".agents/skills/ \\.md\$"
     return
   fi
 
-  local joined
-  joined=$(printf "%s|" "${patterns[@]}")
-  joined="${joined%|}"
-  echo "(?x)^(${joined})$"
+  printf "%s\n" "${rules[@]}"
 }
 
 # ── Ejecución ──────────────────────────────────────────────────────────────
@@ -261,12 +262,32 @@ else
   warn "CODEOWNERS creado desde template — editar @equipo-* con usuarios/grupos reales"
 fi
 
-# ── PASO 4: .pre-commit-config.yaml ────────────────────────────────────────
+# ── PASO 4: .claude/adr-gate.conf + .pre-commit-config.yaml ────────────────
 
 section "4/5 .pre-commit-config.yaml"
 
+ADR_GATE_CONF_DST="$TARGET_DIR/.claude/adr-gate.conf"
+
+if [[ -f "$ADR_GATE_CONF_DST" ]]; then
+  warn ".claude/adr-gate.conf ya existe — no sobreescribir"
+elif $DRY_RUN; then
+  dry "write → $ADR_GATE_CONF_DST"
+  generate_adr_gate_rules "$TARGET_DIR" | while IFS= read -r rule; do dry "  $rule"; done
+else
+  mkdir -p "$(dirname "$ADR_GATE_CONF_DST")"
+  {
+    cat <<CONF
+# .claude/adr-gate.conf — reglas del ADR gate, leídas por .claude/hooks/adr-gate.sh
+# (Claude Code) y tools/check_adr_gate.py (git pre-commit) — única fuente de verdad.
+# Generado por scripts/gitops-init.sh — $(date '+%Y-%m-%d')
+# Formato: PREFIJO [EXTENSION_REGEX] por línea. '#' = comentario.
+CONF
+    generate_adr_gate_rules "$TARGET_DIR"
+  } > "$ADR_GATE_CONF_DST"
+  ok ".claude/adr-gate.conf generado"
+fi
+
 PRECOMMIT_DST="$TARGET_DIR/.pre-commit-config.yaml"
-ADR_PATTERN=$(generate_adr_pattern "$TARGET_DIR")
 
 if [[ -f "$PRECOMMIT_DST" ]]; then
   warn ".pre-commit-config.yaml ya existe — no sobreescribir"
@@ -275,7 +296,6 @@ elif $DRY_RUN; then
   dry "write → $PRECOMMIT_DST"
   dry "  trunk:       $GITOPS_TRUNK"
   dry "  stack:       $STACKS"
-  dry "  adr pattern: $ADR_PATTERN"
 else
   # Generación directa con heredoc — evita problemas de sed con multilinea en macOS
   {
@@ -378,6 +398,7 @@ GOLANG
     cat <<COMMON
 
   # ── ADR gate + Conventional Commits ─────────────────────────────────────
+  # Fuente de verdad de rutas guardadas: .claude/adr-gate.conf (generado arriba).
   - repo: local
     hooks:
       - id: adr-gate
@@ -385,8 +406,7 @@ GOLANG
         entry: python tools/check_adr_gate.py
         language: system
         pass_filenames: false
-        always_run: false
-        files: '${ADR_PATTERN}'
+        always_run: true
 
       - id: conventional-commit
         name: conventional commit
@@ -452,6 +472,7 @@ echo ""
 [[ -f "$TARGET_DIR/tools/check_adr_gate.py" ]]      && echo "  ✓ tools/check_adr_gate.py"
 [[ -f "$TARGET_DIR/tools/install_hooks.sh" ]]       && echo "  ✓ tools/install_hooks.sh"
 [[ -f "$TARGET_DIR/CODEOWNERS" ]]                   && echo "  ✓ CODEOWNERS"
+[[ -f "$TARGET_DIR/.claude/adr-gate.conf" ]]         && echo "  ✓ .claude/adr-gate.conf"
 [[ -f "$TARGET_DIR/.pre-commit-config.yaml" ]]      && echo "  ✓ .pre-commit-config.yaml"
 echo ""
 echo "  Próximos pasos:"

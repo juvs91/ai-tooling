@@ -12,10 +12,6 @@
       "command": "bash",
       "args": ["./mcp-scripts/atlassian-mcp.sh", "bitbucket"]
     },
-    "squit": {
-      "command": "bash",
-      "args": ["./mcp-scripts/squit-mcp.sh"]
-    },
     "cloudsql": {
       "command": "bash",
       "args": ["./scripts/cloudsql-mcp.sh"]

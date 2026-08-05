@@ -34,7 +34,10 @@ if [[ -f ".git/COMMIT_EDITMSG" ]]; then
   COMMIT_MSG=$(cat ".git/COMMIT_EDITMSG")
 fi
 
-python tools/check_adr_gate.py \
+PYTHON_BIN="python3"
+command -v python3 >/dev/null 2>&1 || PYTHON_BIN="python"
+
+"$PYTHON_BIN" tools/check_adr_gate.py \
   --changed-files "$STAGED" \
   --new-files     "$NEW_FILES" \
   --commit-message "$COMMIT_MSG"'
@@ -53,7 +56,8 @@ if [[ -f "$PRE_COMMIT" ]]; then
       echo 'STAGED=$(git diff --cached --name-only 2>/dev/null || true)'
       echo 'NEW_FILES=$(git diff --cached --name-only --diff-filter=A 2>/dev/null || true)'
       echo 'COMMIT_MSG=$(cat .git/COMMIT_EDITMSG 2>/dev/null || true)'
-      echo 'python tools/check_adr_gate.py --changed-files "$STAGED" --new-files "$NEW_FILES" --commit-message "$COMMIT_MSG"'
+      echo 'PYTHON_BIN="python3"; command -v python3 >/dev/null 2>&1 || PYTHON_BIN="python"'
+      echo '"$PYTHON_BIN" tools/check_adr_gate.py --changed-files "$STAGED" --new-files "$NEW_FILES" --commit-message "$COMMIT_MSG"'
       echo "# --- END ai-tooling:adr-gate ---"
     } >> "$PRE_COMMIT"
     echo "[ai-tooling:hooks] Agregado al hook existente: $PRE_COMMIT"

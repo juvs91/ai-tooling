@@ -129,11 +129,14 @@ What to do: [specific next action]
 
 ---
 
-## UX Patterns for This Project
+## UX Patterns — Example: System Tray Application
+
+No aplica a `ai-tooling` (que no tiene UI de escritorio) — ejemplo genérico heredado, útil como
+referencia si algún proyecto consumidor de este skill sí construye una app de este tipo:
 
 **System tray application patterns:**
 - Tray icon should change to reflect state (locked = padlock closed, open = padlock open)
-- Tooltip on hover: "Keystone — 2 vaults open" or "Keystone — no card"
+- Tooltip on hover: "AppName — 2 vaults open" or "AppName — no card"
 - Right-click menu: Show / Lock All / Quit
 
 **Vault list patterns:**

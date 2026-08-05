@@ -2,10 +2,143 @@
 > Aprendizajes iterativos del proyecto. Actualizar despues de cada sesion.
 
 ## Ultima actualizacion
-- Fecha: 2026-07-22
-- Por: claude-sonnet-4-6 + jeguzman
+- Fecha: 2026-08-03
+- Por: claude-sonnet-5 + jeguzman
 
 ---
+
+## Session 2026-08-03: State-Assertion Verification Framework (ADR-0036/0037/0038/0039/0040)
+
+**Contexto:** F-001 (`docs/findings/FINDINGS.md`) documentaba a Kimi K2 fallando en
+orquestación de tools en espacios de búsqueda amplios (no reconoce deferred tools, acepta
+aserciones textuales de plan-mode sin verificar). 6 direcciones de solución bocetadas, sin
+decidir. Diseño hecho en plan mode con dos agentes Plan en paralelo (perspectiva "cheap-fix-first
+por fases" vs "framework unificado desde el día uno") + síntesis con el usuario.
+
+**Decisión de arquitectura:** framework unificado (`llm/state_assertion.py`) — un core puro
+(`AssertionFinding`, `RULES_REGISTRY`, `evaluate_rules(phase, ...)`) + dos transformers delgados
+(`state_assertion_request.py`/`state_assertion_response.py`) que se registran en
+`build_request_pipeline`/`build_response_pipeline` (`proxy/proxy.py`). Las reglas concretas viven
+en `llm/state_assertion_rules/*.py` y se auto-registran al importarse (patrón plugin) — un solo
+punto de activación (`import llm.state_assertion_rules` en `proxy.py`).
+
+**5 ADRs, en este orden de implementación:**
+1. **ADR-0037** (independiente, sin depender del framework): para modelos frágiles
+   (`is_fragile_orchestration_model`, env `FRAGILE_ORCHESTRATION_MODELS`, default "kimi"),
+   `EnterPlanMode`/`ExitPlanMode` nunca se difieren — Step 4b nuevo en `deferred_tools.py`
+   garantiza su presencia incondicional, exento del strip final de ADR-0012.
+2. **ADR-0036**: el core, con `RULES_REGISTRY` vacío (plomería pura, cero cambio de
+   comportamiento hasta que se registra la primera regla).
+3. **ADR-0038** (`deferred_denial`): detecta cuando el modelo niega tener una tool que el proxy
+   sabe que existe (catálogo estático + cache de sesión + regex `mcp__`), inyecta nudge de
+   `ToolSearch`.
+4. **ADR-0039** (`no_progress`): **no reimplementa nada** — descubrí que
+   `llm/transformers/guardrail.py` YA tiene `_detect_consistently_failing_tools`/
+   `_detect_stuck_tool_calls`, agnósticas de familia de tool (no limitadas a Read, a diferencia
+   de H16 en `utils/quality.py`, que sí lo es y es lo que el finding original describía). La
+   regla solo espeja esos hallazgos al audit trail del framework con `severity="log"`.
+5. **ADR-0040** (`exploration_grounding`): mismo patrón de verificación previa — descubrí que
+   la dirección 4 (checkpoint de orientación forzado) YA existe (`intent_classifier.py` Override
+   D + `intent_enforcement.py` PLAN MODE NUDGE). Solo implementé la dirección 3 (chequeo de
+   solapamiento de tokens entre el razonamiento de la respuesta y el contenido real leído del
+   archivo editado — cierra el gap "binario y topic-blind" que ADR-0033 admite explícitamente).
+
+**Corrección real durante implementación (no en el diseño original):**
+`grounding_validator.py` llama `ensure_system_note(ctx, ...)` (pasando el `TransformContext`, no
+el `request`) para los nudges de completion/generality-claims de ADR-0031/0033 —
+`TransformContext` no tiene atributo `system`, así que esa llamada es un no-op documentado (crea
+un atributo que nada lee). El canal real que SÍ funciona es `ctx.grounding_issues`, que
+`quality_refinement.py` consume para armar el feedback de re-request. Los transformers nuevos
+usan ese canal real, no repiten el no-op. No se arregló el bug preexistente (fuera de alcance).
+
+**Severity como control de comportamiento del shell:** `"log"` = solo registrar en el audit
+trail (algo más ya actuó, ej. `GuardrailTransformer`); cualquier otro valor = inyectar nudge real
+(`ensure_system_note`/`ctx.grounding_issues`). Sin este gate, ADR-0039 habría duplicado el nudge
+que `GuardrailTransformer` ya inyecta para el mismo fallo.
+
+**Verificado:** suite completa sin regresión en cada paso — 1216 (ADR-0037) → 1243 (ADR-0036) →
+1259 (ADR-0038) → 1272 (ADR-0039) → 1282 (ADR-0040). 66 tests nuevos en total para todo el
+framework + 3 reglas.
+
+**Principio (aplica dos veces en esta sesión):** antes de escribir una regla nueva para un
+"gap" descrito en un finding/triage, verificar si el mecanismo ya existe en otro archivo del
+pipeline con otro nombre — el finding original describía el gap correctamente pero no siempre
+apuntaba al lugar correcto del código (ej. "loop-guard limitado a Read" describía H16 en
+`quality.py`, no `guardrail.py`, que ya era agnóstico). Reimplementar sin verificar primero
+habría creado un segundo mecanismo paralelo y potencialmente inconsistente sobre la misma
+historia de `tool_result`.
+
+**Fix post-review crítico (mismo día, tras pregunta directa del usuario sobre riesgo):**
+`evaluate_rules()` (`llm/state_assertion.py`) NO tenía aislamiento de fallos por regla — un
+`rule.evaluate()` que lanzara excepción se propagaba sin atenuar. Confirmado con trace completo:
+`Pipeline.process()` (`llm/pipeline.py`) loguea y **relanza** cualquier excepción de un
+transformer; en el camino no-streaming (donde corre `StateAssertionResponseTransformer`) NO hay
+fallback intermedio — la excepción sube hasta el handler genérico de `server.py`, que la
+convierte en un HTTP error, **descartando la respuesta real que el modelo ya había generado**
+para ese turno. No es solo "se pierde el nudge", es "el turno completo falla". Fix: cada llamada
+a `rule.evaluate()` dentro del loop de `evaluate_rules()` ahora está en su propio try/except —
+una regla que revienta se loguea y se saltea, sin afectar a las demás ni al request. Verificado
+con `TestEvaluateRulesFaultIsolation` (4 tests: no propaga, no bloquea otras reglas, orden-
+independiente, distintos tipos de excepción).
+
+**Limpieza tras el mismo review:** `count_recent_assertion_events` (helper de escalación en
+`llm/session/state_assertion_cache.py`) se agregó especulativamente en ADR-0036 pero ninguna de
+las 3 reglas reales (`deferred_denial`/`no_progress`/`exploration_grounding`) lo llamaba nunca —
+se re-exportaba en `compressor.py` sin consumidor real. Eliminado (YAGNI): si una regla futura
+necesita contar ocurrencias previas, puede filtrar `session_snapshot["assertion_events"]`
+directamente (ya se lo pasan los shells), sin necesitar una función async nueva.
+
+**Principio:** cuando alguien pregunta "¿esto es correcto?" sobre código que "se ve" sin usar,
+verificar con grep exhaustivo ANTES de responder — no asumir que un import/re-export tiene un
+propósito oculto. En este caso la observación era 100% correcta: era código muerto, no una
+abstracción con consumidor futuro documentado que solo no se veía a simple vista.
+
+**Segundo fix post-review (mismo día): registro de reglas por side-effect → explícito.**
+El usuario notó que `DeferredDenialRule`/`NoProgressRule`/`ExplorationGroundingRule` solo se
+instancian en un lugar de producción: la última línea de su propio archivo
+(`RULES_REGISTRY.append(XRule())`, efecto de import). Preocupación válida: (1) si la cadena de
+import se rompe (ej. alguien borra `import llm.state_assertion_rules` de `proxy.py`),
+`RULES_REGISTRY` queda vacío para siempre sin ningún error ni log — falla 100% silenciosa; (2)
+"qué reglas están activas" no era grep-able desde un solo lugar. Fix: `llm/state_assertion_rules/
+__init__.py` ahora expone `ACTIVE_RULE_CLASSES` (tupla declarativa, única fuente de verdad) +
+`register_rules()` (call site único y explícito, invocado por `proxy.py`). Las reglas ya no
+tocan `RULES_REGISTRY` en absoluto. `register_rules()` es idempotente (limpia antes de
+reconstruir) y NO deja que una regla rota tumbe el arranque completo del proxy — aísla el fallo
+de construcción por clase (log ERROR + sigue con las demás), y loguea WARNING si el conteo final
+no matchea lo esperado, o INFO con los IDs exactos si todo salió bien. Verificado con un boot
+real (`python -c "import proxy.proxy"`): loguea `registered 3 rule(s): [...]` — ya no es un
+supuesto, es observable.
+
+**Principio:** "estado global mutado por side-effect de import" es un patrón de plugin-registry
+común pero tiene un costo real de auditabilidad — cuando alguien lo señala como preocupante, la
+respuesta correcta no es defender el patrón, es hacerlo explícito (una lista declarativa + una
+función de activación con logging, en vez de imports dispersos con `# noqa: F401`).
+
+**Tercer fix, mismo hilo (el usuario empujó un paso más): de "explícito" a "sin global en
+absoluto".** El fix anterior (`register_rules()` + `ACTIVE_RULE_CLASSES`) resolvió la falla
+silenciosa y la falta de un lugar único para ver qué reglas están activas, pero `RULES_REGISTRY`
+seguía siendo una lista mutable a nivel de módulo que `evaluate_rules()` leía implícitamente —
+cualquier test o código futuro podía importarla y mutarla. Refactor a dependency injection
+completa: `RULES_REGISTRY` se eliminó por completo. `build_active_rules()` (renombrado de
+`register_rules()`) ahora es una factory pura que retorna una lista nueva sin tocar nada
+compartido. `evaluate_rules()` recibe `rules` como parámetro explícito. Los dos transformers
+(`StateAssertionRequestTransformer`/`StateAssertionResponseTransformer`) ganaron constructor
+(`__init__(self, rules)`). `proxy.py` construye la lista UNA VEZ a nivel de módulo
+(`_STATE_ASSERTION_RULES = build_active_rules()`) y la pasa al construir ambos pipelines —
+importante detalle descubierto al investigar: `build_response_pipeline()` NO está cacheada, se
+reconstruye en CADA request (`_run_response_pipeline` es "el call site canónico compartido",
+sin cache) — pasar la MISMA lista de reglas (no reconstruirla) evita instanciar las 3 reglas en
+cada request. Verificado con boot real: `request_transformer._rules is _STATE_ASSERTION_RULES`
+→ `True` (identidad, no solo igualdad). Efecto colateral positivo: se eliminó el fixture
+snapshot/clear/restore de `RULES_REGISTRY` de TODOS los archivos de test que lo usaban — ahora
+cada test arma su propia lista local, cero estado compartido que limpiar.
+
+**Principio:** cuando alguien empuja de "explícito pero sigue siendo un global" a "sin global,
+inyección de dependencias real", vale la pena seguir — no es sobre-ingeniería, es remover una
+categoría entera de fixtures de limpieza y hacer que las funciones sean puras respecto a sus
+inputs. Antes de cambiar la firma de una función/constructor, grep todos los call sites primero
+(en este caso: 2 en producción, ~20 en tests) para dimensionar el refactor con precisión, no a
+ojo.
 
 ## Session 2026-03-05: MCP Servers Configuration and Validation
 
@@ -734,3 +867,79 @@ OTRO transformer del mismo pipeline (`deferred_tools.py`), y un transformer herm
 (`intent_classifier.py`) implementa la MISMA necesidad sin ese fallback, es una señal de que el
 fallback debería vivir en un solo lugar compartido — la ausencia no es necesariamente
 intencional, puede ser simplemente que nadie lo propagó al segundo lugar que lo necesitaba.
+
+## Session 2026-08-04: skills de dominio, `Skill` vs `Agent`, y una sobreescritura silenciosa real (ADR-0043)
+
+Hilo largo, disparado por comparar el patrón de skills de wpc-backend (`.claude/agents` symlink)
+contra el de `ai-tooling`. Ver ADR-0043 para el detalle completo — aquí solo los aprendizajes
+reusables.
+
+### [P011] El discovery de `Skill`/`Agent` es asíncrono y diferido, NO fijo al inicio de sesión
+
+Se probó crear symlinks nuevos en `.claude/agents/` y `.claude/skills/` a mitad de sesión.
+Invocaciones inmediatas fallaron ("Unknown skill"/"Agent type not found"). Minutos después, sin
+ninguna acción explícita, aparecieron system-reminders no solicitados ("New agent types are now
+available...") y las mismas invocaciones funcionaron — `Agent` se refrescó primero, `Skill` unos
+minutos más tarde. **Implicación:** no asumir que un archivo nuevo en esas rutas está disponible
+de inmediato, ni que si falla la primera vez seguirá fallando — puede aparecer solo, sin reiniciar
+sesión.
+
+### [P012] `allowed-tools:` es un grant de auto-aprobación, NO una allowlist — en ningún contexto
+
+Se confirmó empíricamente (subagente real reportando sus tools disponibles) que un subagent con
+`allowed-tools:` en su frontmatter (campo pensado para el tool `Skill`) hereda TODAS las tools sin
+restricción — el campo correcto para subagents es `tools:` (nombre distinto). Y releyendo la doc:
+incluso para `Skill`, `allowed-tools:` solo evita el prompt de permiso ese turno, no bloquea nada
+más. **Ninguna de las dos rutas da restricción real de tools sin sacrificar interactividad** (solo
+`Agent`-subagent con `tools:` correcto la da, a costa de aislamiento total de contexto).
+
+### [P013] `Read` de un SKILL.md no implica adopción de persona — ni con mandato explícito implica obediencia ciega
+
+Confirmado dos veces con subagentes sin sesgo (fresh, sin memoria de la conversación): sin mandato
+explícito, un `SKILL.md` leído se trata como "referencia de fondo". Con un mandato explícito
+agregado al wrapper de `workflow-coordinator` ("tras el Read, adopta esto como protocolo
+vinculante"), el agente sí se engancha en serio con el contenido — pero **no obedece
+literalmente** partes del protocolo que chocan con la realidad verificable del repo (ej. un
+"Architect Agent" que no existe, un push a un repo inexistente). Esto es el resultado CORRECTO,
+no una falla del fix: el mandato debe lograr "no ignores esto", no "obedece ciegamente aunque esté
+roto".
+
+### [P014] El mandato de auto-carga de `CLAUDE.md` probablemente NO aplica a subagentes vía `Agent` tool
+
+Dos pruebas con subagentes `general-purpose` frescos (sin instrucción explícita) nunca invocaron
+`Skill(workflow-coordinator)` — resolvieron la tarea leyendo `AGENTS.md`/`SKILL.md` por su cuenta.
+El hook que dispara el mandato (`skill-autoload.sh`, `UserPromptSubmit`) parece limitarse a la
+sesión interactiva principal. No hay forma limpia de verificar/forzar esto desde dentro de una
+sesión ya iniciada — límite conocido, no resuelto.
+
+### [P015] `sync_skills.sh` (hook `UserPromptSubmit`, throttle ~24h) puede sobreescribir ediciones locales sin commitear — pasó de verdad, en vivo
+
+A mitad de esta sesión, sin ninguna acción explícita, `.agents/.last_sync` se actualizó solo y
+**sobreescribió 5 archivos ya corregidos** en `.agents/skills/` con el contenido cacheado de
+`.agents/_repo` (que refleja el último estado pusheado a GitHub — rama `main`, no el working tree
+local). No hay ningún aviso al usuario cuando esto pasa — solo cambia el timestamp de
+`.last_sync`. **Mitigación práctica:** commitear ediciones a `.agents/skills/` pronto, no dejarlas
+abiertas en sesiones largas. Verificado que `.agents/_repo` (clon separado, remote propio
+`github.com:juvs91/ai-tooling.git`, tracking rama `main`) está correctamente configurado — el
+riesgo es el throttle silencioso, no una mala configuración del sync.
+
+### [P016] `adr-gate.sh` bypaseaba TODO si existía *cualquier* ADR nuevo sin commitear, sin verificar relevancia
+
+El check de "¿hay un ADR staged?" solo miraba si existía algún `.md` nuevo en `docs/adr/`, no si
+mencionaba el prefijo guardado que disparó el gate. Con 9 ADRs de trabajo previo sin relación ya
+presentes, el gate quedaba abierto para cualquier edición a `vendor/`/`.agents/skills/`. Fix:
+exigir que al menos un ADR nuevo mencione el prefijo guardado (`grep -qF -- "$GUARDED_REASON"`).
+Se extendió además el guard a `.claude/agents/` y `.claude/skills/` — un archivo nuevo ahí registra
+un subagent/skill real (ver P011) sin pasar por `workflow-coordinator`.
+
+### Nota histórica: "deagentic"/"Keystone" no eran referencias externas — eran nombres viejos sin renombrar
+
+`git log --all --grep="deagentic"` encontró el commit real
+`feat: rename cornerstone→ai-tooling in all skills + sync_skills local_path` (2026-07-01) — este
+proyecto se llamó `cornerstone`/`deagentic` antes de renombrarse a `ai-tooling`. Ese rename quedó
+incompleto en 4 archivos (`tool-writer`, `learning-protocol` + su eval fixture, `gitops-expert`) y
+"Keystone" (mayúscula, proyecto NFC de ejemplo del autor original de la plantilla) quedó sin
+genericizar en otros 4 (`ux-expert`, `bdd-writer`, `unknown-domain-protocol`, `adr-writer`,
+`database-expert`). **Principio:** antes de asumir que una referencia a un repo/proyecto
+desconocido es "inventada", buscar en `git log --all --grep` — puede ser un rename incompleto, no
+una fabricación.

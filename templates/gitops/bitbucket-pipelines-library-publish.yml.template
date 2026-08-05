@@ -9,10 +9,12 @@
 #   GCP_DEPLOY_SA — sa-name@gcp-project.iam.gserviceaccount.com
 #   GCP_PROJECT   — gcp-project-id
 #
-# CONVENCIÓN DE TAGS:
-#   python/v1.2.3     → publica python/<nombre> con versión 1.2.3
-#   typescript/v1.2.3 → publica typescript/<nombre> con versión 1.2.3
-#   go/v1.2.3         → publica go/<nombre> con versión 1.2.3
+# CONVENCIÓN DE TAGS — <proyecto>@<version>, igual que `release.sh tag` (ADR-0007):
+#   python-auth@1.2.3     → publica python/<nombre> con versión 1.2.3
+#   typescript-auth@1.2.3 → publica typescript/<nombre> con versión 1.2.3
+#   go-auth@1.2.3         → publica go/<nombre> con versión 1.2.3
+# Renombra "auth" por el nombre real de cada librería (debe coincidir con el nombre de
+# proyecto usado en GITOPS_PROJECT_MAP / `release.sh bump|tag <proyecto> ...`).
 #
 # VERSIONADO DEV (branches dev/main):
 #   Versión base del pyproject.toml/package.json/VERSION + .dev.<BUILD_NUMBER>
@@ -84,7 +86,7 @@ definitions:
           - apt-get install -y make python3 python3-pip --quiet
           - cd python/auth
           - make setup
-          - VERSION="${BITBUCKET_TAG#python/v}"
+          - VERSION="${BITBUCKET_TAG#python-auth@}"
           - sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
           - make publish
 
@@ -133,7 +135,7 @@ definitions:
           - npm config set "//us-central1-npm.pkg.dev/$GCP_PROJECT/dea-comm-npm/:_authToken" "$TOKEN"
           - cd typescript/auth
           - make setup
-          - VERSION="${BITBUCKET_TAG#typescript/v}"
+          - VERSION="${BITBUCKET_TAG#typescript-auth@}"
           - npm version "$VERSION" --no-git-tag-version
           - make publish
 
@@ -170,7 +172,7 @@ definitions:
         script:
           - *gcp-auth
           - *go-publish-setup
-          - VERSION="${BITBUCKET_TAG#go/}" make publish
+          - VERSION="v${BITBUCKET_TAG#go-auth@}" make publish
 
 pipelines:
   custom:
@@ -192,13 +194,14 @@ pipelines:
           <<: *go-publish-dev
           condition: ~
 
-  # Tags por paquete → publica la versión correspondiente
+  # Tags por paquete → publica la versión correspondiente (esquema <proyecto>@<version>,
+  # el mismo que genera `release.sh tag`)
   tags:
-    'python/v*':
+    'python-auth@*':
       - step: *python-publish-tag
-    'typescript/v*':
+    'typescript-auth@*':
       - step: *typescript-publish-tag
-    'go/v*':
+    'go-auth@*':
       - step: *go-publish-tag
 
   # PRs → solo tests, sin publicar

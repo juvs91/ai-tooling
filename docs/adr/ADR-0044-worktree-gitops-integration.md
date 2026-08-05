@@ -1,8 +1,11 @@
-# ADR-0008: Integración de Git Worktree al GitOps Monorepo
+# ADR-0044: Integración de Git Worktree al GitOps Monorepo
 
 - **Estado:** Propuesto
 - **Fecha:** 2026-07-02
 - **Autor:** jeguzman
+- **Nota:** renumerado de ADR-0008 a ADR-0044 el 2026-08-03 — ese número quedó duplicado con
+  `ADR-0008-plan-lock-implicit-exit-signal4.md` (dominio Proxy, sin relación). Contenido sin
+  cambios, solo el número y sus referencias cruzadas.
 
 ---
 

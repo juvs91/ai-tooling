@@ -22,8 +22,20 @@ from litellm.exceptions import (
 from llm.passthrough import PassthroughClient, PassthroughError, try_structural_correction
 from llm.compressor import _track_grounding_hop
 from llm.transformers import GroundingValidatorTransformer
+from llm.state_assertion_rules import build_active_rules
 
 logger = logging.getLogger(__name__)
+
+# Explicit activation (ADR-0038+): builds the state-assertion rule instances
+# from llm.state_assertion_rules.ACTIVE_RULE_CLASSES, once, at process boot
+# (module import). This list is passed explicitly into
+# StateAssertionRequestTransformer/StateAssertionResponseTransformer below —
+# no shared global, no per-request rebuild. Rules are stateless, so the same
+# list object is safe to hand to every pipeline build
+# (build_response_pipeline in particular runs on every request — see
+# _run_response_pipeline below — but reuses this one rule list, never
+# reconstructing rule instances per request).
+_STATE_ASSERTION_RULES = build_active_rules()
 from utils.metrics import metrics
 from llm.converters import convert_anthropic_to_litellm
 from llm.pipeline import Pipeline, TransformContext
@@ -40,10 +52,13 @@ from llm.transformers import (
     CredentialTransformer,
     IntentEnforcementTransformer,
     DeferredToolsTransformer,
+    FragileModelPlanToolsTransformer,
+    StateAssertionRequestTransformer,
     # ── AGNOSTIC RESPONSE TRANSFORMERS ────────────────────────────────────────
     ReasoningHandlingTransformer,
     UniversalToolExtractionTransformer,
     GroundingValidatorTransformer,
+    StateAssertionResponseTransformer,
     ModelFeedbackTransformer,
     StreamEventTransformer,
     QualityRecorderTransformer,
@@ -76,6 +91,7 @@ def build_request_pipeline(cfg: ProxyConfig, models_differ: bool) -> Pipeline:
             cfg.classifier, cfg.policy, models_differ,
             synth_reads_fallback=cfg.analysis.synthesize_reads_fallback,
         ),
+        StateAssertionRequestTransformer(_STATE_ASSERTION_RULES),   # ADR-0036 — reads ctx.plan_mode_active/intent set above
         PlanModeEnforcementTransformer(),
         IntentEnforcementTransformer(enabled=True),  # Validate intent compliance
         GuardrailTransformer(cfg.policy.guard_system),
@@ -84,6 +100,13 @@ def build_request_pipeline(cfg: ProxyConfig, models_differ: bool) -> Pipeline:
         ToolAllowlistTransformer(cfg.policy),
         AdaptiveContextTransformer(cfg),
         ModelRouterTransformer(cfg.routing, cfg.credentials, cfg.analysis, cfg.adaptive),
+        # ADR-0037 correction: DeferredToolsTransformer's fragile-model check (above)
+        # runs BEFORE routing, so request.model is still the client-sent alias
+        # (e.g. "claude-sonnet-5"), not the routed target (e.g. "anthropic/kimi-k2") —
+        # confirmed via live fire test that this made ADR-0037 a no-op for the
+        # common alias-routed case. This transformer re-applies the same
+        # guarantee using the FINAL, correctly-routed request.model.
+        FragileModelPlanToolsTransformer(),
     ])
 
 
@@ -131,6 +154,7 @@ def build_response_pipeline(cfg: ProxyConfig) -> Pipeline:
         ToolCallValidatorTransformer(),               # Validate/auto-correct CC tool params (e.g. AskUserQuestion)
         PlanModeGuardTransformer(),                   # Block Edit/Write/Bash-write in plan mode (tool-level, not advisory)
         GroundingValidatorTransformer(enabled=cfg.policy.grounding_validation_enabled if hasattr(cfg, "policy") and hasattr(cfg.policy, "grounding_validation_enabled") else True),
+        StateAssertionResponseTransformer(_STATE_ASSERTION_RULES),   # ADR-0036 — feeds ctx.grounding_issues, consumed below
         ModelFeedbackTransformer(cfg),
         QualityRecorderTransformer(),
     ])

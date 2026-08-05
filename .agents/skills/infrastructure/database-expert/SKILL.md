@@ -68,16 +68,6 @@ For every query or access pattern:
 6. **No implicit type coercion** — explicit casts prevent silent data truncation
 7. **Audit columns** — `created_at`, `updated_at`, `created_by` on every important table
 
----
-
-## SQLite-Specific Notes (for this project)
-
-SQLite is used for `~/.keystone/vaults.json` (currently plain JSON — may migrate):
-- Enable WAL mode: `PRAGMA journal_mode=WAL` — better concurrent reads, safer on crash
-- Enable foreign keys: `PRAGMA foreign_keys=ON` (OFF by default in SQLite!)
-- Use `INTEGER PRIMARY KEY` for rowid tables (implicit auto-increment)
-- Max practical DB size: ~1TB, but optimize query patterns above 1GB
-- Concurrent WRITE limitation: only one writer at a time (WAL mode helps with readers)
 
 ---
 

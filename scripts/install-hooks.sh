@@ -38,8 +38,14 @@ copy_distributable() {
     for f in "$src_dir"/*.sh; do
         [ -f "$f" ] || continue
         grep -q "^# distributable: true" "$f" 2>/dev/null || continue
-        cp "$f" "$dst_dir/$(basename "$f")"
-        chmod +x "$dst_dir/$(basename "$f")"
+        # cp+mv (no cp directo): un hook puede invocarse a sí mismo (ver
+        # auto-sync-daily.sh, ADR-0047) — sobrescribir en sitio el script que
+        # el shell está ejecutando puede corromper la lectura a medias; mv
+        # dentro del mismo filesystem es un rename atómico, el fd abierto
+        # sigue apuntando al inode viejo hasta que termina.
+        local dst="$dst_dir/$(basename "$f")"
+        local tmp="$dst.tmp.$$"
+        cp "$f" "$tmp" && chmod +x "$tmp" && mv "$tmp" "$dst"
         echo "  ✓ $(basename "$f")"
         count=$((count + 1))
     done
@@ -58,12 +64,7 @@ echo ""
 # Cada hook genera su propio grupo (un hook por grupo) — Claude Code fusiona
 # múltiples grupos con el mismo matcher en tiempo de ejecución.
 
-PRE_FILE=$(mktemp)
-POST_FILE=$(mktemp)
-UPS_FILE=$(mktemp)
-echo "[]" > "$PRE_FILE"
-echo "[]" > "$POST_FILE"
-echo "[]" > "$UPS_FILE"
+EVENTS_DIR=$(mktemp -d)
 
 for f in "$HOOKS_SOURCE"/*.sh; do
     [ -f "$f" ] || continue
@@ -94,25 +95,23 @@ for f in "$HOOKS_SOURCE"/*.sh; do
             '{matcher: $matcher, hooks: [{type: "command", command: $cmd, timeout: $timeout}]}')
     fi
 
-    if [ "$event" = "PreToolUse" ]; then
-        tmp=$(mktemp)
-        jq --argjson entry "$hook_json" '. + [$entry]' "$PRE_FILE" > "$tmp" && mv "$tmp" "$PRE_FILE"
-    elif [ "$event" = "PostToolUse" ]; then
-        tmp=$(mktemp)
-        jq --argjson entry "$hook_json" '. + [$entry]' "$POST_FILE" > "$tmp" && mv "$tmp" "$POST_FILE"
-    elif [ "$event" = "UserPromptSubmit" ]; then
-        tmp=$(mktemp)
-        jq --argjson entry "$hook_json" '. + [$entry]' "$UPS_FILE" > "$tmp" && mv "$tmp" "$UPS_FILE"
-    fi
+    # Un archivo por evento, descubierto dinámicamente — agregar un nuevo
+    # "# event: X" a un hook es suficiente, no hay que tocar este script.
+    event_file="$EVENTS_DIR/$event.json"
+    [ -f "$event_file" ] || echo "[]" > "$event_file"
+    tmp=$(mktemp)
+    jq --argjson entry "$hook_json" '. + [$entry]' "$event_file" > "$tmp" && mv "$tmp" "$event_file"
 done
 
-HOOKS_JSON=$(jq -n \
-    --slurpfile pre "$PRE_FILE" \
-    --slurpfile post "$POST_FILE" \
-    --slurpfile ups "$UPS_FILE" \
-    '{PreToolUse: $pre[0], PostToolUse: $post[0], UserPromptSubmit: $ups[0]}')
+HOOKS_JSON="{}"
+for event_file in "$EVENTS_DIR"/*.json; do
+    [ -f "$event_file" ] || continue
+    event_name=$(basename "$event_file" .json)
+    tmp=$(mktemp)
+    jq --arg k "$event_name" --slurpfile v "$event_file" '.[$k] = $v[0]' <<< "$HOOKS_JSON" > "$tmp" && HOOKS_JSON=$(cat "$tmp") && rm -f "$tmp"
+done
 
-rm -f "$PRE_FILE" "$POST_FILE" "$UPS_FILE"
+rm -rf "$EVENTS_DIR"
 
 # ── 3. Actualizar settings.local.json ─────────────────────────────────────────
 TMP_FILE="${SETTINGS_FILE}.tmp.$$"
@@ -132,17 +131,11 @@ echo ""
 echo "Hooks instalados en $HOOKS_TARGET:"
 ls -1 "$HOOKS_TARGET/"
 
-echo ""
-echo "PreToolUse hooks registrados:"
-jq -r '.hooks.PreToolUse[].hooks[].command' "$SETTINGS_FILE" 2>/dev/null | sed 's|"$CLAUDE_PROJECT_DIR"/||'
-
-echo ""
-echo "PostToolUse hooks registrados:"
-jq -r '.hooks.PostToolUse[].hooks[].command' "$SETTINGS_FILE" 2>/dev/null | sed 's|"$CLAUDE_PROJECT_DIR"/||'
-
-echo ""
-echo "UserPromptSubmit hooks registrados:"
-jq -r '.hooks.UserPromptSubmit[].hooks[].command' "$SETTINGS_FILE" 2>/dev/null | sed 's|"$CLAUDE_PROJECT_DIR"/||'
+for event_name in $(jq -r '.hooks | keys[]' "$SETTINGS_FILE" 2>/dev/null); do
+    echo ""
+    echo "$event_name hooks registrados:"
+    jq -r --arg e "$event_name" '.hooks[$e][].hooks[].command' "$SETTINGS_FILE" 2>/dev/null | sed 's|"$CLAUDE_PROJECT_DIR"/||'
+done
 
 echo ""
 echo "Prueba rápida de block-dangerous (debe salir exit 2 = bloqueado):"

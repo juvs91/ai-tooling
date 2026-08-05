@@ -7,7 +7,20 @@ extracted from CC's request formats and injected into request.tools.
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from utils.tool_utils import extract_deferred_tool_names, _CC_WORKFLOW_TOOL_NAMES
+from utils.tool_utils import (
+    extract_deferred_tool_names,
+    _CC_WORKFLOW_TOOL_NAMES,
+    _load_fragile_orchestration_models,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_fragile_model_cache():
+    """Reset the lru_cache(1) so FRAGILE_ORCHESTRATION_MODELS env changes take effect
+    (ADR-0037 tests below rely on the default 'kimi' value)."""
+    _load_fragile_orchestration_models.cache_clear()
+    yield
+    _load_fragile_orchestration_models.cache_clear()
 
 
 # ── extract_deferred_tool_names: system prompt format ────────────────────────
@@ -1177,3 +1190,178 @@ class TestCtxPlanModeActiveInjection:
             "No plan tools should be injected when ctx.plan_mode_active=False "
             "and phase is not PLAN"
         )
+
+
+# ---------------------------------------------------------------------------
+# ADR-0037: eager plan-mode tool loading for fragile orchestration models
+# ---------------------------------------------------------------------------
+
+class TestFragileModelEagerLoad:
+    """Regression tests for ADR-0037: FRAGILE_ORCHESTRATION_MODELS (default "kimi")
+    must always have EnterPlanMode/ExitPlanMode in request.tools, regardless of
+    ctx.plan_mode_active/ctx.intent and regardless of what CC's system prompt
+    included for that turn — root-causing the incident in
+    docs/adr/ADR-0037-eager-plan-mode-tools-fragile-models.md where Kimi reasoned
+    "I don't have EnterPlanMode tool" instead of calling ToolSearch.
+    """
+
+    def _make_request(self, model="kimi-k2-instruct", system=None, messages=None, tools=None):
+        req = MagicMock()
+        req.model = model
+        req.system = system
+        req.messages = messages or []
+        req.tools = tools or []
+        return req
+
+    def _make_ctx(self, phase="EXECUTE", intent="BUILD", session_id="fragile-test",
+                   plan_mode_active=False):
+        ctx = MagicMock()
+        ctx.phase = phase
+        ctx.intent = intent
+        ctx.session_id = session_id
+        ctx.plan_mode_active = plan_mode_active
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_fragile_model_gets_plan_tools_in_plain_build_turn(self):
+        """CORE FIX: a fragile model in a plain BUILD turn, with no plan signal
+        anywhere (no system prompt block, no session cache, plan_mode_active=False,
+        intent=BUILD) must still see EnterPlanMode/ExitPlanMode — Step 4b."""
+        from llm.transformers.deferred_tools import DeferredToolsTransformer
+        from unittest.mock import patch
+
+        req = self._make_request(system=None, messages=[], tools=[])
+        ctx = self._make_ctx(phase="EXECUTE", intent="BUILD", plan_mode_active=False)
+
+        with patch("llm.transformers.deferred_tools.get_session_deferred_tools",
+                   new_callable=AsyncMock, return_value=[]), \
+             patch("llm.transformers.deferred_tools.save_session_deferred_tools",
+                   new_callable=AsyncMock):
+            transformer = DeferredToolsTransformer()
+            await transformer.transform(req, ctx)
+
+        injected = {
+            t["name"] if isinstance(t, dict) else getattr(t, "name", None)
+            for t in req.tools
+        }
+        assert "EnterPlanMode" in injected, (
+            "Fragile model must have EnterPlanMode available even with zero plan "
+            "signal — this is the exact incident scenario (ADR-0037)"
+        )
+        assert "ExitPlanMode" in injected
+
+    def _plan_tool_defs(self):
+        """Simulate CC sending EnterPlanMode/ExitPlanMode directly in
+        request.tools (the scenario ADR-0012's final gate targets — a separate
+        channel from the <available-deferred-tools> system-prompt block)."""
+        return [
+            {"name": "EnterPlanMode", "description": "d", "input_schema": {}},
+            {"name": "ExitPlanMode", "description": "d", "input_schema": {}},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_fragile_model_not_stripped_by_final_gate(self):
+        """When CC sends EnterPlanMode/ExitPlanMode directly in request.tools
+        (not via the system-prompt block), the final gate (ADR-0012) must NOT
+        strip them for a fragile model even though intent != PLAN and
+        plan_mode_active is False."""
+        from llm.transformers.deferred_tools import DeferredToolsTransformer
+        from unittest.mock import patch
+
+        req = self._make_request(system=None, tools=self._plan_tool_defs())
+        ctx = self._make_ctx(phase="EXECUTE", intent="BUILD", plan_mode_active=False)
+
+        with patch("llm.transformers.deferred_tools.get_session_deferred_tools",
+                   new_callable=AsyncMock, return_value=[]), \
+             patch("llm.transformers.deferred_tools.save_session_deferred_tools",
+                   new_callable=AsyncMock):
+            transformer = DeferredToolsTransformer()
+            await transformer.transform(req, ctx)
+
+        injected = {
+            t["name"] if isinstance(t, dict) else getattr(t, "name", None)
+            for t in req.tools
+        }
+        assert "EnterPlanMode" in injected
+        assert "ExitPlanMode" in injected
+
+    @pytest.mark.asyncio
+    async def test_non_fragile_model_unaffected_adr_0012_regression(self):
+        """Regression: a non-fragile model (e.g. Claude native) with the exact
+        same tools-sent-directly/BUILD/non-plan-mode scenario must still have
+        plan tools stripped — ADR-0012's original behavior is untouched."""
+        from llm.transformers.deferred_tools import DeferredToolsTransformer
+        from unittest.mock import patch
+
+        req = self._make_request(model="claude-sonnet-5", system=None,
+                                  tools=self._plan_tool_defs())
+        ctx = self._make_ctx(phase="EXECUTE", intent="BUILD", plan_mode_active=False)
+
+        with patch("llm.transformers.deferred_tools.get_session_deferred_tools",
+                   new_callable=AsyncMock, return_value=[]), \
+             patch("llm.transformers.deferred_tools.save_session_deferred_tools",
+                   new_callable=AsyncMock):
+            transformer = DeferredToolsTransformer()
+            await transformer.transform(req, ctx)
+
+        injected = {
+            t["name"] if isinstance(t, dict) else getattr(t, "name", None)
+            for t in req.tools
+        }
+        assert "EnterPlanMode" not in injected
+        assert "ExitPlanMode" not in injected
+
+    @pytest.mark.asyncio
+    async def test_fragile_model_idempotent_no_duplicates(self):
+        """Step 4b must not duplicate tools already present via Step 1/session cache."""
+        from llm.transformers.deferred_tools import DeferredToolsTransformer
+        from unittest.mock import patch
+
+        system = (
+            "<available-deferred-tools>\nEnterPlanMode\nExitPlanMode\n"
+            "</available-deferred-tools>"
+        )
+        req = self._make_request(system=system, tools=[])
+        ctx = self._make_ctx(phase="EXECUTE", intent="BUILD", plan_mode_active=False)
+
+        with patch("llm.transformers.deferred_tools.save_session_deferred_tools",
+                   new_callable=AsyncMock):
+            transformer = DeferredToolsTransformer()
+            await transformer.transform(req, ctx)
+
+        names = [
+            t["name"] if isinstance(t, dict) else getattr(t, "name", None)
+            for t in req.tools
+        ]
+        assert names.count("EnterPlanMode") == 1
+        assert names.count("ExitPlanMode") == 1
+
+    @pytest.mark.asyncio
+    async def test_fragile_model_still_blocked_by_plan_mode_guard(self):
+        """ADR-0037 only ensures the tool is reachable — it does not disable the
+        real enforcement gate. plan_mode_active is computed independently by
+        IntentClassifierTransformer and PlanModeEnforcementTransformer still
+        blocks Edit/Write when it's True, unaffected by this change (out of
+        scope for DeferredToolsTransformer itself, documented here as a
+        cross-transformer invariant)."""
+        from llm.transformers.deferred_tools import DeferredToolsTransformer
+        from unittest.mock import patch
+
+        # plan_mode_active=True: PlanModeEnforcementTransformer (not exercised in
+        # this test file) is what actually blocks writes — unaffected by ADR-0037.
+        req = self._make_request(system=None, messages=[], tools=[])
+        ctx = self._make_ctx(phase="PLAN", intent="PLAN", plan_mode_active=True)
+
+        with patch("llm.transformers.deferred_tools.get_session_deferred_tools",
+                   new_callable=AsyncMock, return_value=[]), \
+             patch("llm.transformers.deferred_tools.save_session_deferred_tools",
+                   new_callable=AsyncMock):
+            transformer = DeferredToolsTransformer()
+            await transformer.transform(req, ctx)
+
+        injected = {
+            t["name"] if isinstance(t, dict) else getattr(t, "name", None)
+            for t in req.tools
+        }
+        assert "EnterPlanMode" in injected
+        assert "ExitPlanMode" in injected

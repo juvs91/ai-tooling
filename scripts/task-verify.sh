@@ -13,8 +13,14 @@ if [ -n "$TASK_VERIFY_RUNNING" ]; then
 fi
 export TASK_VERIFY_RUNNING=1
 
-SCOPE_FILE=".claude/task-scope.json"
-[ ! -f "$SCOPE_FILE" ] && { echo "No task-scope.json found. Nothing to verify."; exit 0; }
+LIB=".claude/hooks/task-scope-lib.sh"
+if [ -f "$LIB" ]; then
+  source "$LIB"
+  SCOPE_FILE=$(scope_file_for_session "." "${CLAUDE_CODE_SESSION_ID:-}")
+else
+  SCOPE_FILE=".claude/task-scope.json"
+fi
+[ ! -f "$SCOPE_FILE" ] && { echo "No $SCOPE_FILE found. Nothing to verify."; exit 0; }
 
 MODE=$(jq -r '.mode // "full"' "$SCOPE_FILE")
 LANG_SUFFIX=$(echo "$MODE" | cut -d: -f2 -s)

@@ -36,6 +36,41 @@ if [ -f "$CONFIG_FILE" ] && grep -qE '^adr_path:' "$CONFIG_FILE" 2>/dev/null; th
   ADR_PATH=$(grep -E '^adr_path:' "$CONFIG_FILE" | head -1 | sed 's/^adr_path:[[:space:]]*//' | sed 's:/*$::')
 fi
 
+# ── Enforcement: numeración secuencial de ADRs nuevos ─────────────────────────
+# Solo aplica al CREAR un archivo nuevo (no existe aún en disco) con el patrón
+# ADR-NNNN-*.md. Editar un ADR ya existente (status, typo) no dispara este chequeo.
+if echo "$FILE" | grep -qE "^${ADR_PATH}/ADR-[0-9]+-.*\\.md\$"; then
+  TARGET_ABS="$REPO_ROOT/$FILE"
+  if [ ! -f "$TARGET_ABS" ]; then
+    NEW_NUM=$(echo "$FILE" | grep -oE 'ADR-[0-9]+' | grep -oE '[0-9]+')
+    MAX_NUM=0
+    if [ -d "$REPO_ROOT/$ADR_PATH" ]; then
+      while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        n=$(basename "$f" | grep -oE '^ADR-[0-9]+' | grep -oE '[0-9]+' || true)
+        [ -z "$n" ] && continue
+        n=$((10#$n))
+        [ "$n" -gt "$MAX_NUM" ] && MAX_NUM=$n
+      done < <(find "$REPO_ROOT/$ADR_PATH" -maxdepth 1 -name 'ADR-*.md' 2>/dev/null || true)
+    fi
+    EXPECTED=$((MAX_NUM + 1))
+    NEW_NUM_INT=$((10#$NEW_NUM))
+    if [ "$NEW_NUM_INT" -ne "$EXPECTED" ]; then
+      EXPECTED_PADDED=$(printf 'ADR-%04d' "$EXPECTED")
+      cat >&2 <<EOF
+ADR GATE BLOQUEADO — numeración no secuencial
+
+Intentas crear: $FILE
+Último ADR existente: ADR-$(printf '%04d' "$MAX_NUM")
+Siguiente número válido: ${EXPECTED_PADDED}
+
+Usa exactamente ${EXPECTED_PADDED}-<titulo>.md
+EOF
+      exit 2
+    fi
+  fi
+fi
+
 # ── Rutas que SIEMPRE se permiten ─────────────────────────────────────────────
 # 1. El propio archivo es un ADR
 if echo "$FILE" | grep -qE "^${ADR_PATH}/(ADR-[0-9]+-|[0-9]+-)?.*\\.md\$"; then
@@ -47,8 +82,10 @@ if echo "$FILE" | grep -qE '(/tests?/|/test_|_test\.)'; then
   exit 0
 fi
 
-# 3. Documentación que no sea skills
-if echo "$FILE" | grep -qE '\.(md|rst|txt)$' && ! echo "$FILE" | grep -q '\.agents/skills/'; then
+# 3. Documentación que no sea skills/agents (nuevos archivos aquí son una
+#    superficie real de contaminación entre sesiones — ver ADR-0043)
+if echo "$FILE" | grep -qE '\.(md|rst|txt)$' \
+   && ! echo "$FILE" | grep -qE '\.agents/skills/|\.claude/agents/|\.claude/skills/'; then
   exit 0
 fi
 
@@ -72,8 +109,12 @@ if [ -f "$CONFIG_FILE" ] && [ -r "$CONFIG_FILE" ]; then
   done < "$CONFIG_FILE"
 else
   # Defaults para ai-tooling (backward compatible)
-  GUARDED_PREFIXES=("vendor/claude-code-proxy/" ".agents/skills/")
-  GUARDED_EXTENSIONS=('\.py$' '\.md$')
+  # .claude/agents/ y .claude/skills/ se agregaron tras ADR-0043: un archivo
+  # nuevo ahí registra un subagent/skill real (discovery recursivo,
+  # confirmado empíricamente) sin pasar por workflow-coordinator — misma
+  # clase de riesgo que editar .agents/skills/ directamente.
+  GUARDED_PREFIXES=("vendor/claude-code-proxy/" ".agents/skills/" ".claude/agents/" ".claude/skills/")
+  GUARDED_EXTENSIONS=('\.py$' '\.md$' '\.md$' '\.md$')
 fi
 
 # ── Comprobar si el archivo es "guarded" ──────────────────────────────────────
@@ -94,14 +135,22 @@ done
 
 [[ "$GUARDED" == "false" ]] && exit 0
 
-# ── Verificar si hay un ADR nuevo staged en git ───────────────────────────────
-NEW_ADR=$(git -C "$REPO_ROOT" status --porcelain "${ADR_PATH}/" 2>/dev/null \
+# ── Verificar si hay un ADR nuevo staged en git RELEVANTE a esta edición ──────
+# No basta con "existe algún ADR nuevo" — debe mencionar el prefijo guardado
+# (GUARDED_REASON) que disparó el gate, si no cualquier ADR sin relación
+# (p.ej. de trabajo previo sin commitear) bypasea la protección para siempre.
+NEW_ADR_FILES=$(git -C "$REPO_ROOT" status --porcelain "${ADR_PATH}/" 2>/dev/null \
   | grep -E '^(\?\?|A ).*\.(md|txt|rst)$' 2>/dev/null \
-  | head -1 || true)
+  | cut -c4-)
 
-if [[ -n "$NEW_ADR" ]]; then
-  exit 0
-fi
+while IFS= read -r adr_rel; do
+  [ -z "$adr_rel" ] && continue
+  adr_abs="$REPO_ROOT/$adr_rel"
+  [ -f "$adr_abs" ] || continue
+  if grep -qF -- "$GUARDED_REASON" "$adr_abs" 2>/dev/null; then
+    exit 0
+  fi
+done <<< "$NEW_ADR_FILES"
 
 # ── Bloquear ──────────────────────────────────────────────────────────────────
 cat >&2 <<EOF

@@ -103,6 +103,14 @@ class TransformContext:
     # zero Grep/Glob/Bash-grep evidence anywhere in the conversation (ADR-0033).
     # Each entry: {"claim_text": str, "signal": "weak"}
 
+    # Set by StateAssertionRequestTransformer / StateAssertionResponseTransformer
+    # (ADR-0036) — findings from the unified state-assertion verification
+    # framework (deferred-tool denial, plan-state contradiction, no-progress
+    # loops, exploration/orientation checks — ADR-0038/0039/0040).
+    # Each entry: {"rule_id": str, "subject": str, "verdict": str,
+    #              "severity": str, "correction_note": str, "evidence_snippet": str}
+    state_assertion_findings: list[dict] = field(default_factory=list)
+
     # Set by IntentClassifierTransformer — True when PROXY_SESSION_MODE: ralph
     # detected in system prompt. Downstream transformers use this to suppress
     # AskUserQuestion calls and make autonomous best-effort decisions.

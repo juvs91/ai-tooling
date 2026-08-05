@@ -101,18 +101,26 @@ After the skill passes its evals:
 
 ### 3. For Creating New Tools & Scripts (The "New Stack" Protocol)
 When you encounter a **new stack**, language, framework, or domain that the system does not currently understand, **you MUST NOT try to parse or understand it manually**.
-Instead, you must immediately create a generalizable set of tools to understand that stack. Delegate the task by invoking the **Tool Writer Agent**. Pass your requirements, constraints, and the desired generalizability parameters to the Tool Writer. The Tool Writer will handle:
-1. Writing or merging the tool defensively and cross-platform (e.g., AST parsers, extractors).
+Instead, delega la tarea cargando el skill `tool-writer`
+(`.agents/skills/core/tool-writer/SKILL.md`, vía `Read` / routing normal — no es un `Agent`-subagent).
+Pásale tus requerimientos, constraints, y qué tan generalizable debe ser. `tool-writer` maneja:
+1. Writing or merging the tool defensively and cross-platform (e.g., AST parsers, extractors) como
+   archivo plano en `tools/<tool_name>.py` (ver convención real en `docs/tools/index.md`).
 2. Updating `docs/tools/index.md` with usage instructions and constraints.
-3. Committing and pushing the general tool to the upstream `deagentic` repository.
+3. Dejar el tool listo para commit — **nunca commitear/pushear automáticamente**, eso requiere
+   pedido explícito del usuario (ver CLAUDE.md).
 
-**Iterative Improvement:** Once the initial toolset is created, you must USE those tools to explore the new stack. As you experiment with the new code and find edge cases or missing features, iteratively invoke the Tool Writer to improve the tools. The tools grow alongside your understanding of the stack.
+**Iterative Improvement:** Once the initial toolset is created, you must USE those tools to explore the new stack. As you experiment with the new code and find edge cases or missing features, iteratively invoke `tool-writer` to improve the tools. The tools grow alongside your understanding of the stack.
 
-### 4. Upstream Knowledge Sharing (Deagentic Auto-Push)
-If the learned pattern, architectural decision, or new sub-agent is generic enough to benefit other projects (a "general agent" or "general knowledge"):
-1. **Document for Upstream**: Document the generic version of the agent or finding in `docs/upstream_contributions/`.
-2. **Auto-Push to Deagentic**: Any updates to general agents MUST be automatically committed and pushed to the `deagentic` repository.
-   - You are required to run the necessary shell commands to pull, update, commit (`feat(agents): update general agent [name]`), and push the generalized .agents/skills/agents to the central `deagentic` git repository so they are immediately available globally.
+### 4. Upstream Knowledge Sharing (hacia `ai-tooling`)
+No existe ningún repo `deagentic` — nunca existió en este entorno (verificar con `git remote -v`
+antes de asumir que sí). `ai-tooling` **es** el repo canónico que se sincroniza hacia repos
+hermanos (ver ADR-0042/ADR-0043). Si el patrón aprendido, decisión arquitectónica, o skill nuevo
+es genérico y este trabajo ocurre en OTRO repo (no en `ai-tooling` mismo):
+1. **Document for Upstream**: documenta la versión genérica en `docs/upstream_contributions/`.
+2. **Pregunta antes de contribuir**: nunca commitees ni pushees automáticamente hacia `ai-tooling`
+   ni hacia ningún otro repo. Documenta la intención y pregúntale al usuario si quiere que se
+   contribuya de vuelta, y cómo (PR, copia manual, etc.).
 
 ---
 

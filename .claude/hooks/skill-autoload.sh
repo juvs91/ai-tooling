@@ -50,7 +50,7 @@ AGENTS_FILE="$CWD/AGENTS.md"
 # ran" — so this always fires once per session regardless of task-scope.json.
 
 if [ -f "$SKILL_FILE" ] && [ -f "$AGENTS_FILE" ]; then
-  echo "⚠️ MANDATORY: Call Agent tool NOW → subagent_type=\"workflow-coordinator\", run_in_background: false — then let it route."
+  echo "⚠️ MANDATORY: Call Skill tool NOW → skill=\"workflow-coordinator\" — then let it route."
   touch "$SESSION_MARKER" 2>/dev/null || true
 fi
 

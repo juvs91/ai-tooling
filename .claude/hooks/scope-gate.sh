@@ -5,8 +5,9 @@
 # timeout: 5
 # scope-gate.sh — PreToolUse hook (Edit|Write)
 #
-# If .claude/task-scope.json exists, enforces write scope per declared mode.
-# Without task-scope.json: no restriction (opt-in per task).
+# If a task-scope.json exists for the current session, enforces write scope
+# per declared mode. Without one: no restriction (opt-in per task). The scope
+# file is per-session (ADR-0041), resolved via task-scope-lib.sh.
 #
 # Modes:
 #   analysis  — writes only to paths in analysis_write_paths[] (or generic fallback)
@@ -22,13 +23,25 @@ FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 [ -z "$FILE" ] && exit 0
 
 CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
-SCOPE_FILE="$CWD/.claude/task-scope.json"
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+
+LIB="$CWD/.claude/hooks/task-scope-lib.sh"
+if [ -f "$LIB" ]; then
+  source "$LIB"
+  SCOPE_FILE=$(scope_file_for_session "$CWD" "$SESSION_ID")
+else
+  SCOPE_FILE="$CWD/.claude/task-scope.json"
+fi
 [ -f "$SCOPE_FILE" ] || exit 0
 
 RELATIVE="${FILE#$CWD/}"
+SCOPE_RELATIVE="${SCOPE_FILE#$CWD/}"
 
-# Always allow writing task-scope.json itself
-[ "$RELATIVE" = ".claude/task-scope.json" ] && exit 0
+# Always allow writing the current session's scope file (or the legacy fixed
+# path, still valid when no session_id is available)
+case "$RELATIVE" in
+  "$SCOPE_RELATIVE"|.claude/task-scope.json) exit 0 ;;
+esac
 
 # Paths outside the project directory are outside scope-gate's jurisdiction.
 # scope-gate only protects project files. External paths (e.g. ~/.claude/plans/,
@@ -64,7 +77,7 @@ case "$BASE_MODE" in
 
     echo "scope-gate[analysis]: '$RELATIVE' is outside analysis scope." >&2
     echo "  Allowed: ${ALLOWED_DISPLAY}" >&2
-    echo "  To change: set 'analysis_write_paths' in .claude/task-scope.json" >&2
+    echo "  To change: set 'analysis_write_paths' in $SCOPE_RELATIVE" >&2
     echo "  Analyze ≠ Document. Use mode=synthesize to create docs." >&2
     exit 2
     ;;
@@ -103,7 +116,7 @@ case "$BASE_MODE" in
 
     echo "scope-gate[synthesize]: '$RELATIVE' is not a documentation path." >&2
     echo "  Allowed: ${DOCS_DISPLAY}root-level *.md" >&2
-    echo "  To change: set 'docs_dirs' in .claude/task-scope.json" >&2
+    echo "  To change: set 'docs_dirs' in $SCOPE_RELATIVE" >&2
     exit 2
     ;;
 
@@ -125,5 +138,5 @@ ALLOWED_LIST=$(jq -r '.allowed_patterns | join(", ")' "$SCOPE_FILE")
 echo "scope-gate: '$RELATIVE' is outside task scope." >&2
 echo "  Task: '$TASK_NAME' | Step: '${STEP:-not set}'" >&2
 echo "  Allowed patterns: $ALLOWED_LIST" >&2
-echo "  → Update .claude/task-scope.json if you need a wider scope." >&2
+echo "  → Update $SCOPE_RELATIVE if you need a wider scope." >&2
 exit 2

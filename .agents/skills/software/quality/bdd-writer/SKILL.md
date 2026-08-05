@@ -105,7 +105,7 @@ For each scenario, add a Linux porting variant where behavior differs:
 Scenario: Card detected via pcsc-lite (Linux)
   Given pcscd daemon is running
   And an ACR122U reader is connected via USB
-  When a Keystone card is placed on the reader
+  When a card is placed on the reader
   Then the card UID is read within 500ms
   # Note: NfcCx "Microsoft IFD 0" is Windows-only; ACR122U replaces it on Linux
 ```
@@ -129,7 +129,7 @@ def nfc_reader_connected(reader_fixture):
     # TODO: implement — check SCardListReaders or hid_enumerate
     pass
 
-@when("a Keystone card is placed on the reader")
+@when("a card is placed on the reader")
 def card_placed(card_fixture):
     # TODO: implement — SCardGetStatusChange with timeout
     pass

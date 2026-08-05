@@ -259,14 +259,6 @@ Then report back: <what to observe and tell me>
 Reason: <why this experiment matters>
 ```
 
-Examples of valid hardware requests:
-```
-[HARDWARE ACTION NEEDED]
-Please: Place the Keystone card on the reader, wait 3 seconds, then remove it.
-Then report back: Does a sound play? Does anything change in Armoury Crate?
-Reason: Confirming the baseline plug-in/plug-out cycle works.
-```
-
 ```
 [HARDWARE ACTION NEEDED]
 Please: Unplug the NFC reader from USB (if external), wait 5 seconds, plug back in.

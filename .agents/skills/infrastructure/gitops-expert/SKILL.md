@@ -154,16 +154,15 @@ Examples:
 
 ---
 
-## For This Project (deagentic/Skills + ElCuboNegro/Keystone)
+## For This Project (ai-tooling/Skills)
 
 Current gaps to address:
 - No CI pipeline exists
 - No branch protection rules configured
 - No release tagging strategy
 - No `.gitignore` verified for secrets
-- Skills repo (`deagentic/Skills`) has no automated sync from Keystone
 
-Recommended pipeline for `ElCuboNegro/Keystone`:
+Recommended pipeline:
 ```yaml
 on: [push, pull_request]
 jobs:

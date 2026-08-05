@@ -241,19 +241,6 @@ Retro-engineered decisions start as **proposed** until an experiment confirms th
 
 ---
 
-## Seed ADRs — Generate These First
-
-When first run on the Keystone project, generate the following ADRs from confirmed knowledge:
-
-1. **ADR-0001**: Use PC/SC (WinSCard / pcsc-lite) as the smart card abstraction layer
-2. **ADR-0002**: Use `SCARD_UNPOWER_CARD` disposition (root cause of millisecond problem)
-3. **ADR-0003**: NfcCx (`Microsoft IFD 0`) as the NFC reader — no escape command support
-4. **ADR-0004**: Card identified by UID only (block 0 readable; all other blocks → session kill)
-5. **ADR-0005**: Linux port requires physical ACR122U/SCL3711 — NfcCx has no Linux equivalent
-6. **ADR-0006**: Card trigger via BIOS ACPI (ATKHotkey) `WM_INPUT WPARAM=0xB4`
-
----
-
 ## When You Don't Have Enough Information
 
 If you cannot fill a section of the ADR:

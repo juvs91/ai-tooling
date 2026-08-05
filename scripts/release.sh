@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # scripts/release.sh
+# distributable: true
 #
 # GitOps Monorepo — Deacero
 # Ref: docs/adr/ADR-0007-gitops-monorepo-trunk-based.md
+# Ref: docs/adr/ADR-0010-manifiesto-fuente-de-verdad-version.md (bump + tag; ver commons)
 #
 # Uso:
 #   ./scripts/release.sh work    <proy> [proy-b...]   sparse checkout
@@ -13,7 +15,8 @@
 #   ./scripts/release.sh drop    <path>               quitar del sparse set
 #   ./scripts/release.sh init    <proy>               alias de work (un proyecto)
 #   ./scripts/release.sh init-multi <proy...>         alias de work (multi)
-#   ./scripts/release.sh tag     <proyecto> <1.4.2>   crear tag de release
+#   ./scripts/release.sh bump    <proyecto> <1.4.2>   bump versión en el manifiesto (comitear vía PR)
+#   ./scripts/release.sh tag     <proyecto> [1.4.2]   crear tag de release (lee versión del manifiesto)
 #   ./scripts/release.sh hotfix  <proyecto> <1.4.2> [nombre]  branch desde prod
 #   ./scripts/release.sh cherry  <proyecto> <1.4.2>   cherry-pick a trunk
 #   ./scripts/release.sh check   [proyecto]            hotfixes pendientes
@@ -102,6 +105,28 @@ _project_path() {
   fi
   local base="${GITOPS_PROJECTS_DIR:-projects}"
   [[ -z "$base" || "$base" == "." ]] && echo "$proj" || echo "$base/$proj"
+}
+
+# ── manifiesto de versión — fuente de verdad (Ref: ADR-0010 de commons) ────
+# Detecta el tipo de manifiesto de un proyecto sin hardcodear nombres —
+# generaliza a futuras librerías con solo agregar el archivo correspondiente.
+_manifest_kind_and_path() {
+  local proj_dir; proj_dir=$(_project_path "$1")
+  if   [[ -f "$proj_dir/pyproject.toml" ]]; then echo "python $proj_dir/pyproject.toml"
+  elif [[ -f "$proj_dir/package.json"  ]]; then echo "node   $proj_dir/package.json"
+  elif [[ -f "$proj_dir/VERSION"       ]]; then echo "go     $proj_dir/VERSION"
+  else die "no se pudo determinar el tipo de manifiesto para $1 (busqué pyproject.toml, package.json, VERSION)"
+  fi
+}
+
+_manifest_current_version() {
+  local kind manifest
+  read -r kind manifest <<< "$(_manifest_kind_and_path "$1")"
+  case "$kind" in
+    python) grep -m1 '^version' "$manifest" | cut -d'"' -f2 ;;
+    node)   node -p "require('./$manifest').version" ;;
+    go)     cat "$manifest" ;;
+  esac
 }
 
 require_project_dir() {
@@ -355,12 +380,43 @@ cmd_sync() {
 
 # ── tags y releases ────────────────────────────────────────────────────────
 
-cmd_tag() {
+# El manifiesto de cada proyecto es la fuente de verdad de la versión (ADR-0010
+# de commons, mismo contrato compartido). bump la escribe (vía PR revisado);
+# tag la lee y publica — nunca se pasan versiones "a ciegas" como argumento.
+cmd_bump() {
   local project="${1:-}"; local version="${2:-}"
-  require_arg "$project" "proyecto requerido\n  uso: release.sh tag <proyecto> <1.4.2>"
-  require_arg "$version" "versión requerida\n  uso: release.sh tag <proyecto> <1.4.2>"
+  require_arg "$project" "proyecto requerido\n  uso: release.sh bump <proyecto> <1.4.2>"
+  require_arg "$version" "versión requerida\n  uso: release.sh bump <proyecto> <1.4.2>"
   require_project_dir "$project"
   require_semver "$version"
+
+  local kind manifest
+  read -r kind manifest <<< "$(_manifest_kind_and_path "$project")"
+  case "$kind" in
+    python)
+      # -i.bak + rm: portable entre BSD sed (macOS) y GNU sed (Linux/CI) —
+      # sed -i sin sufijo falla en macOS ("unterminated substitute")
+      sed -i.bak "s/^version = \".*\"/version = \"$version\"/" "$manifest" && rm -f "$manifest.bak"
+      ;;
+    node)
+      (cd "$(dirname "$manifest")" && npm version "$version" --no-git-tag-version --allow-same-version)
+      ;;
+    go)
+      echo "$version" > "$manifest"
+      ;;
+  esac
+
+  ok "manifiesto actualizado: $manifest → $version"
+  info "siguiente paso:"
+  info "  git add $manifest"
+  info "  git commit -m \"chore($project): bump version to $version\""
+  info "  abre PR hacia trunk como cualquier otro cambio"
+}
+
+cmd_tag() {
+  local project="${1:-}"; local expected_version="${2:-}"
+  require_arg "$project" "proyecto requerido\n  uso: release.sh tag <proyecto> [version-esperada]"
+  require_project_dir "$project"
   require_trunk
   require_clean
 
@@ -372,6 +428,14 @@ cmd_tag() {
 
   [[ "$(git rev-parse HEAD)" == "$(git rev-parse "$remote/$trunk")" ]] \
     || die "$trunk local no está sincronizado — corre: ./scripts/release.sh sync"
+
+  local version; version=$(_manifest_current_version "$project")
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "el manifiesto de $project no tiene una versión de release limpia: '$version'\n  corre: ./scripts/release.sh bump $project <version>"
+
+  if [[ -n "$expected_version" && "$expected_version" != "$version" ]]; then
+    die "el manifiesto tiene $version pero esperabas $expected_version\n  ¿olvidaste bumpear? ./scripts/release.sh bump $project $expected_version"
+  fi
 
   local tag="${project}@${version}"
   require_tag_not_exists "$tag"
@@ -725,6 +789,7 @@ case "$CMD" in
   init)       cmd_work "$@" ;;
   init-multi) cmd_work "$@" ;;
   sync)       cmd_sync ;;
+  bump)       cmd_bump "$@" ;;
   tag)        cmd_tag "$@" ;;
   hotfix)     cmd_hotfix "$@" ;;
   worktree)   cmd_worktree "$@" ;;
@@ -754,8 +819,9 @@ Uso: release.sh <comando> [args]
   worktree prune                        limpiar refs de worktrees borrados
   worktree clean                        mostrar worktrees con rama ya mergeada
 
-  RELEASES
-  tag     <proyecto> <1.4.2>            crear tag de release desde trunk
+  RELEASES  (ADR-0010 de commons: el manifiesto de cada proyecto es la fuente de verdad de la versión)
+  bump    <proyecto> <1.4.2>            bump versión en el manifiesto (comitear vía PR)
+  tag     <proyecto> [1.4.2]            crear tag de release — lee versión del manifiesto
   hotfix  <proyecto> <1.4.2> [nombre]   branch de hotfix desde tag de prod
   cherry  <proyecto> <1.4.2>            cherry-pick del/los hotfix a trunk
   check    [proyecto]                    hotfixes pendientes (sin proy: todos)

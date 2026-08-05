@@ -48,7 +48,6 @@
 | **workflow-coordinator** | `workflow/workflow-coordinator/SKILL.md` | Detecta intent del usuario, verifica estado del workflow, enruta al skill apropiado | ¿qué hago?, ambiguous intent, routing, workflow gate |
 | **ticket-planner** | `workflow/ticket-planner/SKILL.md` | Planificación Jira: 11-fuentes context, grokking refinement, pasos atómicos | planear ticket, desglosar story, Jira ticket, quiero implementar X |
 | **ticket-implementation** | `workflow/ticket-implementation/SKILL.md` | 7-hop multihop grounding: ejecución atómica con verificación iterativa | implementar ticket, ejecutar plan, implementa X, codifica Y |
-| **squit** | `archaeology/squit/SKILL.md` | Búsqueda semántica de SPs legacy de Deacero (5.7M objetos SQL) | buscar stored procedure, SP SQL Server, legacy business logic |
 | **problem-intake** | `software/discovery/problem-intake/SKILL.md` | Inicia arqueología en codebase legacy cuando el input es vago u orientado a negocio | cómo funciona facturación, rastrear bug, entender proceso legacy, input vago |
 | **cobol-analyst** | `software/discovery/cobol-analyst/SKILL.md` | Parsea y entiende archivos copybook COBOL en sistemas legacy | analizar COBOL, entender copybook, interpretar COBOL, legacy COBOL |
 | **tdd-developer** | `software/quality/tdd-developer/SKILL.md` | Ciclo Red→Green→Refactor estricto. NUNCA escribe implementación sin test fallante previo | implementar feature TDD, test primero, ciclo rojo-verde-refactor |

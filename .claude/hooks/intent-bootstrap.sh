@@ -16,7 +16,13 @@ PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 [ -z "$PROMPT" ] && exit 0
 [ -f "$CWD/.claude/no-skill-gate" ] && exit 0
 
-SCOPE_FILE="$CWD/.claude/task-scope.json"
+LIB="$CWD/.claude/hooks/task-scope-lib.sh"
+if [ -f "$LIB" ]; then
+  source "$LIB"
+  SCOPE_FILE=$(scope_file_for_session "$CWD" "$SESSION_ID")
+else
+  SCOPE_FILE="$CWD/.claude/task-scope.json"
+fi
 [ -f "$SCOPE_FILE" ] && exit 0
 
 SESSION_ID=$(echo "$SESSION_ID" | tr -cd 'a-zA-Z0-9_-')

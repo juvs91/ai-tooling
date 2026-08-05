@@ -4,7 +4,7 @@
 # matcher: Workflow|Agent
 # timeout: 5
 # worktree-isolation-gate.sh — PreToolUse hook (Workflow + Agent tools)
-# Ref: ADR-0008-worktree-gitops-integration.md
+# Ref: ADR-0044-worktree-gitops-integration.md
 #
 # Advierte si:
 #   1. Un Workflow script tiene parallel(agent()) sin isolation: 'worktree'
@@ -35,7 +35,7 @@ if [ "$TOOL" = "Workflow" ]; then
     if [ "$HAS_WRITES" -gt "0" ]; then
       echo "WORKTREE [warn]: parallel(agent()) con posibles writes sin isolation: 'worktree'." >&2
       echo "  Agrega { isolation: 'worktree' } a cada agent() para evitar conflictos en disco." >&2
-      echo "  Ref: ADR-0008-worktree-gitops-integration.md" >&2
+      echo "  Ref: ADR-0044-worktree-gitops-integration.md" >&2
     else
       echo "WORKTREE [info]: parallel(agent()) sin isolation: 'worktree' detectado." >&2
       echo "  Si los agentes solo leen archivos, es seguro ignorar este aviso." >&2
@@ -60,7 +60,7 @@ if [ "$TOOL" = "Agent" ]; then
     echo "      () => agent(task2, { isolation: 'worktree' })," >&2
     echo "    ]);" >&2
     echo "  Para análisis read-only, el Agent tool directo es seguro." >&2
-    echo "  Ref: ADR-0008-worktree-gitops-integration.md" >&2
+    echo "  Ref: ADR-0044-worktree-gitops-integration.md" >&2
   fi
 
   exit 0

@@ -10,7 +10,15 @@
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
-SCOPE_FILE="$CWD/.claude/task-scope.json"
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+
+LIB="$CWD/.claude/hooks/task-scope-lib.sh"
+if [ -f "$LIB" ]; then
+  source "$LIB"
+  SCOPE_FILE=$(scope_file_for_session "$CWD" "$SESSION_ID")
+else
+  SCOPE_FILE="$CWD/.claude/task-scope.json"
+fi
 
 [ -z "$PROMPT" ] && exit 0
 [ ! -f "$SCOPE_FILE" ] && exit 0

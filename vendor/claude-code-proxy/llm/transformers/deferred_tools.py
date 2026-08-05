@@ -39,7 +39,7 @@ import uuid
 
 from llm.compressor import get_session_deferred_tools, save_session_deferred_tools
 from llm.pipeline import Transformer, TransformContext
-from utils.tool_utils import extract_deferred_tool_names
+from utils.tool_utils import extract_deferred_tool_names, is_fragile_orchestration_model
 from utils.utils import bget
 
 logger = logging.getLogger(__name__)
@@ -366,13 +366,44 @@ class DeferredToolsTransformer(Transformer):
                     "[deferred-tools] plan_guarantee (plan_mode_active): added %s", extras
                 )
 
+        # ── Step 4b: Fragile-model eager guarantee (ADR-0037) ──────────────────
+        # Unconditional — unlike Step 4, NOT gated on ctx.plan_mode_active. Root
+        # cause: the model cannot recover from a missing tool by reasoning about
+        # it — it concludes the tool doesn't exist and never calls ToolSearch to
+        # check (confirmed via a real 7847-line transcript, see
+        # docs/adr/ADR-0037-eager-plan-mode-tools-fragile-models.md). Relying only
+        # on Step 4/the final-gate exemption below is not enough: if CC's
+        # <available-deferred-tools> block for this turn never included
+        # EnterPlanMode/ExitPlanMode (some project configs only include them once
+        # plan mode is genuinely active), `deferred` would stay empty for these
+        # models otherwise. FRAGILE_ORCHESTRATION_MODELS defaults to "kimi".
+        _is_fragile = is_fragile_orchestration_model(getattr(request, "model", None))
+        if _is_fragile:
+            deferred_set = set(deferred)
+            extras = [tool for tool in _PLAN_ONLY_TOOLS if tool not in deferred_set]
+            if extras:
+                deferred = list(deferred) + extras
+                _source = _source or "fragile_model_eager_load"
+                logger.debug(
+                    "[deferred-tools] fragile_model_eager_load (ADR-0037, model=%s): added %s",
+                    getattr(request, "model", None), extras,
+                )
+
         # ── Final gate: strip plan-mode controls from request.tools ──────────
         # CC sends EnterPlanMode/ExitPlanMode in request.tools for some project
         # configurations, regardless of what DeferredTools injects (Steps 1-4).
         # Strip them unconditionally when not in plan mode so Kimi can't call them.
         # Gate: keep when plan_mode_active=True (need ExitPlanMode) or intent=PLAN
         # (entering plan mode). Strip for BUILD/READ/CHAT/VERIFY/SYNTHESIZING. ADR-0012.
-        _gate_active = not ctx.plan_mode_active and ctx.intent not in ("PLAN",)
+        #
+        # Exemption (ADR-0037): fragile models (Step 4b above) never have these
+        # tools stripped here either — otherwise Step 4b's injection would be
+        # immediately undone for the common case (intent != PLAN).
+        _gate_active = (
+            not ctx.plan_mode_active
+            and ctx.intent not in ("PLAN",)
+            and not _is_fragile
+        )
         if _gate_active and request.tools:
             _before = list(request.tools)
             request.tools = [t for t in _before if _tool_name(t) not in _PLAN_ONLY_TOOLS]

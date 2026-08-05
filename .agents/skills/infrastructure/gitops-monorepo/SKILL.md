@@ -15,7 +15,7 @@ triggers:
 ---
 # GitOps Monorepo — Deacero
 
-Ref: `docs/adr/ADR-0007-gitops-monorepo-trunk-based.md` | `docs/adr/ADR-0008-worktree-gitops-integration.md`
+Ref: `docs/adr/ADR-0007-gitops-monorepo-trunk-based.md` | `docs/adr/ADR-0044-worktree-gitops-integration.md`
 
 > **Diferencia con `gitops-expert`:** ese skill cubre principios genéricos GitOps/IaC.
 > Este skill es la implementación **Deacero-específica**: trunk-based + sparse checkout + `tag = versión en prod por proyecto`.
@@ -414,7 +414,7 @@ export GITOPS_SCOPE="@mi-empresa"   # si el scope es diferente a @deacero
 
 ---
 
-## Worktrees — Trabajo Paralelo de Ramas (ADR-0008)
+## Worktrees — Trabajo Paralelo de Ramas (ADR-0044)
 
 **Problema que resuelve:** trabajar en dos ramas simultáneamente sin `git stash` ni perder contexto.
 
@@ -466,7 +466,7 @@ await parallel(subtasks.map(t => () =>
 ))
 ```
 
-El hook `.claude/hooks/worktree-isolation-gate.sh` (nuevo, ADR-0008) advierte si detecta `parallel(agent())` sin `isolation: 'worktree'`.
+El hook `.claude/hooks/worktree-isolation-gate.sh` (nuevo, ADR-0044) advierte si detecta `parallel(agent())` sin `isolation: 'worktree'`.
 
 ### Reglas de disciplina
 
