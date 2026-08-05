@@ -1,11 +1,16 @@
 # ADR-0044: Integración de Git Worktree al GitOps Monorepo
 
-- **Estado:** Propuesto
+- **Estado:** Aceptado
 - **Fecha:** 2026-07-02
 - **Autor:** jeguzman
 - **Nota:** renumerado de ADR-0008 a ADR-0044 el 2026-08-03 — ese número quedó duplicado con
   `ADR-0008-plan-lock-implicit-exit-signal4.md` (dominio Proxy, sin relación). Contenido sin
   cambios, solo el número y sus referencias cruzadas.
+- **Nota (2026-08-04):** aceptado formalmente vía `ADR-0048-homologacion-gitops-monorepo-commons.md`
+  — la implementación aquí descrita ya existía en este repo; ese ADR documenta además la
+  homologación bidireccional con `deacero/commons` (la instancia de producción real de este
+  patrón), incluyendo un fix de corrección (`set -e` + `&&` sin guarda en `cmd_worktree clean`)
+  encontrado durante la validación en sandbox de ese trabajo.
 
 ---
 

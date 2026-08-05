@@ -411,6 +411,8 @@ export GITOPS_SCOPE="@mi-empresa"   # scope de paquetes de tu organización
 | Sparse activo + `work` a otro proyecto | dir no visible → `no existe` | Corregido: usa `git ls-tree` para verificar existencia |
 | `project-map` con `.` (raíz) | `work` en cone mode incluye solo top-level | Esperado: usar `expand` si necesitas todo el árbol |
 | `core.hooksPath` ya seteado | `pre-commit install` rechaza instalar | `git config --unset-all core.hooksPath` y reintentar |
+| macOS bash de sistema (3.2) | `mapfile`/`readarray` no existen | `release.sh` no los usa; si escribes un script nuevo (ej. `sync_skills.sh`), usa un loop `while read` en vez de `mapfile` (hallazgo de producción real en `deacero/commons`, ver ADR-0048) |
+| `.claude/adr-gate.conf` con `adr_path: docs/adr` | `tr -d '/'` borra el `/` interno (→ `docsadr`, dir inexistente) → el gate bloquea SIEMPRE | Usar `sed 's:/*$::'` (solo quita `/` final, preserva los internos) — ya es lo que usa `adr-gate.sh` de este repo; documentado aquí para quien construya un `adr-gate.conf` custom desde cero (hallazgo de producción real en `deacero/commons`, ver ADR-0048) |
 
 ---
 
@@ -419,6 +421,11 @@ export GITOPS_SCOPE="@mi-empresa"   # scope de paquetes de tu organización
 **Problema que resuelve:** trabajar en dos ramas simultáneamente sin `git stash` ni perder contexto.
 
 **No reemplaza sparse checkout** — son ortogonales: sparse controla qué archivos ves, worktree controla qué rama tienes activa en paralelo.
+
+`worktree add`/`add-branch` replican automáticamente el sparse-set activo del árbol principal
+dentro del worktree nuevo (si no hay sparse activo, no hacen nada) — portado desde
+`deacero/commons`, que ya lo resolvía por nombre de proyecto; aquí se generalizó al sparse-set
+actual, sin requerir ese argumento (ver ADR-0048).
 
 ### Cuándo usar worktrees
 

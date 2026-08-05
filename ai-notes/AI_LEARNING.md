@@ -932,6 +932,29 @@ exigir que al menos un ADR nuevo mencione el prefijo guardado (`grep -qF -- "$GU
 Se extendió además el guard a `.claude/agents/` y `.claude/skills/` — un archivo nuevo ahí registra
 un subagent/skill real (ver P011) sin pasar por `workflow-coordinator`.
 
+### [P017] Un reporte de sub-agente sobre "qué le falta a X frente a Y" debe verificarse leyendo el código antes de portar nada — puede estar desactualizado o simplemente equivocado
+
+El análisis inicial de `deacero/commons` (delegado a un sub-agente Explore) afirmó que
+`ai-tooling/tools/check_adr_gate.py` no soportaba `.claude/adr-gate.conf` y que solo `commons`
+tenía esa mejora. Al diseñar el plan de homologación se leyó el archivo real y resultó falso:
+`ai-tooling` ya tenía `_load_conf_rules()` con el mismo mecanismo — simplemente no tenía un
+`.claude/adr-gate.conf` propio materializado (usa el fallback hardcodeado, que da el mismo
+resultado). La brecha real era mucho más acotada (`_check_adr_sequence`/`_staged_files`
+ausentes en `commons`). **Regla aplicada:** "la memoria/reporte dice X existe" no es lo mismo
+que "X existe ahora" — antes de recomendar o portar algo basado en un hallazgo de análisis,
+releer el archivo exacto. Ver `ai-notes/analysis/commons-gitops-analysis-2026-08-04.md` §5.
+
+### [P018] `set -euo pipefail` + `[[ cond ]] && cmd` como sentencia standalone aborta el script si `cond` es falso — y no es un caso raro
+
+En `cmd_worktree clean`/`cmd_check` de `release.sh` (ai-tooling y commons, mismo bug en ambos),
+`[[ $found -eq 0 ]] && ok "..."` sin `else`/`|| true` hace que, cuando `found=1` (el caso *útil*
+— sí hay algo que reportar), la sentencia completa devuelva 1 y `set -e` aborte el script antes
+de imprimir los mensajes de ayuda subsiguientes. Se encontró reproduciéndolo en un sandbox
+aislado (no en el repo real) antes de tocar código de producción — precisamente el tipo de bug
+que un `bash -n` (solo sintaxis) no detecta, hace falta ejecutar el flujo real con un caso donde
+la condición sea verdadera. Fix: agregar `|| true` al final de esa línea. Ver `ADR-0048`
+(ai-tooling) / `ADR-0011` (commons).
+
 ### Nota histórica: "deagentic"/"Keystone" no eran referencias externas — eran nombres viejos sin renombrar
 
 `git log --all --grep="deagentic"` encontró el commit real

@@ -623,7 +623,7 @@ cmd_check() {
   done < "$tmp"
   rm -f "$tmp"
 
-  [[ $found -eq 0 ]] && ok "sin hotfixes pendientes"
+  [[ $found -eq 0 ]] && ok "sin hotfixes pendientes" || true
 }
 
 cmd_promote() {
@@ -697,7 +697,22 @@ cmd_versions() {
   echo ""
 }
 
-# ── worktree management (Ref: ADR-0008) ───────────────────────────────────
+# ── worktree management (Ref: ADR-0044, auto-sparse Ref: ADR-0048) ────────
+
+# Si el árbol principal tiene sparse-checkout activo, replica el mismo
+# sparse-set dentro del worktree nuevo. Portado desde deacero/commons
+# (cmd_worktree_add aplicaba esto por nombre de proyecto); aquí se generaliza
+# al sparse-set actualmente activo para encajar con el modelo rama-céntrico
+# de este release.sh (add/add-branch no reciben un "proyecto", reciben una rama).
+_replicate_sparse_checkout() {
+  local wt_path="$1"
+  git config core.sparseCheckout 2>/dev/null | grep -q true || return 0
+  local paths; paths=$(git sparse-checkout list)
+  [[ -z "$paths" ]] && return 0
+  git -C "$wt_path" sparse-checkout init --cone 2>/dev/null || true
+  git -C "$wt_path" sparse-checkout set $paths
+  info "sparse checkout replicado en el worktree: $paths"
+}
 
 cmd_worktree() {
   local sub="${1:-list}"
@@ -713,6 +728,7 @@ cmd_worktree() {
       require_arg "$branch" "rama requerida\n  uso: release.sh worktree add <rama> [<path>]"
       local wt_path="${2:-../${branch//\//-}}"
       git worktree add "$wt_path" "$branch"
+      _replicate_sparse_checkout "$wt_path"
       ok "worktree creado en: $wt_path"
       ;;
 
@@ -722,6 +738,7 @@ cmd_worktree() {
       local wt_path="${2:-../${branch//\//-}}"
       local base="${3:-$(trunk_branch)}"
       git worktree add "$wt_path" -b "$branch" "$base"
+      _replicate_sparse_checkout "$wt_path"
       ok "worktree creado en: $wt_path (desde $base)"
       ;;
 
@@ -756,7 +773,7 @@ cmd_worktree() {
         fi
       done < <(git worktree list | tail -n +2)
 
-      [[ $found -eq 0 ]] && ok "ningún candidato"
+      [[ $found -eq 0 ]] && ok "ningún candidato" || true
       info "para eliminar: ./scripts/release.sh worktree rm <path>"
       info "para limpiar refs: ./scripts/release.sh worktree prune"
       ;;
@@ -771,6 +788,9 @@ Uso: release.sh worktree <subcomando>
   rm         <path>                     eliminar worktree (NO usar rm -rf)
   prune                                 limpiar refs de worktrees borrados manualmente
   clean                                 mostrar worktrees con rama ya mergeada al trunk
+
+  Nota: add/add-branch replican automáticamente el sparse-set activo del árbol
+  principal dentro del worktree nuevo (si no hay sparse activo, no hacen nada).
 EOF
       ;;
   esac

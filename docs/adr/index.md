@@ -23,7 +23,8 @@
 | [ADR-0041](ADR-0041-task-scope-file-per-session.md) | Task-Scope File Per Session, Not Per Project | Accepted | 2026-08-03 | Agent Infrastructure |
 | [ADR-0042](ADR-0042-autoload-workflow-coordinator-skill-vs-agent-tool.md) | Autoload de workflow-coordinator vía Skill tool, no Agent tool | Accepted | 2026-08-03 | Agent Infrastructure |
 | [ADR-0043](ADR-0043-skills-de-dominio-via-skill-tool-nativo.md) | Skills de dominio se exponen vía el tool Skill nativo, no vía Agent-subagent | Accepted | 2026-08-03 | Agent Infrastructure |
-| [ADR-0044](ADR-0044-worktree-gitops-integration.md) | Integración de Git Worktree al GitOps Monorepo (renumerado de ADR-0008, duplicado) | Propuesto | 2026-07-02 | GitOps |
+| [ADR-0044](ADR-0044-worktree-gitops-integration.md) | Integración de Git Worktree al GitOps Monorepo (renumerado de ADR-0008, duplicado) | Aceptado | 2026-07-02 | GitOps |
 | [ADR-0045](ADR-0045-check-skill-frontmatter-tool.md) | Nuevo checker `tools/check_skill_frontmatter.py` | Accepted | 2026-08-03 | Agent Infrastructure |
 | [ADR-0046](ADR-0046-check-adr-sections-tool.md) | Nuevo checker `tools/check_adr_sections.py` | Accepted | 2026-08-03 | Agent Infrastructure |
 | [ADR-0047](ADR-0047-auto-sync-daily-hook.md) | Hook `SessionStart` para sincronización diaria de skills y hooks en proyectos hijos | Accepted | 2026-08-04 | Agent Infrastructure |
+| [ADR-0048](ADR-0048-homologacion-gitops-monorepo-commons.md) | Homologación GitOps con `commons` — puerto bidireccional de mejoras validadas en producción | Aceptado | 2026-08-04 | GitOps |
