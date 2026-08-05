@@ -136,8 +136,13 @@ cd monorepo
 ### Sabor 2: solo shared (eres de plataforma)
 ```bash
 ./scripts/release.sh init-multi shared/libs/auth
-# baja auth + todos sus consumers automáticamente
-# verificas que tu cambio no rompe ningún consumer antes del PR
+# baja auth (y solo auth) — funciona sin ser consumidor de ningún proyecto (fix ADR-0049)
+#
+# IMPORTANTE: esto NO descubre automáticamente qué proyectos consumen auth — no existe
+# esa función (shared_deps_of() solo resuelve proyecto → sus shared deps, no al revés).
+# Si necesitas probar que tu cambio no rompe consumers, agrégalos tú manualmente:
+./scripts/release.sh add proyecto-a   # si sabes que proyecto-a consume auth
+./scripts/release.sh add proyecto-b   # etc.
 ```
 
 ### Sabor 3: proyecto + toco shared

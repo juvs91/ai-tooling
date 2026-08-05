@@ -99,6 +99,14 @@ require_trunk() {
 
 _project_path() {
   local proj="$1"
+  # Path literal (ya resuelto) — mismo criterio que ya usan cmd_add/cmd_drop: no le
+  # antepongas el projects-dir. Sin esto, cmd_work/init-multi rompen el escenario
+  # "solo shared" (equipo Platform): init-multi shared/libs/auth resolvía a
+  # projects/shared/libs/auth (inexistente). Ver ADR-0049.
+  if [[ "$proj" == shared/* || "$proj" == scripts* ]]; then
+    echo "$proj"
+    return
+  fi
   if [[ -n "${GITOPS_PROJECT_MAP:-}" ]]; then
     local entry
     entry=$(echo "$GITOPS_PROJECT_MAP" | tr ',' '\n' | grep "^${proj}:" | head -1)

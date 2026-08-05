@@ -28,3 +28,4 @@
 | [ADR-0046](ADR-0046-check-adr-sections-tool.md) | Nuevo checker `tools/check_adr_sections.py` | Accepted | 2026-08-03 | Agent Infrastructure |
 | [ADR-0047](ADR-0047-auto-sync-daily-hook.md) | Hook `SessionStart` para sincronización diaria de skills y hooks en proyectos hijos | Accepted | 2026-08-04 | Agent Infrastructure |
 | [ADR-0048](ADR-0048-homologacion-gitops-monorepo-commons.md) | Homologación GitOps con `commons` — puerto bidireccional de mejoras validadas en producción | Aceptado | 2026-08-04 | GitOps |
+| [ADR-0049](ADR-0049-fix-project-path-shared-only.md) | Fix — `_project_path()` no resolvía paths `shared/`/`scripts` literales (escenario "solo shared" roto) | Aceptado | 2026-08-05 | GitOps |
