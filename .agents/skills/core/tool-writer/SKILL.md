@@ -68,7 +68,8 @@ están listos. Si el usuario pide el commit, usa un mensaje semántico:
 ### Phase 5 — Contribución upstream (si aplica)
 No existe ningún repo `deagentic` — nunca existió en este entorno. `ai-tooling` (este mismo repo)
 **es** la fuente canónica de skills/tools que se sincroniza hacia repos hermanos (`wpc-backend`,
-etc. vía `sync_skills.sh` / `cornerstone-agents`, ver ADR-0042/ADR-0043). Si estás trabajando
+etc. vía `sync_skills.sh`, que apunta a este mismo repo — ver `.ai-tooling` § `agents_repo` y
+ADR-0042/ADR-0043). Si estás trabajando
 DENTRO de `ai-tooling`, esta fase es un no-op — el tool ya está en su lugar canónico. Si estás
 trabajando en OTRO repo (ej. `wpc-backend`) y el tool es genérico/reutilizable, documenta esa
 intención y pregúntale al usuario si quiere que se contribuya de vuelta a `ai-tooling` — nunca lo

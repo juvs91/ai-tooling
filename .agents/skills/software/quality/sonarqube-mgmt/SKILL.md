@@ -34,9 +34,10 @@ python scripts/sonarqube_client.py projects
 ```
 
 ## Environment Configuration
-The skill uses the following environment variables if available:
-- `SONAR_HOST`: The URL of the SonarQube server (Default: `https://snr.kronosb.com`)
-- `SONAR_TOKEN`: Your SonarQube User Token (A default is provided for the current environment)
+The skill requires the following environment variables (set in `.env`, never hardcoded):
+- `SONAR_HOST`: The URL of the SonarQube server for this project.
+- `SONAR_TOKEN`: Your SonarQube User Token. No default is provided — the script errors out if
+  either variable is missing rather than silently falling back to a hardcoded value.
 
 ## Best Practices
 - **Prioritize Vulnerabilities**: Always address `VULNERABILITY` and `BUG` types before `CODE_SMELL`.

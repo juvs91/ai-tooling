@@ -342,55 +342,7 @@
     "atlassian": {
       "type": "mcp",
       "mcpServer": "atlassian",
-      "docs": "https://deacero.atlassian.net/wiki/ARQ"
-    }
-  },
-  "mcpServers": {
-    "alloydb": {
-      "command": "node",
-      "args": [
-        "/Users/jeguzman/.nvm/versions/node/v20.20.0/lib/node_modules/postgres-mcp/dist/index.js"
-      ],
-      "env": {
-        "DB_MAIN_URL": "postgresql://postgres:$ALLOYDB_PASSWORD@localhost:5435/ods"
-      }
-    },
-    "atlassian": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": ["mcp-atlassian"],
-      "env": {
-        "CONFLUENCE_URL": "https://deacero.atlassian.net/wiki",
-        "CONFLUENCE_USERNAME": "jeguzman@deacero.com",
-        "CONFLUENCE_API_TOKEN": "$ATLASSIAN_CONFLUENCE_TOKEN",
-        "JIRA_URL": "https://deacero.atlassian.net",
-        "JIRA_USERNAME": "jeguzman@deacero.com",
-        "JIRA_API_TOKEN": "$ATLASSIAN_JIRA_API_TOKEN"
-      }
-    },
-    "bitbucket": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@aashari/mcp-server-atlassian-bitbucket"],
-      "env": {
-        "ATLASSIAN_USER_EMAIL": "jeguzman@deacero.com",
-        "ATLASSIAN_API_TOKEN": "$ATLASSIAN_BITBUCKET_API_TOKEN",
-        "BITBUCKET_DEFAULT_WORKSPACE": "deacero"
-      }
-    },
-    "squit": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote",
-        "https://squit-mcp.deacero.us/mcp",
-        "--header",
-        "X-API-Key:$SQUIT_API_KEY"
-      ]
-    },
-    "cloudsql": {
-      "command": "bash",
-      "args": ["./scripts/cloudsql-mcp.sh"]
+      "docs": "$ATLASSIAN_DOCS_URL"
     }
   }
 }

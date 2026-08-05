@@ -1,6 +1,6 @@
 ---
 name: gitops-monorepo
-description: Estrategia GitOps monorepo Deacero-específica. Usar cuando se hable de monorepo, trunk-based development, sparse checkout, independencia de despliegue entre proyectos, tag por proyecto, o adopción del modelo tag=versión en prod.
+description: Estrategia GitOps monorepo trunk-based, agnóstica de organización. Usar cuando se hable de monorepo, trunk-based development, sparse checkout, independencia de despliegue entre proyectos, tag por proyecto, o adopción del modelo tag=versión en prod.
 version: "1.0.0"
 triggers:
   - monorepo
@@ -11,14 +11,14 @@ triggers:
   - release por proyecto
   - contaminar ambientes
   - ramas compartidas
-  - gitops deacero
+  - gitops monorepo
 ---
-# GitOps Monorepo — Deacero
+# GitOps Monorepo — Trunk-Based
 
 Ref: `docs/adr/ADR-0007-gitops-monorepo-trunk-based.md` | `docs/adr/ADR-0044-worktree-gitops-integration.md`
 
 > **Diferencia con `gitops-expert`:** ese skill cubre principios genéricos GitOps/IaC.
-> Este skill es la implementación **Deacero-específica**: trunk-based + sparse checkout + `tag = versión en prod por proyecto`.
+> Este skill es una implementación **concreta y agnóstica de organización**: trunk-based + sparse checkout + `tag = versión en prod por proyecto`. El scope de paquetes (`GITOPS_SCOPE`) y el remote autoritativo (`GITOPS_REMOTE`) se configuran vía variables de entorno — ver sección "Variables de entorno".
 
 ---
 
@@ -53,8 +53,8 @@ main:  A──B──C──D──E──F──G   (sigue creciendo)
 repo/
 ├── shared/
 │   └── libs/
-│       ├── auth/          @deacero/auth       ← mínimo 2 proyectos deben consumirla
-│       └── logging/       @deacero/logging
+│       ├── auth/          @your-org/auth      ← mínimo 2 proyectos deben consumirla
+│       └── logging/       @your-org/logging
 ├── projects/
 │   ├── proyecto-a/
 │   ├── proyecto-b/
@@ -121,7 +121,7 @@ tag: proyecto-a@1.4.2  → deploy PROD
 
 ### Sabor 1: un solo proyecto
 ```bash
-git clone --filter=blob:none --sparse git@bitbucket.org:deacero/monorepo.git
+git clone --filter=blob:none --sparse git@bitbucket.org:your-org/monorepo.git
 cd monorepo
 ./scripts/release.sh init proyecto-a
 # baja projects/proyecto-a/ + shared que consume + scripts/
@@ -197,13 +197,13 @@ git push origin hotfix/proyecto-a/fix-critico
 
 | Variable | Default | Cuándo setear |
 |----------|---------|---------------|
-| `GITOPS_REMOTE` | auto-detect (`deacero` > `origin` > `upstream`) | Repo con remote no estándar |
+| `GITOPS_REMOTE` | auto-detect (remote de tu organización configurado en el script > `origin` > `upstream`) | Repo con remote no estándar |
 | `GITOPS_TRUNK_BRANCH` | `main` | Repo que aún usa `master` |
-| `GITOPS_SCOPE` | `@deacero` | Proyecto con scope diferente |
+| `GITOPS_SCOPE` | configurable — ver `.env` | Scope de paquetes de tu organización |
 
 ```bash
-# Ejemplo para repo con master y remote "deacero"
-GITOPS_REMOTE=deacero GITOPS_TRUNK_BRANCH=master ./scripts/release.sh sync
+# Ejemplo para repo con master y remote no estándar
+GITOPS_REMOTE=mi-remote GITOPS_TRUNK_BRANCH=master ./scripts/release.sh sync
 ```
 
 ---
@@ -292,7 +292,7 @@ bash scripts/gitops-init.sh \
 #   --stack <stacks>         stacks separados por coma: python, typescript, node, go
 #   --project-map <map>      nombre:directorio separados por coma
 #   --trunk master           si el repo usa master en vez de main
-#   --scope @mi-empresa      si el scope npm/paquetes es diferente a @deacero
+#   --scope @mi-empresa      scope npm/paquetes de tu organización
 #   --skip-precommit         omite `pre-commit install` (útil en CI o setup sin Python)
 #   --dry-run                muestra qué haría sin ejecutar nada
 
@@ -390,7 +390,7 @@ Para instalar `release.sh` manualmente sin el bootstrap:
 mkdir -p scripts
 cp /ruta/a/ai-tooling/scripts/release.sh scripts/
 chmod +x scripts/release.sh
-export GITOPS_SCOPE="@mi-empresa"   # si el scope es diferente a @deacero
+export GITOPS_SCOPE="@mi-empresa"   # scope de paquetes de tu organización
 ```
 
 ---

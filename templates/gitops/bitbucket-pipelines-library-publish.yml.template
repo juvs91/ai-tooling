@@ -8,6 +8,7 @@
 #   WIF_PROVIDER  — projects/PROJECT_NUM/locations/global/workloadIdentityPools/POOL/providers/PROVIDER
 #   GCP_DEPLOY_SA — sa-name@gcp-project.iam.gserviceaccount.com
 #   GCP_PROJECT   — gcp-project-id
+#   NPM_SCOPE     — scope de paquetes npm de tu organización, ej. @tu-empresa (sin el @ en la variable)
 #
 # CONVENCIÓN DE TAGS — <proyecto>@<version>, igual que `release.sh tag` (ADR-0007):
 #   python-auth@1.2.3     → publica python/<nombre> con versión 1.2.3
@@ -115,7 +116,7 @@ definitions:
           - *gcp-auth
           - curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y make nodejs --quiet
           - TOKEN=$(gcloud auth print-access-token)
-          - npm config set @deacero:registry https://us-central1-npm.pkg.dev/$GCP_PROJECT/dea-comm-npm/
+          - npm config set @${NPM_SCOPE}:registry https://us-central1-npm.pkg.dev/$GCP_PROJECT/dea-comm-npm/
           - npm config set "//us-central1-npm.pkg.dev/$GCP_PROJECT/dea-comm-npm/:_authToken" "$TOKEN"
           - cd typescript/auth
           - make setup
@@ -131,7 +132,7 @@ definitions:
           - *gcp-auth
           - curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y make nodejs --quiet
           - TOKEN=$(gcloud auth print-access-token)
-          - npm config set @deacero:registry https://us-central1-npm.pkg.dev/$GCP_PROJECT/dea-comm-npm/
+          - npm config set @${NPM_SCOPE}:registry https://us-central1-npm.pkg.dev/$GCP_PROJECT/dea-comm-npm/
           - npm config set "//us-central1-npm.pkg.dev/$GCP_PROJECT/dea-comm-npm/:_authToken" "$TOKEN"
           - cd typescript/auth
           - make setup

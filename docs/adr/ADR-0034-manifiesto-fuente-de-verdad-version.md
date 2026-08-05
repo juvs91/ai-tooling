@@ -9,7 +9,7 @@
 ## Contexto
 
 `ai-tooling` es el repo origen de `scripts/release.sh` — el resto de repos GitOps de
-Deacero (ej. `commons`) lo obtienen vía `scripts/gitops-init.sh` y lo mantienen como
+Company (ej. `commons`) lo obtienen vía `scripts/gitops-init.sh` y lo mantienen como
 "contrato compartido" (verificado byte a byte salvo la implementación de `worktree`, que
 diverge intencionalmente por repo).
 

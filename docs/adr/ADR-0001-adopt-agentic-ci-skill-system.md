@@ -19,11 +19,6 @@ The `cookiecutter-agentic-ci` template provides a proven pattern for:
 
 ---
 
-## Decision
-
-Install the Agentic CI skill system from the local template at:
-`/Users/jeguzman/Documents/deacero/cookiecutter-agentic-ci/{{cookiecutter.project_slug}}/`
-
 **Skills installed** (13 total):
 
 | Category | Skills |

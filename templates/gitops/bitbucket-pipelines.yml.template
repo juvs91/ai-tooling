@@ -1,4 +1,4 @@
-# bitbucket-pipelines.yml — Template GitOps Monorepo Deacero
+# bitbucket-pipelines.yml — Template GitOps Monorepo Company
 # Ref: ADR-0007-gitops-monorepo-trunk-based.md
 #
 # PERSONALIZAR:

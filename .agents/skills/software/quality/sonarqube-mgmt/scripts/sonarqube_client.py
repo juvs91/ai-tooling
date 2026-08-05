@@ -4,15 +4,15 @@ import json
 import argparse
 import requests
 
-DEFAULT_HOST = "https://snr.kronosb.com"
-DEFAULT_TOKEN = "sqa_420c860f4dba68ef0386a61c9f2844a1e1879f07"
-
 class SonarClient:
     def __init__(self, host=None, token=None):
-        self.host = host or os.environ.get("SONAR_HOST", DEFAULT_HOST)
-        self.token = token or os.environ.get("SONAR_TOKEN", DEFAULT_TOKEN)
+        self.host = host or os.environ.get("SONAR_HOST")
+        self.token = token or os.environ.get("SONAR_TOKEN")
+        if not self.host:
+            print("Error: SONAR_HOST not found (set it in .env).", file=sys.stderr)
+            sys.exit(1)
         if not self.token:
-            print("Error: SONAR_TOKEN not found.", file=sys.stderr)
+            print("Error: SONAR_TOKEN not found (set it in .env).", file=sys.stderr)
             sys.exit(1)
         self.auth = (self.token, "")
 

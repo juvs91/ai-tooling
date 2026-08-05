@@ -30,12 +30,23 @@ Todo el output es en español mexicano (es-MX).
 
 ---
 
-## CONSTANTES (hardcoded)
+## CONSTANTES (configurables, no hardcoded)
+
+Este skill fue escrito originalmente para el checkout local de un ingeniero específico
+(rutas absolutas `/Users/<usuario>/...` y un nombre de reviewer fijo) — no es portable tal cual
+para otro usuario o máquina. Antes de usarlo, resuelve estos dos valores:
 
 ```
-REVIEWS_DIR  = /Users/arodarte/deacero/bitbucket/wpc-cpfr/workspace/02-code-reviews/
-STORIES_DIR  = /Users/arodarte/deacero/bitbucket/wpc-cpfr/workspace/10-management/stories/
-REVIEWER     = Alberto Rodarte
+BASE_DIR  = $CODE_REVIEW_WORKSPACE_ROOT   (env var; si no está seteada, pregunta al usuario
+                                            la ruta local raíz donde tiene los checkouts de
+                                            connect-backend/connect-frontend/wpc-cpfr/wpc-frontend)
+REVIEWER  = $CODE_REVIEW_REVIEWER_NAME     (env var; si no está seteada, usa `git config user.name`
+                                            del repo actual como fallback)
+```
+
+```
+REVIEWS_DIR  = {BASE_DIR}/wpc-cpfr/workspace/02-code-reviews/
+STORIES_DIR  = {BASE_DIR}/wpc-cpfr/workspace/10-management/stories/
 ```
 
 ---
@@ -83,21 +94,21 @@ Por `repo_slug`:
 
 | repo_slug | Stack | Local path |
 |-----------|-------|------------|
-| `connect-backend` | C# .NET 6 + Dapper | `/Users/arodarte/deacero/bitbucket/connect-backend` |
-| `connect-frontend` | React 16 + JavaScript + DevExtreme + Auth0 | `/Users/arodarte/deacero/bitbucket/connect-frontend` |
-| `wpc-cpfr` | Monorepo — ver sub-proyecto por paths | `/Users/arodarte/deacero/bitbucket/wpc-cpfr` |
-| `wpc-frontend` | Monorepo — ver sub-proyecto por paths | `/Users/arodarte/deacero/bitbucket/wpc-frontend` |
+| `connect-backend` | C# .NET 6 + Dapper | `{BASE_DIR}/connect-backend` |
+| `connect-frontend` | React 16 + JavaScript + DevExtreme + Auth0 | `{BASE_DIR}/connect-frontend` |
+| `wpc-cpfr` | Monorepo — ver sub-proyecto por paths | `{BASE_DIR}/wpc-cpfr` |
+| `wpc-frontend` | Monorepo — ver sub-proyecto por paths | `{BASE_DIR}/wpc-frontend` |
 
 ### Para `wpc-cpfr` — sub-proyecto por prefijo de paths en el diff:
 
 | Prefijo en el diff | Sub-proyecto | Stack | Local path absoluto |
 |--------------------|-------------|-------|---------------------|
-| `apis/cpfr_api/` | cpfr-api | Go 1.25 + Gin + GORM + PostgreSQL | `/Users/arodarte/deacero/bitbucket/wpc-cpfr/apis/cpfr_api` |
-| `apis/pvo_api/` | pvo-api | Go 1.25 + Fiber v2 + PostgreSQL | `/Users/arodarte/deacero/bitbucket/wpc-cpfr/apis/pvo_api` |
-| `apis/order_classification_api/` | ocs | Go 1.25 + Fiber v2 + batch workers | `/Users/arodarte/deacero/bitbucket/wpc-cpfr/apis/order_classification_api` |
-| `apis/testing/mae-e2e/` | mae-e2e | Playwright + TypeScript | `/Users/arodarte/deacero/bitbucket/wpc-cpfr/apis/testing/mae-e2e` |
-| `apps/mae-admin/` | mae-admin | Next.js 16 + React 19 + Bootstrap 5 | `/Users/arodarte/deacero/bitbucket/wpc-cpfr/apps/mae-admin` |
-| `analytics/dbt/` | dbt | SQL/Jinja + BigQuery | `/Users/arodarte/deacero/bitbucket/wpc-cpfr/analytics/dbt/inventory-orders` |
+| `apis/cpfr_api/` | cpfr-api | Go 1.25 + Gin + GORM + PostgreSQL | `{BASE_DIR}/wpc-cpfr/apis/cpfr_api` |
+| `apis/pvo_api/` | pvo-api | Go 1.25 + Fiber v2 + PostgreSQL | `{BASE_DIR}/wpc-cpfr/apis/pvo_api` |
+| `apis/order_classification_api/` | ocs | Go 1.25 + Fiber v2 + batch workers | `{BASE_DIR}/wpc-cpfr/apis/order_classification_api` |
+| `apis/testing/mae-e2e/` | mae-e2e | Playwright + TypeScript | `{BASE_DIR}/wpc-cpfr/apis/testing/mae-e2e` |
+| `apps/mae-admin/` | mae-admin | Next.js 16 + React 19 + Bootstrap 5 | `{BASE_DIR}/wpc-cpfr/apps/mae-admin` |
+| `analytics/dbt/` | dbt | SQL/Jinja + BigQuery | `{BASE_DIR}/wpc-cpfr/analytics/dbt/inventory-orders` |
 
 Si el diff contiene archivos de múltiples sub-proyectos → informar al usuario y revisar todos.
 
@@ -105,7 +116,7 @@ Si el diff contiene archivos de múltiples sub-proyectos → informar al usuario
 
 | Prefijo en el diff | Sub-proyecto | Stack | Local path absoluto |
 |--------------------|-------------|-------|---------------------|
-| `frontend/wpc-front/` | wpc-front | Next.js 14.2 + React 18 + Redux Toolkit + MSAL + Material UI 6 | `/Users/arodarte/deacero/bitbucket/wpc-frontend/frontend/wpc-front` |
+| `frontend/wpc-front/` | wpc-front | Next.js 14.2 + React 18 + Redux Toolkit + MSAL + Material UI 6 | `{BASE_DIR}/wpc-frontend/frontend/wpc-front` |
 
 Branches principales: `development`, `main`. El resto son ramas de trabajo o features.
 
@@ -236,8 +247,8 @@ Priorizar archivos de lógica: servicios, repositorios, entidades, hooks, contro
 ## STEP 6 — Extraer JIRA key y buscar story doc local
 
 Determinar `STORIES_DIR` según `repo_slug`:
-- `wpc-frontend` → `STORIES_DIR = /Users/arodarte/deacero/bitbucket/wpc-cpfr/workspace/10-management/stories/order-entry/`
-- cualquier otro → `STORIES_DIR = /Users/arodarte/deacero/bitbucket/wpc-cpfr/workspace/10-management/stories/`
+- `wpc-frontend` → `STORIES_DIR = {BASE_DIR}/wpc-cpfr/workspace/10-management/stories/order-entry/`
+- cualquier otro → `STORIES_DIR = {BASE_DIR}/wpc-cpfr/workspace/10-management/stories/`
 
 Buscar patrón `[A-Z]+-\d+` en:
 - Título del PR
@@ -324,7 +335,7 @@ Al confirmar → ejecutar el análisis completo leyendo archivos locales y el di
 | PR | #{pr_id} {repo_slug} |
 | Historia | {KEY} — {summary} |
 | Autor | {author.display_name} |
-| Reviewer | Alberto Rodarte |
+| Reviewer | {REVIEWER} |
 | Fecha | {YYYY-MM-DD} |
 | Branch | {source_branch} → {destination_branch} |
 | Estado | [APPROVED / CAMBIOS REQUERIDOS / EN REVISIÓN] |
@@ -446,7 +457,7 @@ Al terminar de escribir, preguntar:
 Si confirma → usar `mcp__bitbucket__bitbucket_postPullRequestComment` con:
 
 ```markdown
-## Code Review — Alberto Rodarte
+## Code Review — {REVIEWER}
 
 | Severidad | Cantidad |
 |-----------|---------|

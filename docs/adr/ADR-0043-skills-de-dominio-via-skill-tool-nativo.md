@@ -282,7 +282,7 @@ La Prueba 3 del Addendum 2 expuso contenido aspiracional/roto heredado de la pla
 origen (misma familia que el `~/.keystone/vaults.json` encontrado antes en `wpc-backend`):
 `tool-writer/SKILL.md` mandaba consultar un "Architect Agent" inexistente como `Agent`-subagent,
 seguir una jerarquía `tools/[domain]/[subdomain]/` no usada en este repo, y hacer auto-push a un
-repo `deagentic` que nunca existió (`git remote -v`: solo `deacero`/`personal`). Se corrigió:
+repo `deagentic` que nunca existió (`git remote -v`: solo `company`/`personal`). Se corrigió:
 
 - `tool-writer/SKILL.md`: Phase 1 ahora referencia el skill real `architect` (vía `Read`/routing,
   no `Agent`-subagent); Phase 2 usa la convención real plana de `tools/<tool_name>.py`; **Phase 4

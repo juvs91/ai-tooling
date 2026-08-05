@@ -41,7 +41,7 @@ Se verificó contra el estado real del repo que:
   `tools/install_hooks.sh` — sin jerarquía `domain/subdomain/tool/`), y los
   ADRs reales del repo viven todos en `docs/adr/ADR-NNNN-*.md`, nunca dentro
   de un tool individual.
-- `git remote -v` solo lista `deacero` (Bitbucket corporativo) y `personal`
+- `git remote -v` solo lista `company` (Bitbucket corporativo) y `personal`
   (GitHub personal) — no existe ningún remoto `deagentic`.
 
 Se decidió seguir la convención REAL y verificable del repo (ubicación plana

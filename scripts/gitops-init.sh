@@ -15,7 +15,7 @@
 # Variables de entorno:
 #   GITOPS_REMOTE         remote autoritativo del proyecto destino (default: auto)
 #   GITOPS_TRUNK_BRANCH   rama trunk del proyecto destino (default: main)
-#   GITOPS_SCOPE          scope de paquetes internos (default: @deacero)
+#   GITOPS_SCOPE          scope de paquetes internos (default: @company)
 
 set -euo pipefail
 
@@ -31,7 +31,7 @@ TARGET_DIR=""
 DRY_RUN=false
 SKIP_PRECOMMIT=false
 GITOPS_TRUNK="${GITOPS_TRUNK_BRANCH:-main}"
-GITOPS_SCOPE="${GITOPS_SCOPE:-@deacero}"
+GITOPS_SCOPE="${GITOPS_SCOPE:-@company}"
 GITOPS_STACKS_FLAG=""
 GITOPS_PROJECT_MAP_FLAG=""
 
@@ -87,7 +87,7 @@ Uso: gitops-init.sh [opciones]
   --dry-run                mostrar qué haría sin ejecutar nada
   --skip-precommit         no instalar pre-commit hooks
   --trunk <rama>           rama trunk del proyecto (default: main)
-  --scope <scope>          scope de paquetes internos (default: @deacero)
+  --scope <scope>          scope de paquetes internos (default: @company)
   --stack <stacks>         stacks del proyecto, separados por coma (ej: "python,typescript,go")
   --project-map <map>      mapeo nombre:directorio separado por coma (ej: "backend:backend,frontend:.")
 
@@ -156,7 +156,7 @@ generate_adr_gate_rules() {
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
-echo "║  GitOps Init — Deacero                           ║"
+echo "║  GitOps Init — Company                           ║"
 echo "║  Ref: ADR-0007-gitops-monorepo-trunk-based.md    ║"
 echo "╚══════════════════════════════════════════════════╝"
 echo ""
@@ -301,7 +301,7 @@ else
   {
     # ── Cabecera ──
     cat <<HEADER
-# .pre-commit-config.yaml — GitOps Monorepo Deacero
+# .pre-commit-config.yaml — GitOps Monorepo
 # Generado por scripts/gitops-init.sh — $(date '+%Y-%m-%d')
 # Ref: ADR-0007-gitops-monorepo-trunk-based.md
 #

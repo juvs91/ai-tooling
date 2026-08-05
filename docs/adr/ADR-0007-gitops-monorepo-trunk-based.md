@@ -8,7 +8,7 @@
 
 ## Contexto
 
-Los proyectos de Deacero comparten un monorepo pero operan con mentalidad de multirepo:
+Los proyectos de Company comparten un monorepo pero operan con mentalidad de multirepo:
 las ramas `dev`, `qa` y `prod` son compartidas por todos los proyectos simultáneamente.
 
 El resultado es acoplamiento involuntario: para deployar `proyecto-a` se arrastra también
@@ -54,7 +54,7 @@ proyecto-a@1.4.2-hotfix.1     ← hotfix aplicado en prod
 |----------|---------|-----------|
 | `GITOPS_REMOTE` | auto-detect | Remote autoritativo (para repos sin `origin`) |
 | `GITOPS_TRUNK_BRANCH` | `main` | Permite usar `master` durante migración |
-| `GITOPS_SCOPE` | `@deacero` | Scope de paquetes internos en shared/ |
+| `GITOPS_SCOPE` | `@company` | Scope de paquetes internos en shared/ |
 
 ### Advertencias del modelo
 

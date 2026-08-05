@@ -16,6 +16,10 @@
       "command": "bash",
       "args": ["./scripts/cloudsql-mcp.sh"]
     },
+    "squit": {
+      "command": "bash",
+      "args": ["./mcp-scripts/squit-mcp.sh"]
+    },
     "context7": {
       "command": "npx",
       "args": ["-y", "@upstash/context7-mcp@latest"]

@@ -2,7 +2,7 @@
 # scripts/release.sh
 # distributable: true
 #
-# GitOps Monorepo — Deacero
+# GitOps Monorepo — Company
 # Ref: docs/adr/ADR-0007-gitops-monorepo-trunk-based.md
 # Ref: docs/adr/ADR-0010-manifiesto-fuente-de-verdad-version.md (bump + tag; ver commons)
 #
@@ -25,7 +25,7 @@
 # Variables de entorno:
 #   GITOPS_REMOTE         remote autoritativo (auto-detect si no se setea)
 #   GITOPS_TRUNK_BRANCH   rama trunk (default: main)
-#   GITOPS_SCOPE          scope de paquetes internos (default: @deacero)
+#   GITOPS_SCOPE          scope de paquetes internos (default: @company)
 
 set -euo pipefail
 
@@ -44,7 +44,8 @@ trunk_branch() {
 }
 
 # Detecta el remote autoritativo sin asumir "origin"
-# Prioridad: GITOPS_REMOTE env > deacero > origin > upstream > primero disponible
+# Prioridad: GITOPS_REMOTE env (setéalo en .env si tu remote autoritativo no es
+# "origin"/"upstream" — ej. GITOPS_REMOTE=deacero) > origin > upstream > primero disponible
 resolve_remote() {
   if [[ -n "${GITOPS_REMOTE:-}" ]]; then
     git remote get-url "$GITOPS_REMOTE" &>/dev/null \
@@ -52,7 +53,7 @@ resolve_remote() {
     echo "$GITOPS_REMOTE"
     return
   fi
-  for r in deacero origin upstream; do
+  for r in origin upstream; do
     if git remote get-url "$r" &>/dev/null; then
       echo "$r"
       return
@@ -173,12 +174,12 @@ require_semver() {
 # Usa grep -o (POSIX) para compatibilidad con macOS y Alpine/BusyBox.
 shared_deps_of() {
   local proj="$1"
-  local scope="${GITOPS_SCOPE:-@deacero}"
-  # convierte @deacero → deacero para uso en sed y Python
+  local scope="${GITOPS_SCOPE:-@company}"
+  # convierte @company → company para uso en sed y Python
   local scope_name="${scope#@}"
   local proj_dir; proj_dir=$(_project_path "$proj")
 
-  # Node.js: detectar "@deacero/libname" en package.json
+  # Node.js: detectar "@company/libname" en package.json
   if [[ -f "$proj_dir/package.json" ]]; then
     grep -o "\"${scope}/[^\"]*\"" "$proj_dir/package.json" 2>/dev/null \
       | sed "s/\"${scope}\///;s/\"//" \
@@ -187,7 +188,7 @@ shared_deps_of() {
         done
   fi
 
-  # Python: detectar "deacero-libname" en pyproject.toml dependencies
+  # Python: detectar "company-libname" en pyproject.toml dependencies
   if [[ -f "$proj_dir/pyproject.toml" ]]; then
     grep -oE "${scope_name}-[a-z][a-z0-9-]+" "$proj_dir/pyproject.toml" 2>/dev/null \
       | sed "s/${scope_name}-//" \
@@ -829,9 +830,9 @@ Uso: release.sh <comando> [args]
   versions [proyecto]                    listar tags por ambiente
 
   VARIABLES DE ENTORNO
-  GITOPS_REMOTE         remote autoritativo (auto-detect: deacero > origin > upstream)
+  GITOPS_REMOTE         remote autoritativo (auto-detect: company > origin > upstream)
   GITOPS_TRUNK_BRANCH   rama trunk (default: main)
-  GITOPS_SCOPE          scope de paquetes internos (default: @deacero)
+  GITOPS_SCOPE          scope de paquetes internos (default: @company)
 EOF
     ;;
 esac

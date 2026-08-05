@@ -42,7 +42,7 @@ desconectado del sistema.
      tools dentro de un cliente agéntico (Claude Desktop/Code) — no es un mecanismo para
      servir una UI web a un usuario final. Ahí se necesitaría una app/web normal (que
      puede usar un LLM por debajo, pero la superficie de cara al usuario no es MCP).
-   - Dado el contexto de Grupo Deacero (usuarios de perfiles diversos, muchos no técnicos),
+   - Dado el contexto de Grupo company (usuarios de perfiles diversos, muchos no técnicos),
      esta pregunta es la primera que hay que resolver en la nueva sesión, no asumirla.
 
 2. **La capa "conversar con el usuario" es la parte más nueva y la más riesgosa.**

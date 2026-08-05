@@ -149,7 +149,7 @@ Configurado y validado 7 servidores MCP en `.mcp.json`:
 |-----|--------|---------|
 | alloydb | ✅ | PostgreSQL queries (localhost:5435/ods) |
 | atlassian | ✅ | Jira/Confluence/Bitbucket |
-| squit | ✅ | Legacy SP search (Deacero) |
+| squit | ✅ | Legacy SP search (Company) |
 | cloudsql | ✅ | CloudSQL PostgreSQL wrapper |
 | context7 | ✅ | Upstash documentation search |
 | serper | ✅ | Web search and scraping |

@@ -51,7 +51,7 @@ mismo resultado):
 - `tools/` sigue siendo plano en la práctica (`check_adr_gate.py`,
   `check_skill_frontmatter.py`, `install_hooks.sh`) — sin jerarquía
   `domain/subdomain/tool/`.
-- `git remote -v` solo lista `deacero` (Bitbucket corporativo) y `personal`
+- `git remote -v` solo lista `company` (Bitbucket corporativo) y `personal`
   (GitHub personal) — sigue sin existir ningún remoto `deagentic`.
 
 Se sigue la misma convención real ya establecida por ADR-0045: ubicación

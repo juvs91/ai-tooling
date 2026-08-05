@@ -16,8 +16,13 @@ if [ -z "$SQUIT_API_KEY" ]; then
   exit 1
 fi
 
-echo "[squit-mcp] Iniciando Squit Search MCP..." >&2
+if [ -z "$SQUIT_MCP_URL" ]; then
+  echo "ERROR: Falta SQUIT_MCP_URL en .env" >&2
+  exit 1
+fi
+
+echo "[squit-mcp] Iniciando Squit Search MCP ($SQUIT_MCP_URL)..." >&2
 
 exec npx -y mcp-remote \
-  https://squit-mcp.deacero.us/mcp \
+  "$SQUIT_MCP_URL" \
   --header "X-API-Key:${SQUIT_API_KEY}"

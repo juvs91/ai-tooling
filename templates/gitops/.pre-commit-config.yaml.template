@@ -1,4 +1,4 @@
-# .pre-commit-config.yaml — Template GitOps Monorepo Deacero
+# .pre-commit-config.yaml — Template GitOps Monorepo Company
 # Generado por scripts/gitops-init.sh
 # Ref: ADR-0007-gitops-monorepo-trunk-based.md
 #
