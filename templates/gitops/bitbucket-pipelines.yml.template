@@ -47,11 +47,15 @@ pipelines:
   # '*@*-dev.*'" (abajo), que es la ÚNICA fuente de verdad de "cómo deployar
   # a dev". No duplica lógica de deploy aquí.
   #
-  # Deliberadamente NO existe un "tag-multi-prod": prod es siempre uno por
-  # uno vía `release.sh tag <proyecto>` — bulk-promover a producción violaría
-  # la independencia de despliegue entre proyectos (pilar #1 de ADR-0007).
-  # El propio `release.sh cmd_tag` nunca acepta más de un proyecto a la vez,
-  # a propósito.
+  # ─── tag-multi-prod: N llamadas a `release.sh tag`, no un bulk ciego ─────
+  # Recibe una lista explícita de proyectos (variable PROJECTS, humano la
+  # llena a mano al disparar el pipeline) y llama `./scripts/release.sh tag
+  # <proyecto>` una vez por cada uno — reusa tal cual todas las validaciones
+  # de `cmd_tag` (require_trunk, require_clean, hotfixes pendientes, versión
+  # leída del manifiesto ya bumpeado+revisado por PR). No bypasea ni
+  # duplica esa lógica — solo la orquesta. Preserva la independencia de
+  # despliegue entre proyectos (ADR-0007): cada uno se valida y tagea por
+  # separado, el humano decide explícitamente cuáles N están listos AHORA.
   custom:
     tag-multi-dev:
       - step:
@@ -64,6 +68,33 @@ pipelines:
             - CURRENT_VERSION_B=$(node -p "require('./projects/proyecto-b/package.json').version")
             - git tag "proyecto-b@${CURRENT_VERSION_B}-dev.${BITBUCKET_BUILD_NUMBER}" -m "Manual dev build"
             - git push origin "proyecto-b@${CURRENT_VERSION_B}-dev.${BITBUCKET_BUILD_NUMBER}"
+
+    tag-multi-prod:
+      - variables:
+          - name: PROJECTS
+            default: ""
+            description: >-
+              Proyectos listos para prod, separados por coma (ej:
+              proyecto-a,proyecto-b). Cada uno debe tener su versión YA
+              bumpeada + PR revisado en el manifiesto — este pipeline NO
+              bumpea nada, solo tagea lo que ya está listo.
+      - step:
+          name: Tag N proyectos a producción
+          trigger: manual    # gate de aprobación humana OBLIGATORIO
+          script:
+            - git fetch --unshallow || true
+            - |
+              if [[ -z "$PROJECTS" ]]; then
+                echo "ERROR: variable PROJECTS vacía — especifica al menos un proyecto"
+                exit 1
+              fi
+              IFS=',' read -ra PROJS <<< "$PROJECTS"
+              for p in "${PROJS[@]}"; do
+                p=$(echo "$p" | xargs)
+                [[ -z "$p" ]] && continue
+                echo "=== Tagging $p ==="
+                ./scripts/release.sh tag "$p"
+              done
 
   # ─── Push a trunk (main) ────────────────────────────────────────────────
   # Solo quality gate (build+test) — NUNCA deploy. Los ambientes se definen
@@ -153,30 +184,6 @@ pipelines:
             - VERSION=$(echo "$BITBUCKET_TAG" | cut -d'@' -f2)
             - ./scripts/deploy.sh "$PROJECT" qa "$VERSION"
 
-    # Tags de PROD: proyecto-a@1.5.0 (solo dígitos, sin sufijo)
-    # Regex: empieza con letra/guion, contiene @, luego solo N.N.N
-    '*@[0-9]*.[0-9]*.[0-9]*':
-      - step:
-          name: Validate (not hotfix/dev/rc)
-          script:
-            # Rechazar si el tag tiene sufijo dev/rc/hotfix
-            - |
-              if echo "$BITBUCKET_TAG" | grep -qE '\-(dev|rc|hotfix)\.'; then
-                echo "ERROR: este patrón es solo para tags de PROD sin sufijo"
-                exit 1
-              fi
-            - echo "Tag de producción validado: $BITBUCKET_TAG"
-      - step:
-          name: Deploy → PROD
-          deployment: Production
-          trigger: manual    # gate de aprobación humana OBLIGATORIO
-          script:
-            - echo "Deploying tag $BITBUCKET_TAG to Production"
-            - PROJECT=$(echo "$BITBUCKET_TAG" | cut -d'@' -f1)
-            - VERSION=$(echo "$BITBUCKET_TAG" | cut -d'@' -f2)
-            - ./scripts/deploy.sh "$PROJECT" prod "$VERSION"
-            - echo "Production deploy complete: $PROJECT@$VERSION"
-
     # Tags de hotfix: proyecto-a@1.4.2-hotfix.1
     '*@*-hotfix.*':
       - step:
@@ -189,3 +196,35 @@ pipelines:
             - VERSION=$(echo "$BITBUCKET_TAG" | cut -d'@' -f2)
             - ./scripts/deploy.sh "$PROJECT" prod "$VERSION"
             - echo "RECORDATORIO: ./scripts/release.sh cherry $PROJECT $(echo $VERSION | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')"
+
+    # Tags de PROD: proyecto-a@1.5.0 (semver puro, sin sufijo).
+    #
+    # Bitbucket NO soporta clases de caracteres ([0-9]) en patrones de tag —
+    # solo * y ** (verificado contra la doc oficial de Atlassian + foro de la
+    # comunidad, 2026-08-05). El patrón anterior '*@[0-9]*.[0-9]*.[0-9]*'
+    # probablemente nunca matcheó ningún tag real — quedaba como código muerto.
+    #
+    # Fix: '*@*' (catch-all) + validación en bash. Se coloca DESPUÉS de los 3
+    # patrones específicos (-dev/-rc/-hotfix) por si Bitbucket usa "primer
+    # match gana" (no está documentado con certeza) — así los específicos
+    # tienen prioridad. El guard interno es la defensa real: si de todas
+    # formas se dispara para un tag -dev/-rc/-hotfix (Bitbucket podría
+    # ejecutar TODOS los patrones que matchean, no solo el primero — tampoco
+    # está documentado con certeza), sale con exit 0 (no es un error) en vez
+    # de desplegar con una versión inválida.
+    '*@*':
+      - step:
+          name: Deploy → PROD (valida que sea semver puro)
+          deployment: Production
+          trigger: manual    # gate de aprobación humana OBLIGATORIO
+          script:
+            - |
+              if echo "$BITBUCKET_TAG" | grep -qE -- '-(dev|rc|hotfix)\.[0-9]+$'; then
+                echo "Tag $BITBUCKET_TAG tiene sufijo -dev/-rc/-hotfix — ya lo maneja su propio patrón de tags arriba. Saltando sin error."
+                exit 0
+              fi
+            - echo "Tag de producción validado: $BITBUCKET_TAG"
+            - PROJECT=$(echo "$BITBUCKET_TAG" | cut -d'@' -f1)
+            - VERSION=$(echo "$BITBUCKET_TAG" | cut -d'@' -f2)
+            - ./scripts/deploy.sh "$PROJECT" prod "$VERSION"
+            - echo "Production deploy complete: $PROJECT@$VERSION"

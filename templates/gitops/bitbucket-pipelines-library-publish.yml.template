@@ -212,6 +212,43 @@ pipelines:
           <<: *go-publish-dev
           condition: ~
 
+    # tag-multi-prod: N llamadas a `release.sh tag`, no un bulk ciego. Recibe
+    # una lista explícita de librerías (variable PROJECTS, el humano la llena
+    # al disparar el pipeline) y llama `./scripts/release.sh tag <lib>` una
+    # vez por cada una — reusa tal cual todas las validaciones de `cmd_tag`
+    # (require_trunk, require_clean, hotfixes pendientes, versión leída del
+    # manifiesto ya bumpeado+revisado por PR). No bypasea ni duplica esa
+    # lógica — solo la orquesta. Preserva la independencia de despliegue
+    # entre librerías (ADR-0007): cada una se valida y tagea por separado,
+    # el humano decide explícitamente cuáles N están listas AHORA. El push
+    # de cada tag dispara su propio *-publish-tag ya existente arriba.
+    tag-multi-prod:
+      - variables:
+          - name: PROJECTS
+            default: ""
+            description: >-
+              Librerías listas para publicar, separadas por coma (ej:
+              python-auth,go-auth). Cada una debe tener su versión YA
+              bumpeada + PR revisado en el manifiesto — este pipeline NO
+              bumpea nada, solo tagea lo que ya está listo.
+      - step:
+          name: Tag N librerías a producción
+          trigger: manual    # gate de aprobación humana OBLIGATORIO
+          script:
+            - git fetch --unshallow || true
+            - |
+              if [[ -z "$PROJECTS" ]]; then
+                echo "ERROR: variable PROJECTS vacía — especifica al menos una librería"
+                exit 1
+              fi
+              IFS=',' read -ra PROJS <<< "$PROJECTS"
+              for p in "${PROJS[@]}"; do
+                p=$(echo "$p" | xargs)
+                [[ -z "$p" ]] && continue
+                echo "=== Tagging $p ==="
+                ./scripts/release.sh tag "$p"
+              done
+
   # Tags por paquete → publica la versión correspondiente (esquema <proyecto>@<version>,
   # el mismo que genera `release.sh tag`)
   tags:
