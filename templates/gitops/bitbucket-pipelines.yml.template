@@ -6,6 +6,9 @@
 #   BUILD_CMD     → comando de build de tu stack (pnpm build, make build, poetry build...)
 #   TEST_CMD      → comando de tests (pnpm test, pytest, go test ./...)
 #   DEPLOY_CMD    → script de deploy (./scripts/deploy.sh, kubectl apply, etc.)
+#   ⚠️ crea este script antes de usar este template en producción — ./scripts/deploy.sh
+#   NO EXISTE en este repo, es un placeholder: los steps de `tags:` de abajo fallarán
+#   con "No such file or directory" hasta que lo reemplaces por tu deploy real.
 #
 # REQUISITOS:
 #   - git fetch --unshallow en pipelines que usen merge-base (Bitbucket usa shallow clone)
@@ -160,6 +163,9 @@ pipelines:
           - pnpm test
 
   # ─── Tags — cada patrón dispara el ambiente correspondiente ─────────────
+  # ⚠️ crea ./scripts/deploy.sh antes de usar este template en producción — no existe
+  # en este repo, es un placeholder. Los 4 steps de abajo lo invocan y fallarán con
+  # "No such file or directory" hasta que lo reemplaces por tu deploy real.
   tags:
     # Tags de DEV: proyecto-a@1.5.0-dev.1
     '*@*-dev.*':

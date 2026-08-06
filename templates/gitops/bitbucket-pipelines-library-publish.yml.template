@@ -196,9 +196,10 @@ pipelines:
   custom:
     # Ejecutar todos los tests manualmente (sin publicar)
     test-all:
-      - step: *python-test
-      - step: *typescript-test
-      - step: *go-test
+      - parallel:
+          - step: *python-test
+          - step: *typescript-test
+          - step: *go-test
 
     # Publicar dev de todos los paquetes ignorando changesets
     publish-all-dev:
@@ -260,25 +261,41 @@ pipelines:
       - step: *go-publish-tag
 
   # PRs → solo tests, sin publicar
+  # parallel: — sin esto, un fallo real en python-test aborta la pipeline y
+  # typescript-test/go-test NUNCA llegan a correr en ese mismo push, aunque no
+  # tengan nada que ver con python. Bitbucket para toda la run en el primer
+  # step que falla salvo que estén en parallel: (hallazgo de validación
+  # 2026-08-05/06, ver gitops-monorepo-guia.md §19).
   pull-requests:
     "**":
-      - step: *python-test
-      - step: *typescript-test
-      - step: *go-test
+      - parallel:
+          - step: *python-test
+          - step: *typescript-test
+          - step: *go-test
 
   # Branches dev y main
   branches:
-    # dev → test + publish por stack (interleaved: cada lib es independiente)
+    # dev → test (parallel) y LUEGO publish-dev (parallel). Nota: Bitbucket no
+    # soporta anidar una sub-secuencia [test→publish] dentro de un slot de
+    # parallel: (cada slot es UN step). Con este diseño en 2 etapas, si
+    # python-test falla, typescript-test/go-test siguen corriendo (visibilidad
+    # completa) pero NINGÚN publish-dev corre en esa run, ni siquiera el de
+    # los proyectos que sí pasaron — la independencia total de publish
+    # requeriría fusionar test+publish-dev en un solo step por proyecto (main
+    # image compartida), cambio más invasivo no aplicado aquí sin confirmación.
     dev:
-      - step: *python-test
-      - step: *python-publish-dev
-      - step: *typescript-test
-      - step: *typescript-publish-dev
-      - step: *go-test
-      - step: *go-publish-dev
+      - parallel:
+          - step: *python-test
+          - step: *typescript-test
+          - step: *go-test
+      - parallel:
+          - step: *python-publish-dev
+          - step: *typescript-publish-dev
+          - step: *go-publish-dev
 
     # main → solo quality gate; librerías se publican únicamente via tag explícito
     main:
-      - step: *python-test
-      - step: *typescript-test
-      - step: *go-test
+      - parallel:
+          - step: *python-test
+          - step: *typescript-test
+          - step: *go-test
