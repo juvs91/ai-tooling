@@ -1,8 +1,7 @@
 # llm/session/lifecycle.py
 """Session lifecycle: create/reuse compression cache entries, expire old ones.
 
-Split out of llm/compressor.py — ADR-0032. Pure code motion; see the ADR-0032
-plan/summary for a pre-existing bug noted (not fixed) during the move.
+Split out of llm/compressor.py — ADR-0032.
 """
 from __future__ import annotations
 
@@ -88,7 +87,7 @@ async def cleanup_expired_sessions() -> None:
 
             if expired_sessions:
                 print(f"[session] Cleanup completed: removed {len(expired_sessions)} expired sessions")
-                metrics.record("sessions_cleaned", len(expired_sessions))
+                metrics.sessions_cleaned += len(expired_sessions)
                 _save_session_cache_to_disk()
         else:
             pass

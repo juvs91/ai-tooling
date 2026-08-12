@@ -42,6 +42,11 @@ class TestProxyMetrics:
         assert m.total_fallbacks == 1
         assert m.provider_counts["fallback_1"] == 1
 
+    def test_sessions_cleaned_counter(self):
+        m = ProxyMetrics()
+        m.sessions_cleaned += 3
+        assert m.sessions_cleaned == 3
+
     def test_get_stats_calculates_fallback_rate(self):
         m = ProxyMetrics()
         m.record(_make_log())

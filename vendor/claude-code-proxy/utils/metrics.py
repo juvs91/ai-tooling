@@ -51,6 +51,7 @@ class ProxyMetrics:
         # Compression cache tracking
         self.compression_cache_hits = 0
         self.compression_cache_misses = 0
+        self.sessions_cleaned = 0
         # Compression effectiveness tracking
         self.compression_aggressive_trims = 0
         self.compression_message_cap_enforced = 0
