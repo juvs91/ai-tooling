@@ -1,4 +1,4 @@
-# ADR-0050: Fix — `ProxyMetrics.record()` llamado con la API equivocada en `cleanup_expired_sessions()`
+# ADR-0052: Fix — `ProxyMetrics.record()` llamado con la API equivocada en `cleanup_expired_sessions()`
 
 - **Estado:** Aceptado
 - **Fecha:** 2026-08-12

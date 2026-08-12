@@ -66,18 +66,32 @@ if echo "$COMMAND" | grep -qE 'git\s+clean\s+-[a-zA-Z]*f'; then
   exit 2
 fi
 
-# 5. rm -rf sobre un git worktree activo (Ref: ADR-0044)
-# Segmentado por &&/||/;/| — evita falso positivo cuando el path de un worktree
-# aparece en un comando encadenado distinto del que realmente ejecuta el rm -rf.
+# 5. rm -rf sobre un git worktree activo, o sobre un ancestro suyo (Ref: ADR-0044, fix: ADR-0053)
+# Segmentado por &&/||/;/| para aislar el segmento que realmente ejecuta el rm -rf.
+# Resuelve cada path objetivo a ruta absoluta (relativa al cwd del hook, que Claude Code fija
+# igual al cwd real de la sesión) y compara por IGUALDAD o ANCESTRO contra cada worktree
+# registrado — no por substring: un match de substring bloqueaba cualquier ruta absoluta que
+# simplemente viviera DENTRO del worktree (falso positivo, ej. borrar un subdirectorio inocuo
+# de vendor/), y a la vez lo evadía trivialmente con rutas relativas (falso negativo).
 if echo "$COMMAND" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f'; then
-  for wt_path in $(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}'); do
+  WORKTREES=$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
+  if [ -n "$WORKTREES" ]; then
     while IFS= read -r segment; do
-      if echo "$segment" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f' && echo "$segment" | grep -qF "$wt_path"; then
-        echo "BLOCKED: '$wt_path' es un git worktree activo. Usa: git worktree remove $wt_path" >&2
-        exit 2
-      fi
+      echo "$segment" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f' || continue
+      rest=$(echo "$segment" | sed -E 's/.*rm[[:space:]]+-[a-zA-Z]*r[a-zA-Z]*f//')
+      for target in $rest; do
+        case "$target" in -*) continue ;; esac
+        resolved=$(python3 -c "import os,sys; print(os.path.abspath(sys.argv[1]))" "$target" 2>/dev/null) || continue
+        while IFS= read -r wt_path; do
+          [ -z "$wt_path" ] && continue
+          if [ "$resolved" = "$wt_path" ] || [[ "$wt_path" == "$resolved"/* ]]; then
+            echo "BLOCKED: '$wt_path' es un git worktree activo (target resuelto: $resolved). Usa: git worktree remove $wt_path" >&2
+            exit 2
+          fi
+        done <<< "$WORKTREES"
+      done
     done < <(echo "$COMMAND" | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g')
-  done
+  fi
 fi
 
 # Todo lo demás: permitir
