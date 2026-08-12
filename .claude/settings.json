@@ -111,7 +111,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/block-dangerous.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-dangerous.sh\"",
             "timeout": 5
           }
         ],
@@ -133,7 +133,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/adr-gate.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/adr-gate.sh\"",
             "timeout": 10
           }
         ],
@@ -144,7 +144,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/worktree-isolation-gate.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-isolation-gate.sh\"",
             "timeout": 5
           }
         ],
@@ -155,7 +155,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/skill-load-gate.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-load-gate.sh\"",
             "timeout": 5
           }
         ],
@@ -166,7 +166,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/protect-skill-gate-bypass.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/protect-skill-gate-bypass.sh\"",
             "timeout": 5
           }
         ],
@@ -177,7 +177,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/config-protection.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/config-protection.sh\"",
             "timeout": 10
           }
         ],
@@ -188,7 +188,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/protect-secrets.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/protect-secrets.sh\"",
             "timeout": 10
           }
         ],
@@ -199,7 +199,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/quality-enforce.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/quality-enforce.sh\"",
             "timeout": 5
           }
         ],
@@ -210,7 +210,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/scope-gate.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/scope-gate.sh\"",
             "timeout": 5
           }
         ],
@@ -223,7 +223,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/track-skill-load.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/track-skill-load.sh\"",
             "timeout": 5
           }
         ],
@@ -234,7 +234,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/ts-quality-gate.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/ts-quality-gate.sh\"",
             "timeout": 30
           }
         ],
@@ -245,7 +245,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/migration-gate.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/migration-gate.sh\"",
             "timeout": 10
           }
         ],
@@ -256,7 +256,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/verify-implementation.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/verify-implementation.sh\"",
             "timeout": 15
           }
         ],
@@ -267,7 +267,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/edit-drift-detector.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/edit-drift-detector.sh\"",
             "timeout": 5
           }
         ],
@@ -280,7 +280,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .agents/sync_skills.sh 2>/dev/null || true",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.agents/sync_skills.sh\" 2>/dev/null || true",
             "timeout": 30
           }
         ],
@@ -291,7 +291,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/intent-bootstrap.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/intent-bootstrap.sh\"",
             "timeout": 5
           }
         ],
@@ -302,7 +302,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/skill-autoload.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-autoload.sh\"",
             "timeout": 5
           }
         ],
@@ -313,7 +313,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/task-scope-updater.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/task-scope-updater.sh\"",
             "timeout": 5
           }
         ],
@@ -324,7 +324,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/plan-mode-gate.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/plan-mode-gate.sh\"",
             "timeout": 5
           }
         ],
