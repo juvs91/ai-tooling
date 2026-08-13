@@ -1,0 +1,33 @@
+services:
+    pg-combo:
+        container_name: poc_pg_combo
+        build: ./combo
+        platform: linux/amd64
+        environment:
+            - POSTGRES_DB=poc
+            - POSTGRES_USER=poc
+            - POSTGRES_PASSWORD=poc
+        ports:
+            - "5461:5432"
+        mem_limit: 512m
+        volumes:
+            - combo_data:/var/lib/postgresql/data
+        restart: unless-stopped
+
+    pg-hydra:
+        container_name: poc_pg_hydra
+        image: ghcr.io/hydradatabase/hydra:latest
+        environment:
+            - POSTGRES_DB=poc
+            - POSTGRES_USER=poc
+            - POSTGRES_PASSWORD=poc
+        ports:
+            - "5462:5432"
+        mem_limit: 512m
+        volumes:
+            - hydra_data:/var/lib/postgresql/data
+        restart: unless-stopped
+
+volumes:
+    combo_data:
+    hydra_data:
