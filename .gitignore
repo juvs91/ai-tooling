@@ -29,7 +29,8 @@ venv/
 env/
 ENV/
 profile-envs/*
-
+cloud-provider-env/*
+.kimi-code/*
 # Logs
 *.log
 
@@ -44,5 +45,6 @@ profile-envs/*
 *.swo
 # Local Claude Code settings (may contain tokens)
 .claude/proxy.settings.local.json
+.claude/settings.local.json
 # Salesforce
 .sfdx/

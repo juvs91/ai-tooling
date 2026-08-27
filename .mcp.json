@@ -1,25 +1,5 @@
 {
   "mcpServers": {
-    "alloydb": {
-      "command": "bash",
-      "args": ["./mcp-scripts/alloydb-mcp.sh"]
-    },
-    "atlassian": {
-      "command": "bash",
-      "args": ["./mcp-scripts/atlassian-mcp.sh"]
-    },
-    "bitbucket": {
-      "command": "bash",
-      "args": ["./mcp-scripts/atlassian-mcp.sh", "bitbucket"]
-    },
-    "cloudsql": {
-      "command": "bash",
-      "args": ["./scripts/cloudsql-mcp.sh"]
-    },
-    "squit": {
-      "command": "bash",
-      "args": ["./mcp-scripts/squit-mcp.sh"]
-    },
     "context7": {
       "command": "npx",
       "args": ["-y", "@upstash/context7-mcp@latest"]

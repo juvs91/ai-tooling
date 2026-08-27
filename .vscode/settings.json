@@ -7,6 +7,25 @@
         "**/Thumbs.db": true,
         ".mule": true
     },
-    "python.defaultInterpreterPath": "/Users/jeguzman/ai-tooling/vendor/claude-code-proxy/.venv/bin/python3",
+    "python.defaultInterpreterPath": "/Volumes/case-sensitive/ai-tooling/vendor/claude-code-proxy/.venv/bin/python",
+    "python.analysis.extraPaths": [
+        "/Volumes/case-sensitive/ai-tooling/vendor/claude-code-proxy"
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:poetry",
+    "python-envs.defaultPackageManager": "ms-python.python:poetry",
+
+    "scm.diffDecorations": "all",
+    "scm.diffDecorationsGutterAction": "diff",
+    "git.decorations.enabled": true,
+    "git.blame.editorDecoration.enabled": true,
+    "gitlens.graph.details.location": "auto",
+
+    "kimi.executablePath": "/Users/juve/.kimi-code/bin/kimi",
+    "kimi.environmentVariables": {
+        "KIMI_CODE_HOME": "${workspaceFolder}/.kimi-code",
+        "KIMI_CODE_EXPERIMENTAL_SECONDARY_MODEL": "1"
+    },
+    "kimi.useCtrlEnterToSend": false,
+
     "claudeCode.terminalEnvironment": {}
 }
