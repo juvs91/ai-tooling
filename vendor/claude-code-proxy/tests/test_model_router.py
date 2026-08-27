@@ -379,6 +379,91 @@ class TestMixedCrossProviderRouting:
         assert ctx.route_override is groq_route
 
 
+class TestSameModelNameRouteOverride:
+    """When all model names are identical, route overrides still apply if configured."""
+
+    _ANTH_SMALL_ROUTE = RouteOverride(
+        provider="anthropic", api_key="sk-small-key",
+        base_url="https://api.kimi.com/coding/v1",
+    )
+    _ANTH_BUILD_ROUTE = RouteOverride(
+        provider="anthropic", api_key="sk-building-key",
+        base_url="https://api.kimi.com/coding/v1",
+    )
+
+    @pytest.mark.asyncio
+    async def test_explore_uses_small_route_when_model_names_equal(self):
+        t = ModelRouterTransformer(
+            _routing(
+                preferred="anthropic",
+                small="kimi-for-coding", big="kimi-for-coding",
+                building="kimi-for-coding",
+                small_route=self._ANTH_SMALL_ROUTE,
+                building_route=self._ANTH_BUILD_ROUTE,
+            ),
+            _creds(),
+        )
+        req = _request(model="claude-haiku-4-5-20251001")
+        ctx = TransformContext(intent="CHAT", phase="EXPLORE")
+        await t.transform(req, ctx)
+        assert req.model == "anthropic/kimi-for-coding"
+        assert ctx.route_override is self._ANTH_SMALL_ROUTE
+
+    @pytest.mark.asyncio
+    async def test_execute_uses_building_route_when_model_names_equal(self):
+        t = ModelRouterTransformer(
+            _routing(
+                preferred="anthropic",
+                small="kimi-for-coding", big="kimi-for-coding",
+                building="kimi-for-coding",
+                small_route=self._ANTH_SMALL_ROUTE,
+                building_route=self._ANTH_BUILD_ROUTE,
+            ),
+            _creds(),
+        )
+        req = _request(model="claude-sonnet-4-20250514", tools=[SimpleNamespace(name="Bash")])
+        ctx = TransformContext(intent="BUILD", phase="EXECUTE")
+        await t.transform(req, ctx)
+        assert req.model == "anthropic/kimi-for-coding"
+        assert ctx.route_override is self._ANTH_BUILD_ROUTE
+
+    @pytest.mark.asyncio
+    async def test_execute_no_tools_stays_on_big_primary(self):
+        t = ModelRouterTransformer(
+            _routing(
+                preferred="anthropic",
+                small="kimi-for-coding", big="kimi-for-coding",
+                building="kimi-for-coding",
+                small_route=self._ANTH_SMALL_ROUTE,
+                building_route=self._ANTH_BUILD_ROUTE,
+            ),
+            _creds(),
+        )
+        req = _request(model="claude-sonnet-4-20250514")
+        ctx = TransformContext(intent="BUILD", phase="EXECUTE")
+        await t.transform(req, ctx)
+        assert req.model == "anthropic/kimi-for-coding"
+        assert ctx.route_override is None
+
+    @pytest.mark.asyncio
+    async def test_plan_stays_on_big_primary(self):
+        t = ModelRouterTransformer(
+            _routing(
+                preferred="anthropic",
+                small="kimi-for-coding", big="kimi-for-coding",
+                building="kimi-for-coding",
+                small_route=self._ANTH_SMALL_ROUTE,
+                building_route=self._ANTH_BUILD_ROUTE,
+            ),
+            _creds(),
+        )
+        req = _request(model="claude-sonnet-4-20250514")
+        ctx = TransformContext(intent="PLAN", phase="PLAN")
+        await t.transform(req, ctx)
+        assert req.model == "anthropic/kimi-for-coding"
+        assert ctx.route_override is None
+
+
 # ── Model Mapper Tests ────────────────────────────────────────────
 
 class TestModelMapper:

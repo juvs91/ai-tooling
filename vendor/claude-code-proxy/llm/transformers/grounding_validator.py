@@ -216,15 +216,6 @@ def _has_search_tool_evidence(messages: list) -> bool:
     return False
 
 
-# Claim pattern: sentence with citation
-# Matches: "The function X does Y (file.py:123)" - claims with citations
-# Skips: "I will..." "Let me..." - planning statements without claims
-_CLAIM_PATTERN = re.compile(
-    r'(?:[A-Z][^.!?]+(?:does|is|are|has|uses|handles|manages|implements|provides|calls|invokes|returns|throws)[^.!?]+)[.!?]',
-    re.IGNORECASE
-)
-
-
 async def _persist_evidence_graph(
     session_id: str,
     evidence_graph: dict,

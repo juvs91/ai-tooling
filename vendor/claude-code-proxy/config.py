@@ -216,6 +216,7 @@ class ProxyConfig:
     adaptive: AdaptiveRoutingConfig = field(default_factory=AdaptiveRoutingConfig)
     quirks: ProviderQuirksConfig = field(default_factory=ProviderQuirksConfig)
     litellm_thinking_params: Optional[dict] = None  # Provider-specific thinking params for LiteLLM
+    passthrough_thinking_params: Optional[dict] = None  # ENV: PASSTHROUGH_THINKING_PARAMS
     cache_enabled: bool = True
     cache_ttl: int = 60
     stream_extra_body: Optional[dict] = None
@@ -273,6 +274,23 @@ def _parse_thinking_params() -> Optional[dict]:
     during ANALYZING phase (e.g. {"thinking":{"type":"enabled"},"clear_thinking":false}).
     """
     raw = os.environ.get("ANALYSIS_THINKING_PARAMS", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) and parsed else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _parse_passthrough_thinking_params() -> Optional[dict]:
+    """Parse PASSTHROUGH_THINKING_PARAMS JSON env var.
+
+    Keyed by bare model name. Merged into passthrough body for every phase,
+    before ANALYSIS_THINKING_PARAMS is applied. Example:
+    {"kimi-for-coding": {"thinking": {"type": "enabled", "budget_tokens": 65536}}}
+    """
+    raw = os.environ.get("PASSTHROUGH_THINKING_PARAMS", "").strip()
     if not raw:
         return None
     try:
@@ -461,6 +479,7 @@ def load_config() -> ProxyConfig:
             deepseek_analysis_max_tokens=int(_env("QUIRKS_DEEPSEEK_ANALYSIS_MAX_TOKENS", "8000")),
         ),
         litellm_thinking_params=_parse_litellm_thinking_params(),
+        passthrough_thinking_params=_parse_passthrough_thinking_params(),
         max_retries=int(_env("MAX_RETRIES", "5")),
         retry_base_delay=float(_env("RETRY_BASE_DELAY", "1.0")),
         cache_enabled=_env_stripped("CACHE_ENABLED", "0") == "1",

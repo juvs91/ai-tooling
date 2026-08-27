@@ -1,8 +1,6 @@
 # app/proxy/proxy.py
 from __future__ import annotations
 import asyncio
-import os
-import uuid
 from threading import Lock
 from typing import Any, Tuple
 
@@ -19,22 +17,14 @@ from litellm.exceptions import (
     ServiceUnavailableError as LiteLLMServiceUnavailableError,
     InternalServerError as LiteLLMInternalServerError,
 )
-from llm.passthrough import PassthroughClient, PassthroughError, try_structural_correction
+from llm.passthrough import PassthroughClient, PassthroughError, try_structural_correction, build_passthrough_body
 from llm.compressor import _track_grounding_hop
 from llm.transformers import GroundingValidatorTransformer
 from llm.state_assertion_rules import build_active_rules
 
 logger = logging.getLogger(__name__)
 
-# Explicit activation (ADR-0038+): builds the state-assertion rule instances
-# from llm.state_assertion_rules.ACTIVE_RULE_CLASSES, once, at process boot
-# (module import). This list is passed explicitly into
-# StateAssertionRequestTransformer/StateAssertionResponseTransformer below —
-# no shared global, no per-request rebuild. Rules are stateless, so the same
-# list object is safe to hand to every pipeline build
-# (build_response_pipeline in particular runs on every request — see
-# _run_response_pipeline below — but reuses this one rule list, never
-# reconstructing rule instances per request).
+# Build state-assertion rules once at import (ADR-0038+); reused per request.
 _STATE_ASSERTION_RULES = build_active_rules()
 from utils.metrics import metrics
 from llm.converters import convert_anthropic_to_litellm
@@ -135,38 +125,21 @@ def build_passthrough_pipeline(cfg: ProxyConfig) -> Pipeline:
 
 
 def build_response_pipeline(cfg: ProxyConfig) -> Pipeline:
-    """AGNOSTIC RESPONSE pipeline for universal tool extraction.
-
-    Runs AFTER model returns response, processes ALL output types:
-    - thinking, content, tools, mixed responses
-    - Works for ALL models (no model-specific logic)
-    - Extracts tools, cleans XML, provides AGNOSTIC feedback
-
-    Key Design Decisions:
-    1. NO model-specific if/elif blocks (AGNOSTIC)
-    2. Processes model OUTPUT (not INPUT)
-    3. Runs AFTER model endpoint, BEFORE client response
-    4. Uses existing Transformer classes (already implemented and tested)
-    """
+    """Agnostic response pipeline: reasoning, tool extraction, grounding, feedback."""
     return Pipeline([
         ReasoningHandlingTransformer(cfg.analysis),
         UniversalToolExtractionTransformer(),
-        ToolCallValidatorTransformer(),               # Validate/auto-correct CC tool params (e.g. AskUserQuestion)
-        PlanModeGuardTransformer(),                   # Block Edit/Write/Bash-write in plan mode (tool-level, not advisory)
+        ToolCallValidatorTransformer(),
+        PlanModeGuardTransformer(),
         GroundingValidatorTransformer(enabled=cfg.policy.grounding_validation_enabled if hasattr(cfg, "policy") and hasattr(cfg.policy, "grounding_validation_enabled") else True),
-        StateAssertionResponseTransformer(_STATE_ASSERTION_RULES),   # ADR-0036 — feeds ctx.grounding_issues, consumed below
+        StateAssertionResponseTransformer(_STATE_ASSERTION_RULES),
         ModelFeedbackTransformer(cfg),
         QualityRecorderTransformer(),
     ])
 
 
 async def _run_response_pipeline(response: Any, ctx: TransformContext, cfg: ProxyConfig) -> None:
-    """Build and execute the response pipeline, propagating request context.
-
-    Single canonical call site shared by LiteLLM non-stream (server.py) and
-    passthrough non-stream (proxy.py) so the TransformContext construction
-    and pipeline invocation are never duplicated.
-    """
+    """Shared response pipeline for LiteLLM and passthrough non-stream paths."""
     response_ctx = TransformContext(
         intent=ctx.intent,
         is_analysis=ctx.is_analysis,
@@ -203,11 +176,10 @@ def _get_passthrough_pipeline(cfg: ProxyConfig) -> Pipeline:
     return _passthrough_pipeline_cache
 
 
-# ── Execution layer (retry + fallback — unchanged) ──────────────────
+# Execution layer (retry + fallback)
 
 async def _call_provider(request_obj: Any, litellm_request: dict) -> Tuple[bool, Any]:
     """Execute a single litellm call. For streaming, validates the first chunk."""
-    # Timeout protects against provider hangs (e.g., MiniMax 92.6s spike)
     litellm_request.setdefault("timeout", 60)
 
     if getattr(request_obj, "stream", False):
@@ -277,9 +249,6 @@ async def _call_provider_with_retry(
             return result
         except Exception as e:
             last_exception = e
-            # Fix: was < max_retries, changed to < max_retries - 1 for correct retry count
-            # With max_retries=5, range(5) gives attempts 0,1,2,3,4
-            # We want to retry on attempts 0,1,2,3 but NOT on 4 (last attempt)
             if attempt < max_retries - 1 and _is_retryable_error(e):
                 delay = base_delay * (2 ** attempt)
                 print(f"[retry] Attempt {attempt + 1}/{max_retries} failed, retry in {delay}s: {type(e).__name__}: {str(e)[:200]}")
@@ -295,32 +264,42 @@ async def _call_provider_with_retry(
     raise last_exception
 
 
-# ── Passthrough helpers ───────────────────────────────────────────────
+# Passthrough helpers
 
-def _is_passthrough_compatible(model: str, cfg: ProxyConfig) -> bool:
-    """Auto-detect if model targets an Anthropic endpoint that supports passthrough.
+def _get_passthrough_credentials(
+    cfg: ProxyConfig,
+    ctx: TransformContext,
+) -> tuple[Optional[str], Optional[str]]:
+    """Return (base_url, api_key) to use for Anthropic-compatible passthrough.
 
-    Passthrough bypasses LiteLLM by sending Anthropic format directly via httpx.
-    Only activates when: (1) not disabled, (2) custom anthropic base_url exists,
-    and (3) model uses anthropic/ prefix or is a bare model name.
+    If ctx.route_override has provider == 'anthropic', its api_key/base_url take
+    precedence. This allows SMALL/BUILDING routes to use their own API keys even
+    when all models are on the same Anthropic-compatible provider (e.g., Kimi).
     """
+    route = getattr(ctx, "route_override", None)
+    if route and route.provider.lower() == "anthropic":
+        # Route override wins for anthropic passthrough.
+        base_url = route.base_url or cfg.credentials.anthropic_base_url
+        api_key = route.api_key
+        return base_url, api_key
+    return cfg.credentials.anthropic_base_url, cfg.credentials.anthropic_api_key
+
+
+def _is_passthrough_compatible(model: str, cfg: ProxyConfig, ctx: TransformContext) -> bool:
+    """Auto-detect if model targets an Anthropic endpoint that supports passthrough."""
     if cfg.passthrough_disabled:
         return False
-    # Need a custom Anthropic endpoint (Z.AI, etc.) — actual Anthropic API
-    # is handled natively by LiteLLM with no conversion overhead.
-    if not cfg.credentials.anthropic_base_url:
+    base_url, api_key = _get_passthrough_credentials(cfg, ctx)
+    if not base_url:
         return False
-    if not cfg.credentials.anthropic_api_key:
+    if not api_key:
         return False
-    # Check model prefix
     if "/" not in model:
-        # Bare model name (no provider prefix, e.g. "claude-opus-4-6").
-        # Default: require explicit prefix to prevent bare DeepSeek/GLM names from
-        # accidentally activating passthrough when ANTHROPIC_BASE_URL is set.
-        # Set PASSTHROUGH_REQUIRE_PREFIX=0 to restore legacy behaviour.
+        # Bare model name: require explicit prefix by default to avoid accidental
+        # passthrough for DeepSeek/GLM when ANTHROPIC_BASE_URL is set.
         if cfg.passthrough_require_prefix:
             return False
-        return True  # legacy: bare model → assume primary provider
+        return True
     return model.split("/", 1)[0].lower() == "anthropic"
 
 
@@ -329,59 +308,6 @@ async def _empty_stream():
     return
     yield  # noqa: unreachable — makes this an async generator
 
-
-def _build_passthrough_body(
-    request: Any,
-    model: str,
-    ctx: TransformContext | None = None,
-    analysis_thinking: dict | None = None,
-) -> dict:
-    """Convert MessagesRequest to Anthropic API body dict for passthrough.
-
-    When ctx.analysis_phase == "ANALYZING" and analysis_thinking is provided,
-    merges thinking params into the body (model-agnostic activation).
-    """
-    body: dict[str, Any] = {
-        "model": model,
-        "max_tokens": getattr(request, "max_tokens", 4096),
-        "messages": [
-            m if isinstance(m, dict) else m.dict()
-            for m in (request.messages or [])
-        ],
-    }
-    if getattr(request, "system", None):
-        system = request.system
-        if isinstance(system, list):
-            body["system"] = [
-                s if isinstance(s, dict) else s.dict() for s in system
-            ]
-        else:
-            body["system"] = system
-    if getattr(request, "tools", None):
-        body["tools"] = [
-            t if isinstance(t, dict) else t.dict() for t in request.tools
-        ]
-    if getattr(request, "temperature", None) is not None:
-        body["temperature"] = request.temperature
-    # Inject thinking params for ANALYZING/READ/SYNTHESIZING phases.
-    # analysis_thinking comes from ANALYSIS_THINKING_PARAMS env var — it's specific to
-    # the model configured there (e.g. GLM-4.7 via Anthropic passthrough). We don't
-    # propagate CC's thinking param to other models since they may not support it.
-    # SYNTHESIZING needs thinking to verify evidence across multiple hops.
-    if ctx and ctx.analysis_phase in ("ANALYZING", "READ", "SYNTHESIZING") and analysis_thinking:
-        # Skip thinking for very large contexts — reasoning overhead causes timeouts
-        thinking_cap = int(os.environ.get("THINKING_MAX_INPUT_CHARS", "0"))
-        if thinking_cap > 0:
-            body_chars = sum(len(str(m)) for m in body.get("messages", []))
-            if body_chars > thinking_cap:
-                logger.info("[passthrough] SKIP thinking: body_chars=%d > cap=%d", body_chars, thinking_cap)
-                return body
-        body.update(analysis_thinking)
-        logger.info("[passthrough] injected thinking params: %s", list(analysis_thinking.keys()))
-    return body
-
-
-# ── Main entry point ─────────────────────────────────────────────────
 
 async def run_messages(
     *,
@@ -409,7 +335,8 @@ async def run_messages(
     model_ctx = ctx.effective_context_window or cfg.routing.model_context_window
 
     # ── Passthrough: auto-detect Anthropic-compatible endpoints ──
-    if _is_passthrough_compatible(model, cfg):
+    if _is_passthrough_compatible(model, cfg, ctx):
+        pt_base_url, pt_api_key = _get_passthrough_credentials(cfg, ctx)
         pt_model = model.split("/")[-1] if "/" in model else model
         try:
             is_stream = getattr(request_obj, "stream", False)
@@ -432,15 +359,16 @@ async def run_messages(
             await _get_passthrough_pipeline(cfg).process(request_obj, ctx)
 
             pt = PassthroughClient(
-                cfg.credentials.anthropic_base_url,
-                cfg.credentials.anthropic_api_key,
+                pt_base_url,
+                pt_api_key,
                 timeout=timeout,
                 endpoint_path=cfg.credentials.anthropic_endpoint_path,
             )
-            body = _build_passthrough_body(
+            body = build_passthrough_body(
                 request_obj, pt_model,
-                ctx=ctx,
+                analysis_phase=ctx.analysis_phase if ctx else None,
                 analysis_thinking=cfg.analysis.thinking_params,
+                passthrough_thinking=cfg.passthrough_thinking_params,
             )
             if is_stream:
                 logger.info("[passthrough] streaming phase=%s model=%s analysis=%s timeout=%.0fs", ctx.phase, body.get("model"), ctx.analysis_phase, timeout)
@@ -459,60 +387,30 @@ async def run_messages(
 
                 # ──────────────────────────────────────────────────────────────────────────────
                 # NOTE: Response Pipeline NOT Called for Streaming
-                # ──────────────────────────────────────────────────────────────────────────────
-                # Streaming responses are generators of SSE event strings.
-                # Response transformers (including GroundingValidatorTransformer) expect complete
-                # response objects with .content attribute.
-                #
-                # Therefore, response pipeline is SKIPPED for streaming.
-                # Grounding validation runs asynchronously via _run_post_stream_validation()
-                # in stream_event.py:tracked_stream() (called from server.py).
-                # ──────────────────────────────────────────────────────────────────────────────
-                # Passthrough streaming: tool extraction handled by passthrough_xml_tool_extraction in server.py
-                # Response transformers are designed for complete responses, not SSE event strings
+                # Response pipeline is skipped for streaming: transformers expect
+                # complete response objects, not SSE strings. Grounding validation runs
+                # asynchronously via tracked_stream() in server.py.
                 async def _prepend_stream():
                     yield first_chunk
                     async for chunk in raw_stream:
                         yield chunk
 
                 return True, _prepend_stream(), "passthrough"
-                # ──────────────────────────────────────────────────────────────────────────────
             else:
-                # Non-streaming passthrough: use actual max_tokens to support
-                # quality refinement loop in server.py. The original max_tokens=1
-                # cap was a "preflight" optimization but broke quality scoring.
+                # Non-streaming: use actual max_tokens to support quality refinement loop.
                 body["max_tokens"] = getattr(request_obj, "max_tokens", 4096)
                 logger.info("[passthrough] non-stream phase=%s model=%s max_tokens=%d",
                             ctx.phase, body.get("model"), body["max_tokens"])
 
-                # ──────────────────────────────────────────────────────────────────────────────
-                # Passthrough Non-Streaming Path
-                # ──────────────────────────────────────────────────────────────────────────────
-                # Entry: proxy.py:_passthrough_route (is_stream=False)
-                # Flow:
-                #   1. pt.create_message() - Direct model call
-                #   2. _run_response_pipeline() - Runs response pipeline (includes GroundingValidator)
-                #   3. Return to server.py for quality refinement
-                #
-                # IMPORTANT: _run_response_pipeline() runs grounding validation.
-                # DO NOT duplicate in analysis_quality_nonstream() - use ctx.grounding_score instead.
-                # ──────────────────────────────────────────────────────────────────────────────
-                # Get response from model, then run response pipeline
-                # Pass response_model so CC receives the original request model name
-                # (e.g. "claude-opus-4-6") rather than the upstream model ("glm-4.7").
-                # Without this, CC won't activate model-gated UI like the Plan panel.
+                # Call provider, run response pipeline, then structural correction if needed.
                 sem = _get_provider_semaphore(
-                    cfg.credentials.anthropic_base_url or "",
+                    pt_base_url or "",
                     cfg.max_concurrent_per_provider,
                 )
                 async with sem:
                     anthropic_response = await pt.create_message(body, response_model=original_model)
                 await _run_response_pipeline(anthropic_response, ctx, cfg)
 
-                # Retry-with-few-shot: if structural issues were detected and this is
-                # the first attempt, ask the provider to regenerate its malformed blocks.
-                # Falls back to the auto-patch result from _run_response_pipeline() if
-                # the retry call itself fails.
                 if (
                     any(q.startswith("structural:") for q in ctx.quality_issues)
                     and ctx.refinement_attempt == 0
@@ -532,7 +430,6 @@ async def run_messages(
                         logger.warning("[proxy] structural correction failed — using auto-patch result")
 
                 return False, anthropic_response, "passthrough"
-                # ──────────────────────────────────────────────────────────────────────────────
         except (httpx.HTTPError, PassthroughError) as e:
             logger.warning("[passthrough] FALLBACK to litellm: %s: %s", type(e).__name__, e)
             # Fall through to normal litellm pipeline

@@ -34,8 +34,8 @@ def _make_ctx(analysis_phase="PLANNING"):
 
 
 def _build_body(request, model="glm-4.7", ctx=None, analysis_thinking=None):
-    from proxy.proxy import _build_passthrough_body
-    return _build_passthrough_body(request, model, ctx=ctx, analysis_thinking=analysis_thinking)
+    from llm.passthrough import build_passthrough_body
+    return build_passthrough_body(request, model, analysis_phase=ctx.analysis_phase if ctx else None, analysis_thinking=analysis_thinking)
 
 
 class TestThinkingInjection:

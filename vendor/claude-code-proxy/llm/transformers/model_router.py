@@ -101,15 +101,16 @@ class ModelRouterTransformer(Transformer):
         else:
             current = request.model
             prefix = current.rsplit("/", 1)[0] if "/" in current else "openai"
-            if ctx.phase == "EXPLORE" and self._routing.small_model != self._routing.big_model:
+            if ctx.phase == "EXPLORE":
                 route = self._routing.small_route
                 if route:
-                    # Cross-provider: use route's provider prefix + credentials
+                    # Per-model-type override: use route's provider prefix + credentials.
+                    # This works for both cross-provider and same-provider-different-key configs.
                     request.model = build_model_name(route.provider, self._routing.small_model)
                     ctx.route_override = route
                 else:
                     request.model = build_model_name(prefix, self._routing.small_model)
-            elif ctx.phase == "EXECUTE" and self._routing.building_model != self._routing.big_model:
+            elif ctx.phase == "EXECUTE":
                 tools_in = len(getattr(request, "tools", []) or [])
                 if tools_in == 0:
                     # No tool definitions: building model (MiniMax-M2.5) can't generate
@@ -125,6 +126,8 @@ class ModelRouterTransformer(Transformer):
                 else:
                     route = self._routing.building_route
                     if route:
+                        # Per-model-type override: use route's provider prefix + credentials.
+                        # This works for both cross-provider and same-provider-different-key configs.
                         request.model = build_model_name(route.provider, self._routing.building_model)
                         ctx.route_override = route
                     else:

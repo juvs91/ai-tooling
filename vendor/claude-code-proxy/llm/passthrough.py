@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import re
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -193,6 +193,67 @@ class PassthroughClient:
     def metrics(self) -> PassthroughMetrics:
         """Access metrics collected during the last stream_message() call."""
         return getattr(self, "_metrics", PassthroughMetrics())
+
+
+def build_passthrough_body(
+    request: Any,
+    model: str,
+    analysis_phase: str | None = None,
+    analysis_thinking: dict | None = None,
+    passthrough_thinking: dict | None = None,
+) -> dict:
+    """Convert MessagesRequest to Anthropic API body dict for passthrough.
+
+    When passthrough_thinking is provided, merges per-model params into the
+    body for every phase (model-agnostic). When analysis_phase is one of
+    ANALYZING/READ/SYNTHESIZING and analysis_thinking is provided, merges
+    those afterwards, keeping its priority.
+    """
+    body: dict[str, Any] = {
+        "model": model,
+        "max_tokens": getattr(request, "max_tokens", 4096),
+        "messages": [
+            m if isinstance(m, dict) else m.dict()
+            for m in (request.messages or [])
+        ],
+    }
+    if getattr(request, "system", None):
+        system = request.system
+        if isinstance(system, list):
+            body["system"] = [
+                s if isinstance(s, dict) else s.dict() for s in system
+            ]
+        else:
+            body["system"] = system
+    if getattr(request, "tools", None):
+        body["tools"] = [
+            t if isinstance(t, dict) else t.dict() for t in request.tools
+        ]
+    if getattr(request, "temperature", None) is not None:
+        body["temperature"] = request.temperature
+
+    # Merge per-model passthrough thinking params for all phases.
+    if passthrough_thinking:
+        bare_model = model.split("/")[-1] if "/" in model else model
+        model_thinking = passthrough_thinking.get(bare_model)
+        if model_thinking:
+            body.update(model_thinking)
+            logger.info("[passthrough] injected per-model params for %s: %s", bare_model, list(model_thinking.keys()))
+
+    # Inject thinking params for ANALYZING/READ/SYNTHESIZING phases.
+    # analysis_thinking comes from ANALYSIS_THINKING_PARAMS env var.
+    # SYNTHESIZING needs thinking to verify evidence across multiple hops.
+    if analysis_phase in ("ANALYZING", "READ", "SYNTHESIZING") and analysis_thinking:
+        # Skip thinking for very large contexts — reasoning overhead causes timeouts
+        thinking_cap = int(os.environ.get("THINKING_MAX_INPUT_CHARS", "0"))
+        if thinking_cap > 0:
+            body_chars = sum(len(str(m)) for m in body.get("messages", []))
+            if body_chars > thinking_cap:
+                logger.info("[passthrough] SKIP thinking: body_chars=%d > cap=%d", body_chars, thinking_cap)
+                return body
+        body.update(analysis_thinking)
+        logger.info("[passthrough] injected thinking params: %s", list(analysis_thinking.keys()))
+    return body
 
 
 async def try_structural_correction(

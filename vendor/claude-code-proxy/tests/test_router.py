@@ -235,7 +235,7 @@ class TestPassthroughThinkingGuard:
 
     def test_preflight_non_stream_no_thinking(self):
         """Non-streaming (preflight) requests must NOT get thinking params."""
-        from proxy.proxy import _build_passthrough_body
+        from llm.passthrough import build_passthrough_body
         from llm.pipeline import TransformContext
 
         ctx = TransformContext(raw_body=b"", is_analysis=True, intent="READ")
@@ -249,13 +249,13 @@ class TestPassthroughThinkingGuard:
         request.temperature = None
 
         # Simulate non-stream: analysis_thinking=None (as proxy.py now does)
-        body = _build_passthrough_body(request, "glm-4.7", ctx=ctx, analysis_thinking=None)
+        body = build_passthrough_body(request, "glm-4.7", analysis_phase=ctx.analysis_phase, analysis_thinking=None)
         assert "thinking" not in body
         assert "clear_thinking" not in body
 
     def test_streaming_gets_thinking(self):
         """Streaming requests for READ phase SHOULD get thinking params."""
-        from proxy.proxy import _build_passthrough_body
+        from llm.passthrough import build_passthrough_body
         from llm.pipeline import TransformContext
 
         ctx = TransformContext(raw_body=b"", is_analysis=True, intent="READ")
@@ -269,12 +269,12 @@ class TestPassthroughThinkingGuard:
         request.temperature = None
 
         thinking_params = {"thinking": {"type": "enabled"}}
-        body = _build_passthrough_body(request, "glm-4.7", ctx=ctx, analysis_thinking=thinking_params)
+        body = build_passthrough_body(request, "glm-4.7", analysis_phase=ctx.analysis_phase, analysis_thinking=thinking_params)
         assert body["thinking"] == {"type": "enabled"}
 
     def test_non_analyzing_no_thinking(self):
         """Non-READ phase should NOT get thinking even with params provided."""
-        from proxy.proxy import _build_passthrough_body
+        from llm.passthrough import build_passthrough_body
         from llm.pipeline import TransformContext
 
         ctx = TransformContext(raw_body=b"", is_analysis=False, intent="CHAT")
@@ -289,13 +289,13 @@ class TestPassthroughThinkingGuard:
         request.thinking = None  # CC did not request thinking
 
         thinking_params = {"thinking": {"type": "enabled"}}
-        body = _build_passthrough_body(request, "glm-4.7", ctx=ctx, analysis_thinking=thinking_params)
+        body = build_passthrough_body(request, "glm-4.7", analysis_phase=ctx.analysis_phase, analysis_thinking=thinking_params)
         assert "thinking" not in body
 
     def test_thinking_skipped_when_body_exceeds_cap(self):
         """Thinking should be skipped when message body chars exceed THINKING_MAX_INPUT_CHARS (when cap > 0)."""
         import os
-        from proxy.proxy import _build_passthrough_body
+        from llm.passthrough import build_passthrough_body
         from llm.pipeline import TransformContext
 
         ctx = TransformContext(raw_body=b"", is_analysis=True, intent="READ")
@@ -315,7 +315,7 @@ class TestPassthroughThinkingGuard:
         try:
             # Explicitly set a cap of 200K to test the skip mechanism
             os.environ["THINKING_MAX_INPUT_CHARS"] = "200000"
-            body = _build_passthrough_body(request, "glm-4.7", ctx=ctx, analysis_thinking=thinking_params)
+            body = build_passthrough_body(request, "glm-4.7", analysis_phase=ctx.analysis_phase, analysis_thinking=thinking_params)
             assert "thinking" not in body, "thinking should be skipped when body exceeds explicit cap"
         finally:
             if old_val is None:
@@ -326,7 +326,7 @@ class TestPassthroughThinkingGuard:
     def test_thinking_allowed_when_body_under_cap(self):
         """Thinking should be injected when message body is under the cap."""
         import os
-        from proxy.proxy import _build_passthrough_body
+        from llm.passthrough import build_passthrough_body
         from llm.pipeline import TransformContext
 
         ctx = TransformContext(raw_body=b"", is_analysis=True, intent="READ")
@@ -343,7 +343,7 @@ class TestPassthroughThinkingGuard:
         old_val = os.environ.get("THINKING_MAX_INPUT_CHARS")
         try:
             os.environ["THINKING_MAX_INPUT_CHARS"] = "200000"
-            body = _build_passthrough_body(request, "glm-4.7", ctx=ctx, analysis_thinking=thinking_params)
+            body = build_passthrough_body(request, "glm-4.7", analysis_phase=ctx.analysis_phase, analysis_thinking=thinking_params)
             assert body["thinking"] == {"type": "enabled"}
         finally:
             if old_val is None:
@@ -354,7 +354,7 @@ class TestPassthroughThinkingGuard:
     def test_thinking_always_injected_when_cap_zero(self):
         """THINKING_MAX_INPUT_CHARS=0 means no cap — thinking injected even for very large bodies."""
         import os
-        from proxy.proxy import _build_passthrough_body
+        from llm.passthrough import build_passthrough_body
         from llm.pipeline import TransformContext
 
         ctx = TransformContext(raw_body=b"", is_analysis=True, intent="READ")
@@ -374,7 +374,7 @@ class TestPassthroughThinkingGuard:
         try:
             # cap=0 means disabled — thinking must always be injected for READ phase
             os.environ["THINKING_MAX_INPUT_CHARS"] = "0"
-            body = _build_passthrough_body(request, "glm-4.7", ctx=ctx, analysis_thinking=thinking_params)
+            body = build_passthrough_body(request, "glm-4.7", analysis_phase=ctx.analysis_phase, analysis_thinking=thinking_params)
             assert body.get("thinking") == {"type": "enabled"}, (
                 "thinking should always be injected when THINKING_MAX_INPUT_CHARS=0 (no cap)"
             )
@@ -398,7 +398,7 @@ class TestPassthroughStreamingFallback:
 
         # This test validates the control flow: PassthroughError raised during
         # eager first-chunk → caught by except block → falls through to litellm
-        # We test this by checking that _build_passthrough_body is called (passthrough attempted)
+        # We test this by checking that build_passthrough_body is called (passthrough attempted)
         # and that when it raises, the function continues to litellm code path
 
         # The actual integration test would require mocking the full litellm pipeline,

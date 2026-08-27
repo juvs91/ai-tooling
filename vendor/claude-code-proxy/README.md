@@ -194,6 +194,8 @@ BIG_MODEL="gpt-4o" # Example specific model
 SMALL_MODEL="gpt-4o-mini" # Example specific model
 ```
 
+For a complete guide to credential precedence, per-route overrides (`SMALL_*` / `BUILDING_*`), and passthrough behavior, see [`docs/ROUTING.md`](docs/ROUTING.md).
+
 ## How It Works 🧩
 
 This proxy works by:
