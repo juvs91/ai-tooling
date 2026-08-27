@@ -18,7 +18,7 @@
   },
   "local_skills_sources": [
     {
-      "path": "~/ai-tooling/.agents/skills",
+      "path": "/Volumes/case-sensitive/ai-tooling",
       "categories": ["workflow", "project", "backend", "frontend", "quality", "archaeology"]
     }
   ]
