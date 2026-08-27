@@ -1,0 +1,48 @@
+{
+  "mcpServers": {
+    "alloydb": {
+      "command": "bash",
+      "args": ["./mcp-scripts/alloydb-mcp.sh"]
+    },
+    "atlassian": {
+      "command": "bash",
+      "args": ["./mcp-scripts/atlassian-mcp.sh"]
+    },
+    "bitbucket": {
+      "command": "bash",
+      "args": ["./mcp-scripts/atlassian-mcp.sh", "bitbucket"]
+    },
+    "cloudsql": {
+      "command": "bash",
+      "args": ["./scripts/cloudsql-mcp.sh"]
+    },
+    "squit": {
+      "command": "bash",
+      "args": ["./mcp-scripts/squit-mcp.sh"]
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@latest"]
+    },
+    "serper": {
+      "command": "bash",
+      "args": ["./mcp-scripts/serper-mcp.sh"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@executeautomation/playwright-mcp-server"],
+      "env": {
+        "PLAYWRIGHT_BROWSERS_PATH": "/Users/jeguzman/Library/Caches/ms-playwright",
+        "PLAYWRIGHT_BROWSERS": "chromium"
+      }
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    }  
+  }
+}
