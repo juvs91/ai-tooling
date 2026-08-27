@@ -40,6 +40,7 @@ cloud-provider-env/*
 
 # IDE specific files
 .idea/
+.vscode/
 *.swp
 *.swo
 # Local Claude Code settings (may contain tokens)
