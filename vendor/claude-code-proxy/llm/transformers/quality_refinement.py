@@ -927,6 +927,21 @@ async def stream_response_pipeline(
             model_context_window=ctx.effective_context_window or cfg.routing.model_context_window,
             strip_reasoning=cfg.policy.strip_reasoning,
         )
+
+        # Fail-safe: a refinement that produces no text must never deliver LESS
+        # than the original stream — replay the original chunks instead.
+        # (Observed: SYNTHESIZING refinement ended in an empty client response.)
+        refined_text = extract_response_text(refined_anthropic).strip()
+        if not refined_text and text.strip():
+            logger.warning(
+                "[stream-pipeline] refinement returned empty response "
+                "(original had %d chars) — replaying original",
+                len(text),
+            )
+            for chunk in chunks:
+                yield chunk
+            return
+
         ctx.refinement_attempt += 1
         _fire_quality_persist(ctx, ctx.quality_issues)
 

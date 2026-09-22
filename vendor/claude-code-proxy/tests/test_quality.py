@@ -10,9 +10,13 @@ from unittest.mock import AsyncMock, patch, MagicMock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import after path setup
+from llm.pipeline import TransformContext
+from llm.schemas import Message
 from llm.transformers.quality_refinement import (
-    score_anthropic_response,
+    _build_refinement_feedback,
     analysis_quality_stream,
+    score_anthropic_response,
+    stream_response_pipeline,
 )
 from llm.transformers.stream_event import accumulate_stream
 from utils.quality import score_response
@@ -281,7 +285,6 @@ class TestAnalysisQualityStream:
         )
 
     def _make_request(self):
-        from llm.schemas import Message
         return SimpleNamespace(
             model="test-model",
             original_model="claude-opus-4-6",
@@ -291,7 +294,6 @@ class TestAnalysisQualityStream:
         )
 
     def _make_ctx(self):
-        from llm.pipeline import TransformContext
         return TransformContext(raw_body=b"", is_analysis=True, intent="PLAN")
 
     @pytest.mark.asyncio
@@ -396,8 +398,6 @@ class TestAnalysisQualityStream:
 
 # ── Refinement type detection (Item 3) ───────────────────────────────────────
 
-from llm.transformers.quality_refinement import _build_refinement_feedback
-
 
 class TestRefinementTypeDetection:
     """_build_refinement_feedback must prefix the output with [quality-refinement:{type}]
@@ -473,3 +473,128 @@ class TestRefinementTypeDetection:
         result = _build_refinement_feedback(0.45, issues, 0.70, intent="BUILD")
         assert "45%" in result or "0.45" in result or "Score:" in result
         assert "70%" in result or "0.70" in result or "Threshold:" in result
+
+
+# ── stream_response_pipeline: empty-refinement fail-safe (ADR-0057) ───────────
+
+
+class TestStreamResponsePipelineEmptyRefinement:
+    """Refinement must never deliver LESS content than the original stream.
+
+    Regression: a SYNTHESIZING refinement that produced an empty response was
+    delivered to the client as-is (empty text part, zeroed usage). The fail-safe
+    replays the original chunks when the refined response has no text.
+    """
+
+    def _make_cfg(self):
+        return SimpleNamespace(
+            analysis=SimpleNamespace(
+                quality_threshold=0.75,
+                score_certainty_floor=0.50,
+                llm_score_gate=False,
+                grounding_threshold=0.8,
+                grounding_refinement_enabled=True,
+                max_refinements=2,
+            ),
+            routing=SimpleNamespace(model_context_window=200000),
+            policy=SimpleNamespace(strip_reasoning=False),
+        )
+
+    def _make_request(self):
+        return SimpleNamespace(
+            model="test-model",
+            original_model="kimi-for-coding",
+            stream=True,
+            messages=[Message(role="user", content="Resume lo acordado")],
+            max_tokens=8192,
+        )
+
+    def _make_ctx(self):
+        ctx = TransformContext(raw_body=b"", is_analysis=True, intent="PLAN")
+        ctx.analysis_phase = "SYNTHESIZING"  # avoid READ/ANALYZING skip
+        ctx.phase = "PLAN"
+        ctx.grounding_score = 1.0
+        ctx.grounding_issues = []
+        ctx.session_id = ""  # skip proactive-degradation lookup
+        return ctx
+
+    def _make_response_pipeline(self):
+        pipeline = SimpleNamespace()
+
+        async def _process(synthetic, resp_ctx):
+            resp_ctx.grounding_score = 1.0
+            resp_ctx.grounding_issues = []
+
+        pipeline.process = _process
+        return pipeline
+
+    @pytest.mark.asyncio
+    async def test_empty_refinement_replays_original(self):
+        """Refined response with no text blocks → original chunks replayed."""
+        bad_text = "Short."  # low quality score → triggers refinement
+        events = _make_sse_stream(bad_text)
+        cfg = self._make_cfg()
+        request = self._make_request()
+        ctx = self._make_ctx()
+        response_pipeline = self._make_response_pipeline()
+
+        # Refined response: tool_use only, no text (the observed production case)
+        empty_refined = SimpleNamespace(
+            content=[SimpleNamespace(
+                type="tool_use", id="toolu_fake_001", name="Fake", input={},
+            )],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=100, output_tokens=5),
+        )
+
+        with patch("proxy.proxy.run_messages", new_callable=AsyncMock) as mock_run, \
+             patch("llm.transformers.quality_refinement.convert_litellm_to_anthropic", return_value=empty_refined):
+            mock_run.return_value = (False, MagicMock(), "primary")
+
+            result = []
+            async for chunk in stream_response_pipeline(
+                _async_gen(events), request, ctx, cfg, response_pipeline,
+            ):
+                result.append(chunk)
+
+            mock_run.assert_called_once()
+            # Fail-safe: original stream delivered, not the empty refinement
+            assert result == events
+            assert "Short." in "".join(result)
+
+    @pytest.mark.asyncio
+    async def test_non_empty_refinement_is_delivered(self):
+        """Refined response with text → delivered as SSE (no regression)."""
+        bad_text = "Short."
+        events = _make_sse_stream(bad_text)
+        cfg = self._make_cfg()
+        request = self._make_request()
+        ctx = self._make_ctx()
+        response_pipeline = self._make_response_pipeline()
+
+        refined_text = (
+            "## Resumen detallado de la sesión\n"
+            "Se acordó extraer `_normalize_sse_events` a nivel de módulo.\n"
+            "El test cubre eventos concatenados sin delimitador en blanco.\n"
+        ) * 3
+        good_refined = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=refined_text)],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=100, output_tokens=500),
+        )
+
+        with patch("proxy.proxy.run_messages", new_callable=AsyncMock) as mock_run, \
+             patch("llm.transformers.quality_refinement.convert_litellm_to_anthropic", return_value=good_refined):
+            mock_run.return_value = (False, MagicMock(), "primary")
+
+            result = []
+            async for chunk in stream_response_pipeline(
+                _async_gen(events), request, ctx, cfg, response_pipeline,
+            ):
+                result.append(chunk)
+
+            mock_run.assert_called_once()
+            combined = "".join(result)
+            assert "message_start" in combined
+            assert "message_stop" in combined
+            assert "Resumen detallado" in combined

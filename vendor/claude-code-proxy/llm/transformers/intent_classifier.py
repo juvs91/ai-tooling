@@ -454,6 +454,26 @@ class IntentClassifierTransformer(Transformer):
         else:
             ctx.intent = _regex_fallback_intent(last_text)
 
+        # ADR-0058: SYNTHESIZING is a sub-phase of READ — only valid mid-analysis,
+        # after prior read turns. The LLM classifier can emit it for plain summary
+        # requests with no analysis in progress ("Resume en 5 puntos...", reads=0),
+        # which injects the synthesis prompt and triggers the refinement pipeline
+        # on a non-analysis request. Demote to the deterministic regex intent,
+        # which can never return SYNTHESIZING.
+        # Use the raw read count, not the analysis-gated `consecutive_reads`
+        # (zeroed when analysis keywords fall outside the history scan window) —
+        # the phase precondition is the existence of read turns in the conversation.
+        if ctx.intent == "SYNTHESIZING":
+            _read_turns = consecutive_reads or _count_consecutive_reads(messages)
+            if _read_turns == 0:
+                demoted = _regex_fallback_intent(last_text)
+                logger.info(
+                    "[classify] SYNTHESIZING without read history — demoted to %s",
+                    demoted,
+                )
+                metrics.record_model_event("classifier", f"synthesizing_demoted_to_{demoted}")
+                ctx.intent = demoted
+
         # Step 4: Map intents to analysis_phase and phase
         if ctx.intent == "READ":
             ctx.analysis_phase = "READ"

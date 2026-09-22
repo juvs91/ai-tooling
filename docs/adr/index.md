@@ -29,4 +29,10 @@
 | [ADR-0047](ADR-0047-auto-sync-daily-hook.md) | Hook `SessionStart` para sincronización diaria de skills y hooks en proyectos hijos | Accepted | 2026-08-04 | Agent Infrastructure |
 | [ADR-0048](ADR-0048-homologacion-gitops-monorepo-commons.md) | Homologación GitOps con `commons` — puerto bidireccional de mejoras validadas en producción | Aceptado | 2026-08-04 | GitOps |
 | [ADR-0049](ADR-0049-fix-project-path-shared-only.md) | Fix — `_project_path()` no resolvía paths `shared/`/`scripts` literales (escenario "solo shared" roto) | Aceptado | 2026-08-05 | GitOps |
+| [ADR-0052](ADR-0052-fix-proxymetrics-sessions-cleaned-counter.md) | Fix proxy metrics sessions-cleaned counter | Accepted | 2026-08-13 | Proxy |
+| [ADR-0053](ADR-0053-fix-block-dangerous-worktree-substring-match.md) | Fix dangerous worktree substring match | Accepted | 2026-08-21 | GitOps |
 | [ADR-0054](ADR-0054-passthrough-route-override-credentials.md) | Passthrough route override credentials for per-model API keys | Accepted | 2026-08-22 | Proxy |
+| [ADR-0055](ADR-0055-normalize-thinking-signature-padding.md) | Normalize thinking-block signature padding | Accepted | 2026-08-28 | Proxy |
+| [ADR-0056](ADR-0056-normalize-passthrough-sse-delimiters.md) | Normalize passthrough SSE event delimiters | Accepted | 2026-08-29 | Proxy |
+| [ADR-0057](ADR-0057-refinement-empty-response-replay-original.md) | Replay original stream chunks when refinement returns an empty response | Accepted | 2026-09-21 | Proxy |
+| [ADR-0058](ADR-0058-gate-synthesizing-on-read-history.md) | Gate SYNTHESIZING intent on prior read history | Accepted | 2026-09-21 | Proxy |

@@ -95,6 +95,62 @@ class TestLLMClassifier:
             assert ctx.intent == "BUILD"
 
 
+class TestSynthesizingGate:
+    """ADR-0058: SYNTHESIZING requires prior read history.
+
+    The LLM classifier can emit SYNTHESIZING for plain summary requests with
+    no analysis in progress (observed: "Resume en 5 puntos..." with reads=0),
+    which injected the synthesis prompt and triggered the broken refinement
+    pipeline. Without read history the intent is demoted to the regex result.
+    """
+
+    def _llm_transformer(self):
+        return IntentClassifierTransformer(
+            _classifier_cfg(model="openai/deepseek-chat", api_key="k", base_url="http://x", timeout=2.0),
+            _policy_cfg(), models_differ=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_synthesizing_without_reads_demoted(self):
+        """LLM says SYNTHESIZING, no read history → demoted to regex (CHAT)."""
+        t = self._llm_transformer()
+        ctx = TransformContext()
+        with patch("llm.transformers.intent_classifier.classify_intent", new_callable=AsyncMock,
+                   return_value=("SYNTHESIZING", 1.0, None)):
+            await t.transform(
+                _request("Resume en 5 puntos máximo: (a) qué problemas quedan vigentes"),
+                ctx,
+            )
+        assert ctx.intent == "CHAT"
+        assert ctx.is_analysis is False
+        assert ctx.analysis_phase == "NONE"
+
+    @pytest.mark.asyncio
+    async def test_synthesizing_with_reads_preserved(self):
+        """LLM says SYNTHESIZING, analysis session with read turns → kept."""
+        t = self._llm_transformer()
+        ctx = TransformContext()
+        messages = [
+            SimpleNamespace(role="user", content="Analiza exhaustivamente passthrough.py"),
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="tool_use", name="Read", input={"file_path": "passthrough.py"}),
+            ]),
+            SimpleNamespace(role="user", content="contenido del archivo passthrough.py..."),
+            # Last assistant turn is plain text: agent finished reading. If it were
+            # still a tool call, Override F would legitimately reset to READ.
+            SimpleNamespace(role="assistant", content=[
+                SimpleNamespace(type="text", text="La función stream_message acumula eventos SSE."),
+            ]),
+            SimpleNamespace(role="user", content="Sintetiza los hallazgos del análisis en un resumen final"),
+        ]
+        with patch("llm.transformers.intent_classifier.classify_intent", new_callable=AsyncMock,
+                   return_value=("SYNTHESIZING", 1.0, None)):
+            await t.transform(_request(messages=messages), ctx)
+        assert ctx.intent == "SYNTHESIZING"
+        assert ctx.is_analysis is True
+        assert ctx.analysis_phase == "SYNTHESIZING"
+
+
 class TestDetectPhase:
     """_detect_phase() returns (HAS_WRITES | READS_ONLY | None, [tool_names])."""
 
