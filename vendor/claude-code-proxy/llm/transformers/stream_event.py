@@ -1018,16 +1018,14 @@ async def handle_streaming(
 async def passthrough_xml_tool_extraction(stream_gen: Any, request: Any):
     """Extract GLM argkv <tool_call> XML embedded in passthrough SSE text_delta events.
 
-    The passthrough relay forwards raw Anthropic SSE lines from Z.AI one line at a
-    time (via aiter_lines). When GLM-4.7 emits tool calls as embedded XML in text
-    content, this wrapper intercepts those text_delta events and converts them to
-    proper tool_use block SSE events — exactly as handle_streaming() does for
-    LiteLLM streams.
+    When GLM-4.7 emits tool calls as embedded XML in text content, this wrapper
+    intercepts those text_delta events and converts them to proper tool_use block
+    SSE events — exactly as handle_streaming() does for LiteLLM streams.
 
-    Key constraint: passthrough yields lines individually (no blank-line separator),
-    so ``event: ...`` and ``data: ...`` lines arrive as separate chunks. We buffer
-    the ``event:`` line and decide whether to forward or suppress it based on what
-    the following ``data:`` line contains.
+    The passthrough relay now yields complete SSE events (one event per chunk,
+    delimited by ``\\n\\n``). This function still operates line-by-line within each
+    chunk: it buffers the ``event:`` line and decides whether to forward or suppress
+    the event based on what the following ``data:`` line contains.
 
     Fast path: when no ``<tool_call`` is ever detected, every chunk passes through
     unchanged (zero-overhead for models that use native tool_use blocks).

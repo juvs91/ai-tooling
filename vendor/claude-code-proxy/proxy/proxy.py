@@ -30,6 +30,7 @@ from utils.metrics import metrics
 from llm.converters import convert_anthropic_to_litellm
 from llm.pipeline import Pipeline, TransformContext
 from llm.transformers.plan_mode_enforcement import PlanModeEnforcementTransformer
+from llm.transformers.thinking_signature_normalizer import ThinkingSignatureNormalizer
 from llm.transformers import (
     IntentClassifierTransformer,
     GuardrailTransformer,
@@ -127,6 +128,7 @@ def build_passthrough_pipeline(cfg: ProxyConfig) -> Pipeline:
 def build_response_pipeline(cfg: ProxyConfig) -> Pipeline:
     """Agnostic response pipeline: reasoning, tool extraction, grounding, feedback."""
     return Pipeline([
+        ThinkingSignatureNormalizer(),
         ReasoningHandlingTransformer(cfg.analysis),
         UniversalToolExtractionTransformer(),
         ToolCallValidatorTransformer(),

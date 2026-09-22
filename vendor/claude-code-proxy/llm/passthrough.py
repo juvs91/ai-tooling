@@ -15,6 +15,8 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from llm.transformers.thinking_signature_normalizer import normalize_thinking_signature
+
 logger = logging.getLogger(__name__)
 
 _REASONING_TAG_RE = re.compile(r"</?reasoning>")
@@ -109,6 +111,11 @@ class PassthroughClient:
                 # Normalize model name so CC recognizes the response as its own
                 if response_model:
                     result["model"] = response_model
+                # Normalize thinking signatures to valid base64 padding before
+                # relaying the response to the client.
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "thinking":
+                        block["signature"] = normalize_thinking_signature(block.get("signature", ""))
                 return result
             except httpx.HTTPStatusError as e:
                 logger.error("[passthrough] HTTP %d: %s", e.response.status_code, e.response.text[:500])
@@ -116,6 +123,62 @@ class PassthroughClient:
             except httpx.HTTPError as e:
                 logger.error("[passthrough] connection error: %r (cause=%s)", e, e.__cause__)
                 raise PassthroughError(repr(e)) from e
+
+    def _transform_sse_event(
+        self,
+        event_lines: list[str],
+        strip_reasoning: bool,
+        response_model: str | None,
+    ) -> list[str] | None:
+        """Apply passthrough transformations to a single SSE event.
+
+        Returns the transformed event lines, or None if the event should be dropped.
+        """
+        out_lines: list[str] = []
+        for line in event_lines:
+            # Lightweight metrics parsing (no full JSON decode unless needed)
+            if '"tool_use"' in line:
+                self._metrics.tool_use_count += 1
+            if '"text_delta"' in line:
+                self._metrics.text_chars += len(line)
+
+            # Normalize model name in message_start so CC's VSCode extension
+            # receives the original request model (e.g. "claude-sonnet-4-6")
+            # regardless of what the upstream returned.
+            if response_model and '"message_start"' in line and line.startswith("data:"):
+                try:
+                    data = json.loads(line[5:].lstrip())
+                    if data.get("type") == "message_start":
+                        data["message"]["model"] = response_model
+                        line = "data: " + json.dumps(data, ensure_ascii=False)
+                except (json.JSONDecodeError, KeyError):
+                    pass  # relay as-is if parse fails
+
+            # Normalize thinking signature padding in signature_delta events
+            # before relaying the SSE line to the client.
+            if '"signature_delta"' in line and line.startswith("data:"):
+                try:
+                    data = json.loads(line[5:].lstrip())
+                    if data.get("type") == "content_block_delta":
+                        delta = data.get("delta", {})
+                        if delta.get("type") == "signature_delta":
+                            delta["signature"] = normalize_thinking_signature(delta.get("signature", ""))
+                            line = "data: " + json.dumps(data, ensure_ascii=False)
+                except (json.JSONDecodeError, KeyError):
+                    pass  # relay as-is if parse fails
+
+            # Strip reasoning from text_delta events
+            if strip_reasoning and "<reasoning>" in line:
+                self._metrics.has_reasoning_leak = True
+                if line.startswith("data:"):
+                    data_str = line[5:].lstrip()
+                    cleaned = _strip_reasoning_from_text_delta(data_str)
+                    if not cleaned:
+                        return None  # Drop entire event if text delta became empty
+                    line = f"data: {cleaned}"
+
+            out_lines.append(line)
+        return out_lines
 
     async def stream_message(
         self,
@@ -128,6 +191,10 @@ class PassthroughClient:
         Yields complete SSE event strings like 'event: message_start\\ndata: {...}\\n\\n'.
         Collects lightweight metrics (tool_use count, text chars) during relay.
         Optionally strips <reasoning> tags from text_delta events.
+
+        Upstream providers (e.g. Kimi's Anthropic-compatible endpoint) may omit blank
+        lines between SSE events. We normalize the stream so every event ends with the
+        required \\n\\n delimiter before relaying it to the client.
 
         response_model: if set, replaces the model field in the message_start event so the
         VSCode extension receives the original request model name (e.g. "claude-sonnet-4-6")
@@ -142,41 +209,37 @@ class PassthroughClient:
                     "POST", self._url(), json=body, headers=self._headers,
                 ) as resp:
                     resp.raise_for_status()
-                    async for line in resp.aiter_lines():
-                        if not line:
-                            continue
+                    current_event: list[str] = []
+                    async for raw_line in resp.aiter_lines():
+                        line = raw_line.rstrip("\r")
+                        if line == "":
+                            # Blank line terminates the current event (standard SSE).
+                            if current_event:
+                                transformed = self._transform_sse_event(
+                                    current_event, strip_reasoning, response_model
+                                )
+                                if transformed:
+                                    yield "\n".join(transformed) + "\n\n"
+                                current_event = []
+                        elif line.startswith("event:") and current_event:
+                            # Some providers omit blank lines between events; a new
+                            # 'event:' line signals the end of the previous event.
+                            transformed = self._transform_sse_event(
+                                current_event, strip_reasoning, response_model
+                            )
+                            if transformed:
+                                yield "\n".join(transformed) + "\n\n"
+                            current_event = [line]
+                        else:
+                            current_event.append(line)
 
-                        # Lightweight metrics parsing (no full JSON decode unless needed)
-                        if '"tool_use"' in line:
-                            self._metrics.tool_use_count += 1
-                        if '"text_delta"' in line:
-                            # Rough char count from the line length
-                            self._metrics.text_chars += len(line)
-
-                        # Normalize model name in message_start so CC's VSCode extension
-                        # receives the original request model (e.g. "claude-sonnet-4-6")
-                        # regardless of what the upstream returned.
-                        if response_model and '"message_start"' in line and line.startswith("data:"):
-                            try:
-                                data = json.loads(line[5:].lstrip())
-                                if data.get("type") == "message_start":
-                                    data["message"]["model"] = response_model
-                                    line = "data: " + json.dumps(data, ensure_ascii=False)
-                            except (json.JSONDecodeError, KeyError):
-                                pass  # relay as-is if parse fails
-
-                        # Strip reasoning from text_delta events
-                        if strip_reasoning and "<reasoning>" in line:
-                            self._metrics.has_reasoning_leak = True
-                            # Need to parse and modify the SSE data
-                            if line.startswith("data:"):
-                                data_str = line[5:].lstrip()
-                                cleaned = _strip_reasoning_from_text_delta(data_str)
-                                if not cleaned:
-                                    continue  # Skip entirely empty delta
-                                line = f"data: {cleaned}"
-
-                        yield line + "\n"
+                    # Flush any remaining event at stream end.
+                    if current_event:
+                        transformed = self._transform_sse_event(
+                            current_event, strip_reasoning, response_model
+                        )
+                        if transformed:
+                            yield "\n".join(transformed) + "\n\n"
             except httpx.HTTPStatusError as e:
                 try:
                     await e.response.aread()
