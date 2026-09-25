@@ -1,0 +1,12 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8083",
+    "ANTHROPIC_API_KEY": "YOUR_PROXY_API_KEY_HERE",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "250000",
+    "DISABLE_COMPACT": "0"
+  },
+  "autoCompactEnabled": true,
+  "autoCompactWindow": 0.80,
+  "model": "claude-sonnet-4-20250514",
+  "promptCacheTtl": "1h"
+}

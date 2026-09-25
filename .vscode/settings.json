@@ -25,7 +25,5 @@
         "KIMI_CODE_HOME": "${workspaceFolder}/.kimi-code",
         "KIMI_CODE_EXPERIMENTAL_SECONDARY_MODEL": "1"
     },
-    "kimi.useCtrlEnterToSend": false,
-
-    "claudeCode.terminalEnvironment": {}
+    "kimi.useCtrlEnterToSend": false
 }

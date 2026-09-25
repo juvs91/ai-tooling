@@ -159,3 +159,39 @@ o tras modificar un hook marcado `distributable: true` en `ai-tooling`.
 
 **Constraints:** Bash — asume entorno POSIX-like (no probado en Windows sin
 WSL/Git Bash).
+
+---
+
+## `tools/cc_kimi_init.py`
+
+**Qué hace:** Bootstrap de un comando para correr Claude Code (CLI y
+extensión de VS Code) contra Kimi for Coding. Aplica las cuatro piezas
+necesarias por proyecto (ver ADR-0059): copia el template
+`templates/claude/settings.local.json.kimi` a `.claude/settings.local.json`,
+crea el key store central `~/.config/cc-kimi/` (key 0600 + helper genérico,
+seeded con `--key-file`), agrega entradas al `.gitignore` del proyecto y
+marca workspace trust en `~/.claude.json`.
+
+**Cómo usarlo:**
+```
+python3 tools/cc_kimi_init.py [TARGET_DIR] [--key-file PATH] [--force] [--no-trust] [--dry-run]
+```
+Salida estricta en JSON por stdout (logs a stderr). Exit 0 = ok, 2 = error
+de uso/validación. Overrides de rutas vía `CC_KIMI_CONFIG_DIR` y
+`CC_CLAUDE_JSON`.
+
+**Cuándo usarlo:** Al iniciar Claude Code por primera vez en un proyecto
+nuevo contra Kimi, o para migrar un proyecto que hoy tiene la key en un
+helper por-proyecto al key store central.
+
+**Constraints:** La key NO se copia al proyecto — el `apiKeyHelper` apunta a
+`~/.config/cc-kimi/key-helper.sh`; si ese directoro no existe o está vacío,
+hay que pasar `--key-file` la primera vez. El trust asume el layout actual
+de `~/.claude.json` (`projects.<path>.hasTrustDialogAccepted`). Requiere el
+template en `templates/claude/settings.local.json.kimi` (rutas relativas al
+repo). Base URL hardcodeada a `https://api.kimi.com/coding`.
+
+**Use case:** `python3 tools/cc_kimi_init.py /Volumes/case-sensitive/squit --key-file ~/.config/cc-kimi/api-key` deja squit listo para abrir VS Code y hablarle a Claude sin login ni prompts.
+
+**Tests:** `tools/tests/test_cc_kimi_init.py` (7 tests,
+`python3 -m unittest tools/tests/test_cc_kimi_init.py -v`).

@@ -1,0 +1,12 @@
+{
+  "apiKeyHelper": "~/.config/cc-kimi/key-helper.sh",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "250000",
+    "DISABLE_COMPACT": "0"
+  },
+  "autoCompactEnabled": true,
+  "autoCompactWindow": 0.80,
+  "model": "kimi-for-coding",
+  "promptCacheTtl": "1h"
+}

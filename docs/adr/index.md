@@ -36,3 +36,4 @@
 | [ADR-0056](ADR-0056-normalize-passthrough-sse-delimiters.md) | Normalize passthrough SSE event delimiters | Accepted | 2026-08-29 | Proxy |
 | [ADR-0057](ADR-0057-refinement-empty-response-replay-original.md) | Replay original stream chunks when refinement returns an empty response | Accepted | 2026-09-21 | Proxy |
 | [ADR-0058](ADR-0058-gate-synthesizing-on-read-history.md) | Gate SYNTHESIZING intent on prior read history | Accepted | 2026-09-21 | Proxy |
+| [ADR-0059](ADR-0059-cc-kimi-init-bootstrap.md) | cc-kimi-init — bootstrap por-proyecto de Claude Code con Kimi for Coding | Accepted | 2026-09-24 | GitOps |

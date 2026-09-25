@@ -1,4 +1,8 @@
 {
+  "autoCompactEnabled": true,
+  "autoCompactWindow": 0.9,
+  "model": "kimi-for-coding",
+  "promptCacheTtl": "1h",
   "permissions": {
     "allow": [
       "Bash(command -v:*)",
