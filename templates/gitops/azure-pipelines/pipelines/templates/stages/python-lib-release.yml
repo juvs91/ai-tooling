@@ -1,0 +1,122 @@
+# stages/python-lib-release.yml — publica una lib Python de _shared/libs en Azure Artifacts.
+# Ref: ADR-0060 §10. Disparado por tag git <lib>@X.Y.Z[-dev.N|-rc.N].
+#
+#   <lib>@X.Y.Z-dev.N → X.Y.Z.devN → @Local (solo feed base)
+#   <lib>@X.Y.Z-rc.N  → X.Y.ZrcN   → view Prerelease
+#   <lib>@X.Y.Z       → X.Y.Z      → view Release
+#   <lib>@…-hotfix.N  → rechazado (una lib corrige con un patch nuevo)
+#
+# Las versiones en un feed son inmutables: cada ambiente publica su propia versión
+# PEP 440 desde el mismo SHA (no hay re-tag como en ACR). Re-correr un tag ya
+# publicado se detecta y se salta.
+#
+# Requiere: feed con views Prerelease/Release; "<Proyecto> Build Service" como
+# Feed Publisher (Contributor) — necesario para publicar y para promover a views.
+parameters:
+  - name: libName              # prefijo del tag git, ej: auth
+    type: string
+  - name: libPath              # ej: _shared/libs/auth
+    type: string
+  - name: artifactFeed         # feed de proyecto: <proyecto>/<feed>, de organización: <feed>
+    type: string
+  - name: pythonVersion
+    type: string
+    default: '3.12'
+  - name: views
+    type: object
+    default:
+      rc: Prerelease
+      prod: Release
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+stages:
+  - stage: Publish
+    displayName: Publicar ${{ parameters.libName }}
+    condition: startsWith(variables['Build.SourceBranch'], 'refs/tags/')
+    jobs:
+      - job: publish
+        pool: ${{ parameters.pool }}
+        steps:
+          - template: ../steps/checkout.yml
+
+          - bash: |
+              set -euo pipefail
+              bash scripts/ci-image.sh parse-tag --azure --expect '${{ parameters.libName }}' "$(Build.SourceBranch)"
+              PEP440=$(bash scripts/ci-image.sh pep440 "$(Build.SourceBranch)")
+              MANIFEST=$(bash scripts/ci-image.sh manifest-version '${{ parameters.libPath }}')
+              VERSION="${BUILD_SOURCEBRANCH#refs/tags/*@}"; VERSION="${VERSION%%-*}"
+              [ "$MANIFEST" = "$VERSION" ] || {
+                echo "##vso[task.logissue type=error]el tag dice $VERSION pero el manifest de ${{ parameters.libPath }} dice $MANIFEST (ADR-0034: bumpea por PR antes de taggear)"
+                exit 1
+              }
+              echo "versión a publicar: $PEP440"
+              echo "##vso[task.setvariable variable=pep440;isOutput=true]$PEP440"
+            name: tag
+            displayName: Validar tag y versión
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+
+          - bash: |
+              set -euo pipefail
+              python -m pip install --disable-pip-version-check uv twine
+              # La versión publicada sale del tag; el manifest en git conserva X.Y.Z.
+              python - "$(tag.pep440)" pyproject.toml <<'PY'
+              import re, sys
+              version, path = sys.argv[1], sys.argv[2]
+              text = open(path).read()
+              new, n = re.subn(r'(?m)^(version\s*=\s*)"[^"]*"', rf'\g<1>"{version}"', text, count=1)
+              if n != 1:
+                  sys.exit(f"no encontré 'version = \"…\"' en {path}")
+              open(path, "w").write(new)
+              PY
+              uv build --out-dir dist
+              ls -l dist
+            displayName: Build (uv)
+            workingDirectory: ${{ parameters.libPath }}
+
+          - task: TwineAuthenticate@1
+            inputs:
+              artifactFeed: ${{ parameters.artifactFeed }}
+
+          - bash: |
+              set -euo pipefail
+              FEED='${{ parameters.artifactFeed }}'; FEED="${FEED##*/}"
+              OUT=$(python -m twine upload -r "$FEED" --config-file "$(PYPIRC_PATH)" --non-interactive dist/* 2>&1) && { echo "$OUT"; exit 0; }
+              echo "$OUT"
+              if echo "$OUT" | grep -qiE 'already exists|409'; then
+                echo "##vso[task.logissue type=warning]$(tag.pep440) ya estaba publicada — re-run, se omite la subida"
+                exit 0
+              fi
+              exit 1
+            displayName: Upload → Azure Artifacts
+            workingDirectory: ${{ parameters.libPath }}
+
+          - bash: |
+              set -euo pipefail
+              ENV="$(tag.env)"
+              case "$ENV" in
+                qa)   VIEW='${{ parameters.views.rc }}' ;;
+                prod) VIEW='${{ parameters.views.prod }}' ;;
+                *)    echo "$ENV: queda en @Local, sin promoción"; exit 0 ;;
+              esac
+              FEED='${{ parameters.artifactFeed }}'
+              case "$FEED" in */*) PROJECT="${FEED%%/*}/"; FEED="${FEED##*/}" ;; *) PROJECT="" ;; esac
+              PKG=$(python -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["name"])' pyproject.toml)
+              ORG="${SYSTEM_COLLECTIONURI%/}"; ORG="${ORG##*/}"
+              URL="https://pkgs.dev.azure.com/${ORG}/${PROJECT}_apis/packaging/feeds/${FEED}/pypi/packages/${PKG}/versions/$(tag.pep440)?api-version=7.1-preview.1"
+              BODY=$(printf '{"views":{"op":"add","path":"/views/-","value":"%s"}}' "$VIEW")
+              HTTP=$(curl -sS -o /tmp/promote.out -w '%{http_code}' -X PATCH \
+                -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" -H "Content-Type: application/json" \
+                -d "$BODY" "$URL")
+              cat /tmp/promote.out; echo
+              [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ] || { echo "##vso[task.logissue type=error]promoción a @$VIEW falló (HTTP $HTTP)"; exit 1; }
+              echo "$PKG $(tag.pep440) → @$VIEW"
+            displayName: Promover a view
+            workingDirectory: ${{ parameters.libPath }}
+            env:
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)

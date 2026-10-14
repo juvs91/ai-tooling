@@ -1,0 +1,153 @@
+# stages/service-release.yml — release de un servicio disparado por tag git (ADR-0060).
+#
+#   <svc>@X.Y.Z-dev.N     → imagen ctx del contenido del tag (build si falta) → X.Y.Z-dev.N → dev
+#   <svc>@X.Y.Z-rc.N      → igual                                              → X.Y.Z-rc.N  → qa
+#   <svc>@X.Y.Z-hotfix.N  → igual (hotfix/* nunca pasó por main)              → …-hotfix.N  → prod
+#   <svc>@X.Y.Z           → digest del último X.Y.Z-rc.N, solo si el contenido
+#                           no cambió desde ese rc (same-content)             → X.Y.Z       → prod
+#
+# Los tags publicados en ACR quedan bloqueados (tag + manifest). Re-correr un
+# release es idempotente; re-apuntar un tag a otro digest falla.
+#
+# Los gates humanos viven en los Environments (Approvals & checks), no aquí:
+# configura approvals en qa y prod. La condición de los stages de prod es
+# defensa en profundidad (solo refs/tags/*), no el gate principal.
+parameters:
+  - name: serviceName          # ej: ventas-api (prefijo del tag git)
+    type: string
+  - name: servicePath          # ej: ventas/api
+    type: string
+  - name: dependsOn            # libs compartidas, ej: [_shared/libs/auth]
+    type: object
+    default: []
+  - name: acrName
+    type: string
+  - name: imageRepository      # ej: ventas/api
+    type: string
+  - name: azureSubscription
+    type: string
+  - name: dockerfile
+    type: string
+    default: ''
+  - name: buildContext
+    type: string
+    default: .
+  - name: environments         # nombres de los Azure Environments
+    type: object
+    default:
+      dev: dev
+      qa: qa
+      prod: prod
+  - name: deploySteps          # pasos de despliegue reales; vacío = placeholder
+    type: stepList
+    default: []
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+stages:
+  - stage: Resolve
+    displayName: Resolver tag
+    condition: startsWith(variables['Build.SourceBranch'], 'refs/tags/')
+    jobs:
+      - job: resolve
+        pool: ${{ parameters.pool }}
+        steps:
+          - template: ../steps/checkout.yml
+
+          - bash: bash scripts/ci-image.sh parse-tag --azure --expect '${{ parameters.serviceName }}' "$(Build.SourceBranch)"
+            name: tag
+            displayName: Validar tag
+
+          - bash: |
+              set -euo pipefail
+              TAG="${BUILD_SOURCEBRANCH#refs/tags/}"
+              PATHS=('${{ parameters.servicePath }}' ${{ join(' ', parameters.dependsOn) }})
+              COMMIT=$(git rev-parse "${TAG}^{commit}")
+              if [ "$(tag.env)" = "prod" ]; then
+                RC=$(bash scripts/ci-image.sh prod-source "$(tag.name)" "$(tag.version)")
+                echo "prod se promueve desde $RC"
+                bash scripts/ci-image.sh same-content "$RC" "$TAG" "${PATHS[@]}"
+                SOURCE="${RC#*@}"
+                NEEDS_BUILD=false
+              else
+                SOURCE=$(bash scripts/ci-image.sh context-hash --ref "$TAG" "${PATHS[@]}")
+                NEEDS_BUILD=true
+              fi
+              echo "commit=$COMMIT source=$SOURCE needs_build=$NEEDS_BUILD"
+              echo "##vso[task.setvariable variable=commit;isOutput=true]$COMMIT"
+              echo "##vso[task.setvariable variable=source;isOutput=true]$SOURCE"
+              echo "##vso[task.setvariable variable=needsBuild;isOutput=true]$NEEDS_BUILD"
+            name: plan
+            displayName: Origen de la imagen
+
+  - stage: Publish
+    displayName: Publicar en ACR
+    dependsOn: Resolve
+    jobs:
+      - job: publish
+        pool: ${{ parameters.pool }}
+        variables:
+          ENV: $[ stageDependencies.Resolve.resolve.outputs['tag.env'] ]
+          IMAGE_TAG: $[ stageDependencies.Resolve.resolve.outputs['tag.image_tag'] ]
+          SOURCE: $[ stageDependencies.Resolve.resolve.outputs['plan.source'] ]
+          NEEDS_BUILD: $[ stageDependencies.Resolve.resolve.outputs['plan.needsBuild'] ]
+          ${{ if eq(parameters.dockerfile, '') }}:
+            DOCKERFILE: ${{ parameters.servicePath }}/Dockerfile
+          ${{ else }}:
+            DOCKERFILE: ${{ parameters.dockerfile }}
+        steps:
+          - template: ../steps/checkout.yml
+
+          - task: AzureCLI@2
+            name: acr
+            displayName: ensure-ctx + promote
+            inputs:
+              azureSubscription: ${{ parameters.azureSubscription }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                ACR='${{ parameters.acrName }}'
+                REPO='${{ parameters.imageRepository }}'
+                if [ "$(NEEDS_BUILD)" = "true" ]; then
+                  bash scripts/ci-acr.sh ensure-ctx "$ACR" "$REPO" "$(SOURCE)" "$(DOCKERFILE)" '${{ parameters.buildContext }}' \
+                    --label "org.opencontainers.image.revision=$(Build.SourceVersion)" \
+                    --label "org.opencontainers.image.source=$(Build.Repository.Uri)" \
+                    --label "gitops.context=$(SOURCE)" >/dev/null
+                fi
+                DIGEST=$(bash scripts/ci-acr.sh promote "$ACR" "$REPO" "$(SOURCE)" "$(IMAGE_TAG)")
+                SERVER="${ACR_LOGIN_SERVER:-$ACR.azurecr.io}"
+                echo "$(ENV): $SERVER/$REPO:$(IMAGE_TAG) → $DIGEST"
+                echo "##vso[task.setvariable variable=digest;isOutput=true]$DIGEST"
+                echo "##vso[task.setvariable variable=imageRef;isOutput=true]$SERVER/$REPO@$DIGEST"
+
+  - ${{ each env in parameters.environments }}:
+    - stage: Deploy_${{ env.key }}
+      displayName: Deploy → ${{ env.value }}
+      dependsOn: [Resolve, Publish]
+      ${{ if eq(env.key, 'prod') }}:
+        condition: >-
+          and(succeeded(),
+              startsWith(variables['Build.SourceBranch'], 'refs/tags/'),
+              in(dependencies.Resolve.outputs['resolve.tag.env'], 'prod', 'hotfix'))
+      ${{ else }}:
+        condition: and(succeeded(), eq(dependencies.Resolve.outputs['resolve.tag.env'], '${{ env.key }}'))
+      jobs:
+        - deployment: deploy
+          environment: ${{ env.value }}
+          pool: ${{ parameters.pool }}
+          variables:
+            IMAGE_REF: $[ stageDependencies.Publish.publish.outputs['acr.imageRef'] ]
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - ${{ if eq(length(parameters.deploySteps), 0) }}:
+                    - bash: |
+                        echo "Placeholder: sin runtime configurado todavía."
+                        echo "Imagen aprobada para ${{ env.value }}: $(IMAGE_REF)"
+                      displayName: Deploy (placeholder)
+                  - ${{ else }}:
+                    - ${{ parameters.deploySteps }}

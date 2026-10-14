@@ -1,0 +1,69 @@
+# jobs/python-ci.yml — lint + tests de un servicio/lib Python con uv.
+# Corre en PR (branch policy "Build validation") y en merge a main.
+parameters:
+  - name: workingDirectory     # ej: ventas/api
+    type: string
+  - name: pipelineFile         # este YAML, para validar trigger.paths contra dependsOn
+    type: string
+  - name: dependsOn            # libs compartidas que entran al servicio, ej: [_shared/libs/auth]
+    type: object
+    default: []
+  - name: pythonVersion
+    type: string
+    default: '3.12'
+  - name: uvVersion            # vacío = última; fija una versión para builds reproducibles
+    type: string
+    default: ''
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+jobs:
+  - job: python_ci
+    displayName: Python CI · ${{ parameters.workingDirectory }}
+    pool: ${{ parameters.pool }}
+    steps:
+      - template: ../steps/checkout.yml
+
+      - bash: >
+          bash scripts/ci-image.sh check-paths
+          '${{ parameters.pipelineFile }}'
+          '${{ parameters.workingDirectory }}'
+          ${{ join(' ', parameters.dependsOn) }}
+        displayName: Validar trigger.paths vs dependsOn
+
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: ${{ parameters.pythonVersion }}
+
+      - bash: |
+          set -euo pipefail
+          if [ -n "${{ parameters.uvVersion }}" ]; then
+            python -m pip install --disable-pip-version-check "uv==${{ parameters.uvVersion }}"
+          else
+            python -m pip install --disable-pip-version-check uv
+          fi
+          uv --version
+        displayName: Instalar uv
+
+      - bash: |
+          set -euo pipefail
+          if [ -f uv.lock ]; then uv sync --locked; else uv sync; fi
+          uv run --with ruff ruff check .
+          uv run --with ruff ruff format --check .
+        displayName: Lint (ruff)
+        workingDirectory: ${{ parameters.workingDirectory }}
+
+      - bash: |
+          set -euo pipefail
+          uv run --with pytest pytest --junitxml="$(Agent.TempDirectory)/test-results.xml"
+        displayName: Tests (pytest)
+        workingDirectory: ${{ parameters.workingDirectory }}
+
+      - task: PublishTestResults@2
+        condition: succeededOrFailed()
+        inputs:
+          testResultsFormat: JUnit
+          testResultsFiles: $(Agent.TempDirectory)/test-results.xml
+          testRunTitle: ${{ parameters.workingDirectory }}

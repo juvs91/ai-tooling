@@ -1,0 +1,14 @@
+# steps/checkout.yml — checkout con historia completa y tags.
+# Ref: ADR-0060 §8. Los pipelines nuevos de Azure usan shallow fetch (depth 1) y
+# fetchTags: false por defecto; release.sh y ci-image.sh necesitan historia y tags.
+parameters:
+  - name: persistCredentials   # true solo si el job empuja tags (System.AccessToken)
+    type: boolean
+    default: false
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+    fetchTags: true
+    clean: true
+    persistCredentials: ${{ parameters.persistCredentials }}

@@ -1,0 +1,21 @@
+# example-auth-ci.yml — CI de la lib _shared/libs/auth.
+# Ojo: un cambio en la lib también dispara el CI de cada servicio que la lista en
+# su trigger.paths (y su imagen cambia de hash de contenido). Eso es intencional.
+
+trigger:
+  batch: true
+  branches:
+    include: [main]
+  paths:
+    include:
+      - _shared/libs/auth
+
+pr: none
+
+stages:
+  - stage: CI
+    jobs:
+      - template: ../templates/jobs/python-ci.yml
+        parameters:
+          workingDirectory: _shared/libs/auth
+          pipelineFile: pipelines/libs/example-auth-ci.yml

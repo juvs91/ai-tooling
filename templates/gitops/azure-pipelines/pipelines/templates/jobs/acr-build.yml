@@ -1,0 +1,129 @@
+# jobs/acr-build.yml — imagen del servicio identificada por contenido (ADR-0060).
+#
+#   PR (Build validation) → docker build sin push (valida el Dockerfile)
+#   merge a main          → ensure-ctx: build+push de <repo>:ctx-<hash> solo si no
+#                           existe, y lock de tag + manifest
+#                         → (autoDevTag) tag git <servicio>@<versión>-dev.<BuildId>,
+#                           que dispara el pipeline de release → Environment dev
+#   push a hotfix/<servicio>/* → docker build sin push
+#                         → (autoHotfixTag) tag git <servicio>@<X.Y.Z>-hotfix.<N+1>,
+#                           que dispara el release → prod (contrato de release.sh hotfix).
+#                           Recuerda: `release.sh cherry` a main es obligatorio después.
+#
+# Requiere: scripts/ci-image.sh y scripts/ci-acr.sh en el repo; service connection
+# Azure RM con workload identity y rol AcrPush sobre el registry. Con autoDevTag o
+# autoHotfixTag: la identidad "<Proyecto> Build Service" necesita Contribute + Create tag.
+parameters:
+  - name: serviceName          # nombre en tags git: <iniciativa>-<servicio>, ej: ventas-api
+    type: string
+  - name: servicePath          # ej: ventas/api
+    type: string
+  - name: dependsOn            # misma lista que trigger.paths.include (sin servicePath)
+    type: object
+    default: []
+  - name: acrName              # nombre corto del ACR, ej: metalsaacr
+    type: string
+  - name: imageRepository      # repositorio en ACR, ej: ventas/api
+    type: string
+  - name: azureSubscription    # service connection Azure RM (workload identity)
+    type: string
+  - name: dockerfile
+    type: string
+    default: ''                # vacío = <servicePath>/Dockerfile
+  - name: buildContext         # raíz del repo: el Dockerfile copia servicio + libs
+    type: string
+    default: .
+  - name: trunkBranch
+    type: string
+    default: main
+  - name: autoDevTag
+    type: boolean
+    default: true
+  - name: autoHotfixTag
+    type: boolean
+    default: true
+  - name: dependsOnJobs        # ej: [python_ci] — no publicar si los tests fallan
+    type: object
+    default: []
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+jobs:
+  - job: acr_build
+    displayName: Imagen · ${{ parameters.serviceName }}
+    dependsOn: ${{ parameters.dependsOnJobs }}
+    pool: ${{ parameters.pool }}
+    variables:
+      ${{ if eq(parameters.dockerfile, '') }}:
+        DOCKERFILE: ${{ parameters.servicePath }}/Dockerfile
+      ${{ else }}:
+        DOCKERFILE: ${{ parameters.dockerfile }}
+      IS_TRUNK: $[ eq(variables['Build.SourceBranch'], 'refs/heads/${{ parameters.trunkBranch }}') ]
+      IS_HOTFIX: $[ startsWith(variables['Build.SourceBranch'], 'refs/heads/hotfix/${{ parameters.serviceName }}/') ]
+    steps:
+      - template: ../steps/checkout.yml
+        parameters:
+          persistCredentials: ${{ or(parameters.autoDevTag, parameters.autoHotfixTag) }}
+
+      - bash: |
+          set -euo pipefail
+          CTX=$(bash scripts/ci-image.sh context-hash '${{ parameters.servicePath }}' ${{ join(' ', parameters.dependsOn) }})
+          echo "contexto: $CTX"
+          echo "##vso[task.setvariable variable=ctx;isOutput=true]$CTX"
+        name: ctx
+        displayName: Hash de contenido
+
+      - bash: |
+          set -euo pipefail
+          docker build -f "$(DOCKERFILE)" -t "validate/${{ parameters.imageRepository }}:$(ctx.ctx)" '${{ parameters.buildContext }}'
+        displayName: docker build (validación, sin push)
+        condition: and(succeeded(), ne(variables.IS_TRUNK, 'True'))
+
+      - task: AzureCLI@2
+        name: publish
+        displayName: ensure-ctx → ACR
+        condition: and(succeeded(), eq(variables.IS_TRUNK, 'True'))
+        inputs:
+          azureSubscription: ${{ parameters.azureSubscription }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            DIGEST=$(bash scripts/ci-acr.sh ensure-ctx \
+              '${{ parameters.acrName }}' '${{ parameters.imageRepository }}' "$(ctx.ctx)" \
+              "$(DOCKERFILE)" '${{ parameters.buildContext }}' \
+              --label "org.opencontainers.image.revision=$(Build.SourceVersion)" \
+              --label "org.opencontainers.image.source=$(Build.Repository.Uri)" \
+              --label "gitops.context=$(ctx.ctx)")
+            echo "##vso[task.setvariable variable=digest;isOutput=true]$DIGEST"
+
+      - ${{ if parameters.autoDevTag }}:
+        - bash: |
+            set -euo pipefail
+            NAME='${{ parameters.serviceName }}'
+            VERSION=$(bash scripts/ci-image.sh manifest-version '${{ parameters.servicePath }}')
+            if git rev-parse -q --verify "refs/tags/${NAME}@${VERSION}" >/dev/null; then
+              echo "##vso[task.logissue type=warning]${NAME}@${VERSION} ya está en prod — bumpea la versión (release.sh bump) para generar builds de dev nuevos"
+              exit 0
+            fi
+            TAG="${NAME}@${VERSION}-dev.$(Build.BuildId)"
+            git -c user.name="Azure Pipelines" -c user.email="pipelines@noreply" tag -a "$TAG" -m "CI dev build $(Build.BuildNumber)"
+            git push origin "refs/tags/$TAG"
+            echo "tag creado: $TAG → dispara el pipeline de release (Environment dev)"
+          displayName: Tag -dev automático
+          condition: and(succeeded(), eq(variables.IS_TRUNK, 'True'))
+
+      - ${{ if parameters.autoHotfixTag }}:
+        - bash: |
+            set -euo pipefail
+            NAME='${{ parameters.serviceName }}'
+            VERSION=$(bash scripts/ci-image.sh manifest-version '${{ parameters.servicePath }}')
+            TAG=$(bash scripts/ci-image.sh next-hotfix "$NAME" "$VERSION")
+            git -c user.name="Azure Pipelines" -c user.email="pipelines@noreply" tag -a "$TAG" -m "Hotfix $(Build.SourceBranchName) build $(Build.BuildNumber)"
+            git push origin "refs/tags/$TAG"
+            echo "tag creado: $TAG → dispara el release (Environment prod, con approval)"
+            echo "##vso[task.logissue type=warning]Después del deploy: ./scripts/release.sh cherry $NAME $VERSION (obligatorio)"
+          displayName: Tag -hotfix automático
+          condition: and(succeeded(), eq(variables.IS_HOTFIX, 'True'))
