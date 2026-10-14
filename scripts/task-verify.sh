@@ -13,6 +13,11 @@ if [ -n "$TASK_VERIFY_RUNNING" ]; then
 fi
 export TASK_VERIFY_RUNNING=1
 
+# Correr desde la raíz del repo para que los comandos relativos del
+# completion_checklist funcionen desde cualquier cwd. Raíz por git y no por
+# dirname "$0": scripts/ suele estar symlinkeado en ~/.local/bin.
+cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
+
 LIB=".claude/hooks/task-scope-lib.sh"
 if [ -f "$LIB" ]; then
   source "$LIB"
@@ -37,7 +42,9 @@ INCOMPLETE=()
 
 while IFS= read -r check; do
   [ -z "$check" ] && continue
-  CMD=$(echo "$check" | sed 's/[[:space:]]*#.*//' | xargs)
+  # Solo recortar espacios — `xargs` quitaba comillas y backslashes y rompía
+  # cualquier ítem con \( … \) o patrones '*.ext' entre comillas.
+  CMD=$(printf '%s' "$check" | sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
   LABEL=$(echo "$check" | grep -o '#.*' | sed 's/^# *//' || true)
   [ -z "$LABEL" ] && LABEL="$CMD"
 

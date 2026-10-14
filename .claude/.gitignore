@@ -3,3 +3,6 @@ quality-state/
 quality-events.log
 drift-state/
 task-scope.json
+sync.log
+.sync.lock/
+.last_hook_sync

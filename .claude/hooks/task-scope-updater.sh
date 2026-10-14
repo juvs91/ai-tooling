@@ -1,71 +1,75 @@
 #!/usr/bin/env bash
 # task-scope-updater.sh — Detecta cambios de modo mid-session y actualiza task-scope.json
 # Dispara en CADA mensaje. Solo actúa si hay un modo restrictivo activo y el prompt
-# señala claramente un cambio de intent (analysis → build, build → synthesize, etc.)
+# señala un cambio de intent (analysis → build, build → synthesize, etc.)
 # distributable: true
 # event: UserPromptSubmit
 # matcher: ""
 # timeout: 5
 
 INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
-PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-
-LIB="$CWD/.claude/hooks/task-scope-lib.sh"
-if [ -f "$LIB" ]; then
-  source "$LIB"
-  SCOPE_FILE=$(scope_file_for_session "$CWD" "$SESSION_ID")
-else
-  SCOPE_FILE="$CWD/.claude/task-scope.json"
-fi
+CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // "."')
+PROMPT=$(printf '%s' "$INPUT" | jq -r '.prompt // empty')
+SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty')
 
 [ -z "$PROMPT" ] && exit 0
+
+# La lib vive junto a este hook — no depender del cwd de la sesión (puede ser
+# un subdirectorio tras un `cd`).
+LIB="$(dirname "${BASH_SOURCE[0]}")/task-scope-lib.sh"
+[ -f "$LIB" ] || exit 0
+source "$LIB"
+
+ROOT=$(project_root "$CWD")
+SCOPE_FILE=$(scope_file_for_session "$ROOT" "$SESSION_ID")
 [ ! -f "$SCOPE_FILE" ] && exit 0
 
 CURRENT_MODE=$(jq -r '.mode // "full"' "$SCOPE_FILE")
-BASE_MODE=$(echo "$CURRENT_MODE" | cut -d: -f1)
-LANG_SUFFIX=$(echo "$CURRENT_MODE" | cut -d: -f2 -s)
+BASE_MODE=$(printf '%s' "$CURRENT_MODE" | cut -d: -f1)
+LANG_SUFFIX=$(printf '%s' "$CURRENT_MODE" | cut -d: -f2 -s)
 
 # Sin modo restrictivo activo → no hay nada que actualizar
 [ "$BASE_MODE" = "full" ] && exit 0
 
 # ── Detección de señales de cambio de modo ────────────────────────────────────
-# Keywords conservadores: requieren señal explícita de cambio, no solo presencia
-# de palabras de acción. Evita false positives en preguntas normales.
+# Asimetría deliberada (ver task-scope-lib.sh):
+#   - Hacia build (menos restrictivo): basta CUALQUIER verbo de construcción.
+#     Antes se exigía "ahora implementa" y un "arregla X" dejaba la sesión
+#     atascada en analysis, bloqueando el edit.
+#   - Hacia modos restrictivos: solo con un marcador explícito de transición
+#     ("ahora", "primero", "now", "first"…) y sin verbo de construcción en el
+#     prompt — un "revisa que compile y arréglalo" ya no cae en validate.
 
 NEW_BASE=""
+INTENT=$(intent_classify "$PROMPT")
 
-# analysis/validate → build
-if echo "$PROMPT" | grep -qiE \
-  "ahora (implementa|hazlo|codifica|crea|arréglalo|build|desarrolla)|ok (implementa|hazlo|procede|arréglalo)|(ya analicé|terminé el análisis).*(ahora|procede)|(implementa|codifica|construye) (esto|eso|lo que)"; then
+if [ "$INTENT" = "build" ]; then
   NEW_BASE="build"
 
 # analysis/build → synthesize
-elif echo "$PROMPT" | grep -qiE \
-  "ahora (documenta|escribe (el )?(doc|readme|guía))|ya (analicé|implementé).*(documenta|escribe)|sintetiza (esto|eso|el análisis)"; then
+elif printf '%s' "$PROMPT" | grep -qiE \
+  "ahora (documenta|escribe (el )?(doc|readme|guía|guia))|ya (analicé|analice|implementé|implemente).*(documenta|escribe)|sintetiza (esto|eso|el análisis|el analisis)|now (document|write (the )?(docs?|readme|guide))"; then
   NEW_BASE="synthesize"
 
 # build/synthesize → analysis
-elif echo "$PROMPT" | grep -qiE \
-  "antes de (implementar|continuar).*(analiza|revisa|checa)|primero (analiza|entiende|explora|mapea)"; then
+elif printf '%s' "$PROMPT" | grep -qiE \
+  "antes de (implementar|continuar).*(analiza|revisa|checa)|primero (analiza|entiende|explora|mapea)|first (analy[sz]e|understand|explore|map)|before (implementing|continuing).*(analy[sz]e|review|check)"; then
   NEW_BASE="analysis"
 
 # cualquier modo → validate
-elif echo "$PROMPT" | grep -qiE \
-  "ahora (verifica|valida|corre (los )?tests|revisa (que|si))|(solo |solamente )?(verifica|valida|revisa) (que|si|los)"; then
+elif printf '%s' "$PROMPT" | grep -qiE \
+  "ahora (verifica|valida|corre (los )?tests)|now (verify|validate|run (the )?tests)"; then
   NEW_BASE="validate"
 fi
 
 [ -z "$NEW_BASE" ] && exit 0
 [ "$NEW_BASE" = "$BASE_MODE" ] && exit 0
 
-# ── Actualizar task-scope.json (sufijo de lenguaje solo aplica a build) ───────
-if [ "$NEW_BASE" = "build" ]; then
-  NEW_MODE="${NEW_BASE}${LANG_SUFFIX:+:$LANG_SUFFIX}"
-else
-  NEW_MODE="$NEW_BASE"
-fi
+# ── Actualizar task-scope.json (sufijo de lenguaje solo aplica a build/analysis) ─
+case "$NEW_BASE" in
+  build|analysis) NEW_MODE="${NEW_BASE}${LANG_SUFFIX:+:$LANG_SUFFIX}" ;;
+  *)              NEW_MODE="$NEW_BASE" ;;
+esac
 TASK_ID=$(jq -r '.task_id // "unnamed"' "$SCOPE_FILE")
 
 TMP=$(mktemp)
