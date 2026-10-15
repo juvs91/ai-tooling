@@ -1,0 +1,44 @@
+# Simulador local de Azure DevOps + ACR + Azure Artifacts (ADR-0061).
+# Se maneja con tools/azure-sim/sim (up | down | run …); no hace falta invocar compose a mano.
+name: azure-sim
+
+services:
+  registry:                      # almacenamiento OCI real del "ACR"
+    image: registry:2.8.3
+
+  azure-mock:                    # locks de ACR + API de views de Artifacts
+    image: python:3.12-slim
+    command: ["python", "-u", "/srv/azure_mock.py"]
+    environment:
+      REGISTRY_UPSTREAM: http://registry:5000
+      PYPI_UPSTREAM: http://pypi:8080
+    volumes:
+      - ./services/azure_mock.py:/srv/azure_mock.py:ro
+    ports:
+      - "127.0.0.1:8082:8082"
+
+  acr:                           # endpoint "ACR": localhost:5000
+    image: nginx:1.27-alpine
+    volumes:
+      - ./services/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "127.0.0.1:5000:80"
+    depends_on: [registry, azure-mock]
+
+  pypi:                          # feed de Azure Artifacts (sin overwrite → 409 en re-upload)
+    image: pypiserver/pypiserver:v2.1.1
+    command: ["run", "-p", "8080", "-P", ".", "-a", ".", "/data/packages"]
+    ports:
+      - "127.0.0.1:8081:8080"
+
+  agent:                         # agente ubuntu-latest; los steps corren aquí vía docker exec
+    build: ./agent
+    network_mode: host           # ve localhost:5000/8081/8082 igual que el daemon de Docker
+    user: "${SIM_UID:-1000}:${SIM_GID:-1000}"
+    group_add: ["${DOCKER_GID:-999}"]
+    environment:
+      SIM_ACR_URL: http://localhost:5000
+      SIM_MOCK_URL: http://localhost:8082
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SIM_WORK:?SIM_WORK}:${SIM_WORK:?SIM_WORK}
