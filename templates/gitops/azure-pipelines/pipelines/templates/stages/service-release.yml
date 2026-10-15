@@ -12,6 +12,8 @@
 # Los gates humanos viven en los Environments (Approvals & checks), no aquí:
 # configura approvals en qa y prod. La condición de los stages de prod es
 # defensa en profundidad (solo refs/tags/*), no el gate principal.
+#
+# La lógica vive en scripts/ci-service.sh (ADR-0061); este YAML solo cablea.
 parameters:
   - name: serviceName          # ej: ventas-api (prefijo del tag git)
     type: string
@@ -53,34 +55,24 @@ stages:
     jobs:
       - job: resolve
         pool: ${{ parameters.pool }}
+        variables:
+          CI_SERVICE_NAME: ${{ parameters.serviceName }}
+          CI_SERVICE_PATH: ${{ parameters.servicePath }}
+          CI_DEPENDS_ON: ${{ join(' ', parameters.dependsOn) }}
         steps:
           - template: ../steps/checkout.yml
 
-          - bash: bash scripts/ci-image.sh parse-tag --azure --expect '${{ parameters.serviceName }}' "$(Build.SourceBranch)"
+          - bash: bash scripts/ci-service.sh validate-tag
             name: tag
             displayName: Validar tag
 
-          - bash: |
-              set -euo pipefail
-              TAG="${BUILD_SOURCEBRANCH#refs/tags/}"
-              PATHS=('${{ parameters.servicePath }}' ${{ join(' ', parameters.dependsOn) }})
-              COMMIT=$(git rev-parse "${TAG}^{commit}")
-              if [ "$(tag.env)" = "prod" ]; then
-                RC=$(bash scripts/ci-image.sh prod-source "$(tag.name)" "$(tag.version)")
-                echo "prod se promueve desde $RC"
-                bash scripts/ci-image.sh same-content "$RC" "$TAG" "${PATHS[@]}"
-                SOURCE="${RC#*@}"
-                NEEDS_BUILD=false
-              else
-                SOURCE=$(bash scripts/ci-image.sh context-hash --ref "$TAG" "${PATHS[@]}")
-                NEEDS_BUILD=true
-              fi
-              echo "commit=$COMMIT source=$SOURCE needs_build=$NEEDS_BUILD"
-              echo "##vso[task.setvariable variable=commit;isOutput=true]$COMMIT"
-              echo "##vso[task.setvariable variable=source;isOutput=true]$SOURCE"
-              echo "##vso[task.setvariable variable=needsBuild;isOutput=true]$NEEDS_BUILD"
+          - bash: bash scripts/ci-service.sh plan-release
             name: plan
             displayName: Origen de la imagen
+            env:
+              CI_TAG_ENV: $(tag.env)
+              CI_TAG_NAME: $(tag.name)
+              CI_TAG_VERSION: $(tag.version)
 
   - stage: Publish
     displayName: Publicar en ACR
@@ -89,14 +81,15 @@ stages:
       - job: publish
         pool: ${{ parameters.pool }}
         variables:
-          ENV: $[ stageDependencies.Resolve.resolve.outputs['tag.env'] ]
-          IMAGE_TAG: $[ stageDependencies.Resolve.resolve.outputs['tag.image_tag'] ]
-          SOURCE: $[ stageDependencies.Resolve.resolve.outputs['plan.source'] ]
-          NEEDS_BUILD: $[ stageDependencies.Resolve.resolve.outputs['plan.needsBuild'] ]
-          ${{ if eq(parameters.dockerfile, '') }}:
-            DOCKERFILE: ${{ parameters.servicePath }}/Dockerfile
-          ${{ else }}:
-            DOCKERFILE: ${{ parameters.dockerfile }}
+          CI_ENV: $[ stageDependencies.Resolve.resolve.outputs['tag.env'] ]
+          CI_IMAGE_TAG: $[ stageDependencies.Resolve.resolve.outputs['tag.image_tag'] ]
+          CI_SOURCE: $[ stageDependencies.Resolve.resolve.outputs['plan.source'] ]
+          CI_NEEDS_BUILD: $[ stageDependencies.Resolve.resolve.outputs['plan.needsBuild'] ]
+          CI_SERVICE_PATH: ${{ parameters.servicePath }}
+          CI_ACR_NAME: ${{ parameters.acrName }}
+          CI_IMAGE_REPOSITORY: ${{ parameters.imageRepository }}
+          CI_DOCKERFILE: ${{ parameters.dockerfile }}
+          CI_BUILD_CONTEXT: ${{ parameters.buildContext }}
         steps:
           - template: ../steps/checkout.yml
 
@@ -106,22 +99,9 @@ stages:
             inputs:
               azureSubscription: ${{ parameters.azureSubscription }}
               scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                set -euo pipefail
-                ACR='${{ parameters.acrName }}'
-                REPO='${{ parameters.imageRepository }}'
-                if [ "$(NEEDS_BUILD)" = "true" ]; then
-                  bash scripts/ci-acr.sh ensure-ctx "$ACR" "$REPO" "$(SOURCE)" "$(DOCKERFILE)" '${{ parameters.buildContext }}' \
-                    --label "org.opencontainers.image.revision=$(Build.SourceVersion)" \
-                    --label "org.opencontainers.image.source=$(Build.Repository.Uri)" \
-                    --label "gitops.context=$(SOURCE)" >/dev/null
-                fi
-                DIGEST=$(bash scripts/ci-acr.sh promote "$ACR" "$REPO" "$(SOURCE)" "$(IMAGE_TAG)")
-                SERVER="${ACR_LOGIN_SERVER:-$ACR.azurecr.io}"
-                echo "$(ENV): $SERVER/$REPO:$(IMAGE_TAG) → $DIGEST"
-                echo "##vso[task.setvariable variable=digest;isOutput=true]$DIGEST"
-                echo "##vso[task.setvariable variable=imageRef;isOutput=true]$SERVER/$REPO@$DIGEST"
+              scriptLocation: scriptPath
+              scriptPath: scripts/ci-service.sh
+              arguments: publish-release
 
   - ${{ each env in parameters.environments }}:
     - stage: Deploy_${{ env.key }}
@@ -139,15 +119,18 @@ stages:
           environment: ${{ env.value }}
           pool: ${{ parameters.pool }}
           variables:
-            IMAGE_REF: $[ stageDependencies.Publish.publish.outputs['acr.imageRef'] ]
+            CI_IMAGE_REF: $[ stageDependencies.Publish.publish.outputs['acr.imageRef'] ]
+            CI_ENVIRONMENT: ${{ env.value }}
           strategy:
             runOnce:
               deploy:
                 steps:
                   - ${{ if eq(length(parameters.deploySteps), 0) }}:
-                    - bash: |
-                        echo "Placeholder: sin runtime configurado todavía."
-                        echo "Imagen aprobada para ${{ env.value }}: $(IMAGE_REF)"
+                    # Los jobs deployment no hacen checkout implícito; el placeholder
+                    # necesita scripts/ (sin historia: no consulta tags).
+                    - checkout: self
+                      fetchDepth: 1
+                    - bash: bash scripts/ci-service.sh deploy-placeholder
                       displayName: Deploy (placeholder)
                   - ${{ else }}:
                     - ${{ parameters.deploySteps }}

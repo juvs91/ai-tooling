@@ -11,8 +11,12 @@ pipeline sandbox puede validar), pero atrapa los errores baratos:
   - cada `template:` apunta a un archivo existente (ruta relativa al que lo usa);
   - cada `${{ parameters.X }}` usado en un template está declarado;
   - cada uso de template pasa los parámetros sin default y no pasa desconocidos;
-  - cada script `bash:` / `inlineScript:` pasa `bash -n` (expresiones de Azure
-    reemplazadas por valores dummy);
+  - el YAML solo cablea (ADR-0061): cada step `bash:` / `AzureCLI@2` es una única
+    llamada `scripts/ci-*.sh <comando>` y el comando existe en el script;
+  - cada variable que el comando exige con `ci_require` llega por el `env:` del
+    step, las variables del job o las predefinidas del agente;
+  - cada `$(step.var)` y `stageDependencies.S.j.outputs['step.var']` apunta a un
+    step con ese `name:`;
   - los pipelines de ejemplo pasan `ci-image.sh check-paths` (trigger.paths cubre
     servicePath + dependsOn).
 """
@@ -21,7 +25,6 @@ from __future__ import annotations
 
 import re
 import subprocess
-import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Iterator
@@ -60,23 +63,57 @@ def _declared(doc: Any) -> dict[str, dict]:
     return {p["name"]: p for p in (doc or {}).get("parameters", []) if isinstance(p, dict)}
 
 
-def _scripts(node: Any) -> Iterator[str]:
-    for n in _walk(node):
-        if not isinstance(n, dict):
-            continue
-        if isinstance(n.get("bash"), str):
-            yield n["bash"]
-        inputs = n.get("inputs")
-        if isinstance(inputs, dict) and inputs.get("scriptType") == "bash" and isinstance(inputs.get("inlineScript"), str):
-            yield inputs["inlineScript"]
+STEP_CALL = re.compile(r"^bash (scripts/ci-[a-z-]+\.sh) ([a-z-]+)$")
+REQUIRE = re.compile(r"ci_require ([A-Z0-9_ ]+)")
+STEP_OUTPUT = re.compile(r"\$\(([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\)")
+STAGE_OUTPUT = re.compile(r"stageDependencies\.(\w+)\.(\w+)\.outputs\['(\w+)\.(\w+)'\]")
+
+# Variables que pone el agente (o una task anterior del mismo job) sin pasar por el YAML.
+PREDEFINED = {
+    "BUILD_SOURCEBRANCH", "BUILD_SOURCEBRANCHNAME", "BUILD_BUILDID", "BUILD_BUILDNUMBER",
+    "BUILD_SOURCEVERSION", "BUILD_REPOSITORY_URI", "AGENT_TEMPDIRECTORY",
+    "SYSTEM_COLLECTIONURI",
+    "PYPIRC_PATH",  # TwineAuthenticate@1
+}
+# $(System.AccessToken), $(Build.BuildId)… son predefinidas, no salidas de un step.
+PREDEFINED_NAMESPACES = {"System", "Build", "Agent", "Pipeline", "Environment"}
 
 
-def _neutralize(script: str) -> str:
-    """Reemplaza ${{ … }} y $(…) de Azure por valores dummy aptos para bash -n."""
-    s = re.sub(r"\$\{\{.*?\}\}", "AZURE_EXPR", script)
-    # $(Var.Name) macro de Azure (sin espacios); deja $(cmd args) de bash intacto
-    s = re.sub(r"\$\(([A-Za-z_][A-Za-z0-9_.]*)\)", "AZURE_MACRO", s)
-    return s
+def _script_call(step: dict) -> tuple[str, str] | None:
+    """(script, comando) de un step bash/AzureCLI@2; None si no es un step de script."""
+    if isinstance(step.get("bash"), str):
+        m = STEP_CALL.match(step["bash"].strip())
+        return (m.group(1), m.group(2)) if m else ("<inline>", step["bash"])
+    if str(step.get("task", "")).startswith("AzureCLI@"):
+        inp = step.get("inputs") or {}
+        if inp.get("scriptLocation") != "scriptPath":
+            return ("<inline>", str(inp.get("inlineScript", "")))
+        return (inp.get("scriptPath", ""), str(inp.get("arguments", "")).strip())
+    return None
+
+
+def _jobs(doc: Any) -> Iterator[tuple[dict, list[dict]]]:
+    """(job, steps aplanados) — incluye steps de deployment y de ramas ${{ if }}."""
+    for n in _walk(doc):
+        if isinstance(n, dict) and ("job" in n or "deployment" in n):
+            steps = [s for s in _walk(n.get("steps") or n.get("strategy") or [])
+                     if isinstance(s, dict) and ("bash" in s or "task" in s or "checkout" in s)]
+            yield n, steps
+
+
+def _required(script: str, command: str) -> set[str]:
+    text = (ROOT / script).read_text(encoding="utf-8")
+    func = "cmd_" + command.replace("-", "_")
+    m = re.search(rf"^{func}\(\) \{{\n(.*?)^\}}", text, re.S | re.M)
+    if not m:
+        raise AssertionError(f"{script} no define {func}()")
+    return {v for line in REQUIRE.findall(m.group(1)) for v in line.split()}
+
+
+def _step_names(doc: Any) -> dict[str, set[str]]:
+    """job → nombres de steps (name:)."""
+    return {str(j.get("job") or j.get("deployment")): {s["name"] for s in steps if "name" in s}
+            for j, steps in _jobs(doc)}
 
 
 class TestAzureTemplates(unittest.TestCase):
@@ -112,15 +149,51 @@ class TestAzureTemplates(unittest.TestCase):
             with self.subTest(file=f.relative_to(BASE)):
                 self.assertFalse(used - declared, f"usados sin declarar: {used - declared}")
 
-    def test_inline_scripts_bash_syntax(self) -> None:
+    def test_steps_only_call_scripts(self) -> None:
         for f in FILES:
-            for i, script in enumerate(_scripts(_load(f))):
-                with self.subTest(file=f.relative_to(BASE), script=i):
-                    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as tmp:
-                        tmp.write(_neutralize(script))
-                    r = subprocess.run(["bash", "-n", tmp.name], capture_output=True, text=True)
-                    Path(tmp.name).unlink()
-                    self.assertEqual(r.returncode, 0, f"{r.stderr}\n---\n{script}")
+            for job, steps in _jobs(_load(f)):
+                for step in steps:
+                    call = _script_call(step)
+                    if call is None:
+                        continue
+                    script, command = call
+                    with self.subTest(file=f.relative_to(BASE), step=step.get("displayName", command)):
+                        self.assertNotEqual(script, "<inline>", f"lógica inline en el YAML:\n{command}")
+                        self.assertRegex(script, r"^scripts/ci-[a-z-]+\.sh$")
+                        self.assertTrue((ROOT / script).is_file(), f"no existe {script}")
+                        main = (ROOT / script).read_text(encoding="utf-8")
+                        self.assertRegex(main, rf"(?m)^\s+{re.escape(command)}\)", f"{script} no tiene el comando {command}")
+
+    def test_script_inputs_wired(self) -> None:
+        for f in FILES:
+            for job, steps in _jobs(_load(f)):
+                job_vars = set((job.get("variables") or {}).keys()) if isinstance(job.get("variables"), dict) else set()
+                for step in steps:
+                    call = _script_call(step)
+                    if call is None or call[0] == "<inline>":
+                        continue
+                    available = job_vars | set((step.get("env") or {}).keys()) | PREDEFINED
+                    with self.subTest(file=f.relative_to(BASE), step=f"{call[0]} {call[1]}"):
+                        missing = _required(*call) - available
+                        self.assertFalse(missing, f"variables exigidas por ci_require sin cablear: {missing}")
+
+    def test_output_references_resolve(self) -> None:
+        for f in FILES:
+            doc = _load(f)
+            names = _step_names(doc)
+            text = f.read_text(encoding="utf-8")
+            for job, steps in _jobs(doc):
+                own = names[str(job.get("job") or job.get("deployment"))]
+                for step in steps:
+                    for ref_step, var in STEP_OUTPUT.findall(yaml.safe_dump(step.get("env") or {})):
+                        if ref_step in PREDEFINED_NAMESPACES:
+                            continue
+                        with self.subTest(file=f.relative_to(BASE), ref=f"{ref_step}.{var}"):
+                            self.assertIn(ref_step, own, f"$({ref_step}.{var}) no apunta a un step con name: {ref_step}")
+            for stage, jobname, ref_step, var in STAGE_OUTPUT.findall(text):
+                with self.subTest(file=f.relative_to(BASE), ref=f"{stage}.{jobname}.{ref_step}.{var}"):
+                    self.assertIn(jobname, names, f"no hay job {jobname}")
+                    self.assertIn(ref_step, names[jobname], f"el job {jobname} no tiene step name: {ref_step}")
 
     def test_example_pipelines_cover_dependencies(self) -> None:
         for f in sorted((BASE / "services").glob("*-ci.yml")) + sorted((BASE / "libs").glob("*-ci.yml")):

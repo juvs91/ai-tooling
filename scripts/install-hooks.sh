@@ -35,7 +35,8 @@ copy_distributable() {
     local dst_dir="$2"
     local label="$3"
     local count=0
-    for f in "$src_dir"/*.sh; do
+    # *.py también: los scripts de pipeline usan helpers Python (ci_pyproject.py)
+    for f in "$src_dir"/*.sh "$src_dir"/*.py; do
         [ -f "$f" ] || continue
         grep -q "^# distributable: true" "$f" 2>/dev/null || continue
         # cp+mv (no cp directo): un hook puede invocarse a sí mismo (ver
