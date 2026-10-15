@@ -177,10 +177,11 @@ def s_immutable(sim: Sim) -> None:
     code, out = agent.run(
         "docker pull -q busybox:1.36 >/dev/null && docker tag busybox:1.36 localhost:5000/ventas/api:1.0.0 "
         "&& docker push localhost:5000/ventas/api:1.0.0", sim.work, {})
-    check(code != 0 and ("DENIED" in out.upper() or "405" in out or "not allowed" in out.lower()),
-          "push directo a un tag bloqueado es rechazado por el 'ACR'")
+    check(code != 0 and "write-disabled" in out,
+          "push directo a un tag bloqueado es rechazado por el 'ACR' (405, lock del servidor)")
     env = {"ACR_LOGIN_SERVER": "localhost:5000"}
-    code, out = agent.run(f"bash scripts/ci-acr.sh promote metalsaacr {REPO} {ctx_tags()[0]} 1.0.0", sim.dev, env)
+    origin_ctx = next(t for t in ctx_tags() if digest(t) == digest("1.0.0"))  # el hotfix agregó otro ctx
+    code, out = agent.run(f"bash scripts/ci-acr.sh promote metalsaacr {REPO} {origin_ctx} 1.0.0", sim.dev, env)
     check(code == 0, "promote del mismo digest a un tag existente: OK (idempotente)")
     code, out = agent.run(f"bash scripts/ci-acr.sh promote metalsaacr {REPO} 1.0.0-hotfix.1 1.0.0", sim.dev, env)
     check(code != 0 and "inmutables" in out, "re-apuntar 1.0.0 a otro digest falla (tags inmutables)")
@@ -221,20 +222,22 @@ def s_lib(sim: Sim) -> None:
 
 def s_auth_error(sim: Sim) -> None:
     """Error de auth en ACR: el CI falla y NO reconstruye ni publica."""
-    before = ctx_tags()
-    fail_mode("auth")
-    try:
-        sim.commit({"ventas/api/ventas_api.py": fixture.SERVICE["ventas/api/ventas_api.py"]
-                    + '\n\nVERSION = "auth-error"\n'}, "cambio con ACR caído")
-        runs = by(sim.push("main"), SVC_CI)
-    finally:
-        fail_mode("")
-    run = runs[0]
-    check(run.result == "Failed", "el CI falla con el error de autenticación")
-    out = step_out(run, "CI", "acr_build", "ensure-ctx → ACR")
-    check("AuthorizationFailed" in out and "construyendo" not in out, "el error de auth NO se toma como 'no existe'")
-    check(ctx_tags() == before, "no se publicó ningún ctx nuevo")
-    check(run.step("CI", "acr_build", "Tag -dev automático").result == "Skipped", "sin tag -dev tras el fallo")
+    for i, mode in enumerate(("auth", "list")):
+        before = ctx_tags()
+        fail_mode(mode)
+        try:
+            sim.commit({"ventas/api/ventas_api.py": fixture.SERVICE["ventas/api/ventas_api.py"]
+                        + f'\n\nVERSION = "auth-error-{i}"\n'}, f"cambio con ACR fallando ({mode})")
+            runs = by(sim.push("main"), SVC_CI)
+        finally:
+            fail_mode("")
+        run = runs[0]
+        check(run.result == "Failed", f"[{mode}] el CI falla con el error de autorización")
+        out = step_out(run, "CI", "acr_build", "ensure-ctx → ACR")
+        check("AuthorizationFailed" in out and "construyendo" not in out,
+              f"[{mode}] el error NO se toma como 'no existe' (sin build)")
+        check(ctx_tags() == before, f"[{mode}] no se publicó ningún ctx nuevo")
+        check(run.step("CI", "acr_build", "Tag -dev automático").result == "Skipped", f"[{mode}] sin tag -dev")
 
 
 def s_paths_drift(sim: Sim) -> None:

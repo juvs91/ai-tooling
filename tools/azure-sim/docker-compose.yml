@@ -39,6 +39,10 @@ services:
     environment:
       SIM_ACR_URL: http://localhost:5000
       SIM_MOCK_URL: http://localhost:8082
+      # Únicas diferencias de configuración respecto a Azure (ver README)
+      ACR_LOGIN_SERVER: localhost:5000
+      CI_PKGS_BASE_URL: http://localhost:8082
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${SIM_WORK:?SIM_WORK}:${SIM_WORK:?SIM_WORK}
+      - ./agent/az:/usr/local/bin/az:ro   # cambios al shim sin rebuild de la imagen

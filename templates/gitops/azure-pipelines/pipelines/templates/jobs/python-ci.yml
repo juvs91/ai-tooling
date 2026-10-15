@@ -33,12 +33,14 @@ jobs:
     steps:
       - template: ../steps/checkout.yml
 
-      - bash: bash scripts/ci-python.sh check-paths
-        displayName: Validar trigger.paths vs dependsOn
-
+      # Después de UsePythonVersion: check-paths lee YAML con PyYAML y el python
+      # del sistema (PEP 668) no permite instalarlo.
       - task: UsePythonVersion@0
         inputs:
           versionSpec: ${{ parameters.pythonVersion }}
+
+      - bash: bash scripts/ci-python.sh check-paths
+        displayName: Validar trigger.paths vs dependsOn
 
       - bash: bash scripts/ci-python.sh install-uv
         displayName: Instalar uv

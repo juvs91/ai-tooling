@@ -57,11 +57,16 @@ cmd_status() {
 cmd_run() {
   require_docker
   [[ -n "$("${COMPOSE[@]}" ps -q agent)" ]] || die "el stack no está arriba — corre: $0 up"
-  # Estado limpio por corrida: registry y feed nuevos, locks y llamadas en cero
-  "${COMPOSE[@]}" up -d --force-recreate --no-deps registry pypi azure-mock >/dev/null
+  # Estado limpio por corrida: registry y feed nuevos, locks y llamadas en cero.
+  # nginx (acr) también: resuelve las IPs de sus upstreams al arrancar y un
+  # registry recreado cambia de IP → 502. --renew-anon-volumes: registry y pypi
+  # guardan datos en volúmenes anónimos que --force-recreate conserva.
+  "${COMPOSE[@]}" up -d --force-recreate --renew-anon-volumes --no-deps registry pypi azure-mock acr >/dev/null
   wait_http http://localhost:5000/v2/ "ACR"
   wait_http http://localhost:8081/ "pypi"
   wait_http http://localhost:8082/_sim/health "azure-mock"
+  # Imagen base del fixture en cache local: un timeout de Docker Hub no es un fallo del pipeline
+  docker pull -q busybox:1.36 >/dev/null || die "no se pudo bajar busybox:1.36 (¿red?)"
   cd "$HERE"
   python3 -m azsim.scenarios --work "$SIM_WORK/run" "$@"
 }

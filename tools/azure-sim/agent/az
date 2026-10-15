@@ -10,7 +10,7 @@ contra el registry real del simulador (registry:2 detrás de nginx + azure_mock)
 
 Cualquier otro comando → exit 99 (el simulador no inventa comportamiento).
 Fallas inyectables (POST /_sim/acr/fail en azure_mock): "auth" → todo `az acr`
-responde como un 401/AuthorizationFailed de ACR.
+responde como un 401/AuthorizationFailed de ACR; "list" → solo listar falla (login OK).
 
 Variables: SIM_ACR_URL (http://localhost:5000), SIM_MOCK_URL (http://localhost:8082).
 """
@@ -71,18 +71,22 @@ def manifest_digest(repo: str, ref: str) -> str | None:
 def main(a: list) -> None:
     if a[:1] != ["acr"]:
         die(f"az (simulador): comando no soportado: az {' '.join(a)}", 99)
-    with http("GET", f"{MOCK}/_sim/acr/fail") as r:
-        if json.load(r)["mode"] == "auth":
-            die("(AuthorizationFailed) The client does not have authorization to perform action "
-                "'Microsoft.ContainerRegistry/registries/...' — simulated by azure-sim")
     sub = a[1:3] if a[1:2] == ["repository"] else a[1:2]
+    with http("GET", f"{MOCK}/_sim/acr/fail") as r:
+        mode = json.load(r)["mode"]
+    # auth: todo `az acr` falla. list: login OK pero listar falla (permiso de lectura
+    # faltante o fallo de red puntual) — el caso donde confundir error con "no existe"
+    # dispararía un rebuild.
+    if mode == "auth" or (mode == "list" and sub in (["repository", "list"], ["repository", "show-tags"])):
+        die("(AuthorizationFailed) The client does not have authorization to perform action "
+            "'Microsoft.ContainerRegistry/registries/...' — simulated by azure-sim")
 
     if sub == ["login"]:
         arg(a, "--name")
         print("Login Succeeded")
         return
     if sub == ["repository", "list"]:
-        with http("GET", f"{REG}/v2/_catalog?n=10000") as r:
+        with http("GET", f"{REG}/v2/_catalog?n=1000") as r:
             print("\n".join(json.load(r).get("repositories") or []))
         return
     if sub == ["repository", "show-tags"]:

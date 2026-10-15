@@ -95,5 +95,6 @@ No documentado en Microsoft Learn (consultado 2026-10-14):
 - Varios tags en un solo push → ¿un run por tag?
 - Patrones de tag con `@` (`'ventas-api@*'`).
 - Check *Branch control* con `refs/tags/*` (hay defensa en profundidad en las condiciones).
-- `docker buildx imagetools create` contra ACR con el token de `az acr login`.
+- `docker buildx imagetools create` contra ACR con el token de `az acr login` (contra un registry OCI
+  real ya se validó en el simulador: el re-tag conserva el digest).
 - Nombre normalizado del paquete en la URL REST de promoción a views.

@@ -5,9 +5,10 @@ sin Azure DevOps: un compilador de templates, un runner de stages/jobs/steps y s
 reales en Docker. Diseño y límites en
 [ADR-0061](../../docs/adr/ADR-0061-azure-pipelines-logica-fuera-del-yaml-y-simulador.md).
 
-## Requisitos: Docker Engine nativo en WSL
+## Requisitos: Docker con compose y buildx
 
-Usamos Docker Engine dentro de Ubuntu, no Docker Desktop. Es lo mismo que traen los
+Funciona con Docker Desktop (integración WSL activa; así se validó el 2026-10-15) o con
+Docker Engine nativo. Recomendado para equipos nuevos: Docker Engine dentro de Ubuntu. Es lo mismo que traen los
 agentes `ubuntu-latest`, no requiere licencia de Docker Desktop y se instala igual en
 cualquier equipo. Requiere `systemd=true` en `/etc/wsl.conf`.
 

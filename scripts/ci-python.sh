@@ -21,6 +21,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"
 cmd_check_paths() {
   ci_require CI_PIPELINE_FILE CI_WORKING_DIRECTORY
   local deps; mapfile -t deps < <(ci_words CI_DEPENDS_ON)
+  # ci-image.sh check-paths lee el YAML con PyYAML; el python del toolcache no lo trae
+  python3 -c 'import yaml' 2>/dev/null \
+    || python3 -m pip install --disable-pip-version-check -q pyyaml
   bash "$CI_DIR/ci-image.sh" check-paths "$CI_PIPELINE_FILE" "$CI_WORKING_DIRECTORY" "${deps[@]}"
 }
 

@@ -1024,3 +1024,17 @@ subcarpetas; uno llegó a colarse en un commit. Fix sugerido: `project_root` de
 - Docker Desktop no levantaba (la distro `docker-desktop` estaba Stopped y `/usr/bin/docker`
   era un symlink roto). Decisión: Docker Engine nativo en WSL (sin licencia de Desktop,
   igual que `ubuntu-latest`).
+
+### Primera corrida real del simulador (Docker Desktop, 2026-10-15): 9/9 escenarios, 52 aserciones
+Hallazgos al correr de verdad (ninguno aparecía con fakes):
+- **Bug real del template:** `check-paths` corría ANTES de `UsePythonVersion` → python del
+  sistema sin PyYAML (y PEP 668 impide instalarlo). Fix: el step va después y `ci-python.sh`
+  instala PyYAML si falta.
+- `docker buildx imagetools create` contra un registry OCI real conserva el digest en el
+  re-tag (pendiente de ADR-0060, validado salvo la auth de ACR).
+- Infra del simulador: nginx resuelve upstreams al arrancar (recrear el registry → 502, hay que
+  recrear nginx también); `--force-recreate` conserva volúmenes anónimos (`--renew-anon-volumes`);
+  `registry:2` rechaza `_catalog?n>1000`.
+- **Mutación enmascarada:** "error de listado = no existe" no se detectaba porque el fallo
+  simulado de auth también rompía `az acr login`. Se agregó el modo `list` (login OK, listar
+  falla). **Lección:** si una mutación no se detecta, revisar si otra falla la está tapando.
