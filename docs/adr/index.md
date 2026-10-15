@@ -38,3 +38,4 @@
 | [ADR-0058](ADR-0058-gate-synthesizing-on-read-history.md) | Gate SYNTHESIZING intent on prior read history | Accepted | 2026-09-21 | Proxy |
 | [ADR-0059](ADR-0059-cc-kimi-init-bootstrap.md) | cc-kimi-init — bootstrap por-proyecto de Claude Code con Kimi for Coding | Accepted | 2026-09-24 | GitOps |
 | [ADR-0060](ADR-0060-azure-pipelines-imagen-por-contenido.md) | Templates de Azure Pipelines — imagen por contenido y promoción por digest | Proposed | 2026-10-14 | GitOps |
+| [ADR-0061](ADR-0061-azure-pipelines-logica-fuera-del-yaml-y-simulador.md) | Azure Pipelines — lógica fuera del YAML y simulador local | Proposed | 2026-10-15 | GitOps |

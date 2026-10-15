@@ -19,14 +19,33 @@ pipelines/
 └── libs/example-auth-{ci,release}.yml
 ```
 
-Scripts que los templates llaman (en `scripts/` del repo destino, `# distributable: true`):
+Los `.yml` **solo cablean** (ADR-0061): cada step es `bash scripts/ci-<x>.sh <comando>` y
+la lógica vive en scripts (en `scripts/` del repo destino, `# distributable: true`):
 
 | Script | Qué decide / hace | Tests |
 |---|---|---|
+| `ci-service.sh` | Steps del servicio: hash, build de validación, publish, tags `-dev`/`-hotfix`, plan y publish del release | `tools/tests/test_ci_service.py` |
+| `ci-python.sh` | CI Python: `check-paths`, uv, ruff, pytest | `tools/tests/test_ci_pylib.py` |
+| `ci-pylib.sh` + `ci_pyproject.py` | Release de libs: validar tag, build, upload (409 = re-run), promoción a view | `tools/tests/test_ci_pylib.py` |
 | `ci-image.sh` | Hash de contenido, parseo de tags, origen de prod (`prod-source` + `same-content`), versión del manifest, PEP 440, siguiente hotfix, `check-paths` | `tools/tests/test_ci_image.py` |
-| `ci-acr.sh` | `ensure-ctx` (build solo si falta), `promote` (re-tag sin rebuild, idempotente, inmutable), locks de tag y manifest | `tools/tests/test_ci_acr.py` (ACR simulado) |
+| `ci-acr.sh` | `ensure-ctx` (build solo si falta), `promote` (re-tag sin rebuild, idempotente, inmutable), locks de tag y manifest | `tools/tests/test_ci_acr.py` |
+| `ci-lib.sh` | Helpers: outputs `##vso`, `logissue`, `ci_require` | (vía los anteriores) |
 
-Validación estática de estos YAML: `tools/tests/test_azure_templates.py`.
+Cableado YAML ↔ scripts validado estáticamente en `tools/tests/test_azure_templates.py`
+(steps de una línea, `ci_require` cableados, outputs que existen) y **ejecutando** con el
+simulador local.
+
+## Simulador local
+
+`tools/azure-sim/` corre estos mismos `.yml` y scripts contra un ACR (registry real con
+locks), un feed de Artifacts (pypiserver) y un agente `ubuntu:24.04`, todo en Docker.
+Detalle y límites en [`tools/azure-sim/README.md`](../../../tools/azure-sim/README.md).
+
+```bash
+tools/azure-sim/sim up          # una vez
+tools/azure-sim/sim run all     # 9 escenarios: PR, merge, rc→prod, hotfix, lib, auth-error…
+tools/azure-sim/sim down
+```
 
 ## Flujo
 
@@ -46,7 +65,7 @@ para este servicio. Prod recibe el **mismo digest** que aprobó QA.
 
 ## Instalación en un repo
 
-1. Copiar `pipelines/` a la raíz y `scripts/ci-image.sh`, `scripts/ci-acr.sh`
+1. Copiar `pipelines/` a la raíz y los scripts `scripts/ci-*.sh` + `scripts/ci_pyproject.py`
    (o `scripts/install-hooks.sh <repo>`, que copia los scripts distributables).
 2. Por servicio: copiar los dos ejemplos, renombrar a `<iniciativa>-<servicio>-{ci,release}.yml`
    y ajustar `serviceName`, `servicePath`, `dependsOn` (también en `trigger.paths.include`),
@@ -67,6 +86,8 @@ para este servicio. Prod recibe el **mismo digest** que aprobó QA.
 | Purga de `ctx-*` y `-dev.*` viejos | ACR → Tasks (`acr purge`) | los tags bloqueados se saltan solos |
 
 ## Pendiente de validar en un pipeline sandbox
+
+El simulador cubre el flujo y los scripts; esto solo lo valida Azure real (ver límites en ADR-0061):
 
 No documentado en Microsoft Learn (consultado 2026-10-14):
 
