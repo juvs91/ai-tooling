@@ -1,0 +1,23 @@
+{
+  "run_id": "267bbc67-ba57-4ec0-8a14-3095363d1b5b",
+  "model_id": "unsloth/gemma-3n-E2B-it",
+  "policy": "hlwss-evict",
+  "budget_gb": 6.0,
+  "slack_gb": 0.5,
+  "pressure_gb": 10.68,
+  "ram_total_gb": 17.2,
+  "budget_eff_gb": 5.44,
+  "fit": false,
+  "ws_total_gb": 10.83,
+  "calibrate": false,
+  "tokens": 64,
+  "elapsed_s": 622.4,
+  "pageins_total_bytes": 307326107648,
+  "majflt_start": 2174,
+  "majflt_end": 18759871,
+  "n_evictions": 2816,
+  "n_willneed": 0,
+  "peak_rss_gb": 3.78,
+  "weight_resident_end_gb": 2.72,
+  "prompt_len": 29
+}

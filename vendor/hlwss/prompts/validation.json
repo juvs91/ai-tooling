@@ -1,0 +1,11 @@
+{
+  "schema_version": "0.4",
+  "description": "5 prompts fijos de validacion Fase 0 (es+en, 20-200 tokens, deterministas). El sha256 de este archivo va en prompt_hash de la metadata de cada corrida.",
+  "prompts": [
+    "Explica en tres oraciones que es un tensor en el contexto de una red neuronal y por que ocupa memoria RAM durante la inferencia.",
+    "Describe el flujo de datos en un transformer durante la generacion de un token: atencion, feed-forward y cabeza de lenguaje.",
+    "Explain in a short paragraph how key-value caching speeds up autoregressive decoding, and what memory cost it trades for that speed.",
+    "Resume las diferencias entre la fase de prefill y la fase de decode en la inferencia de un modelo de lenguaje, incluyendo que operaciones dominan en cada una.",
+    "Write a brief technical note on weight tying between input embeddings and the output language-model head, and why it halves the vocabulary matrix memory."
+  ]
+}

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hlwss"
+version = "0.1.0"
+description = "HLWSS Observer — LLM tensor-access observation (Phase 0: PyTorch/MPS)"
+requires-python = ">=3.11"
+dependencies = [
+    "torch",
+    "transformers",
+    "pyarrow",
+    "pandas",
+    "duckdb",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+hlwss = "hlwss.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hlwss*"]

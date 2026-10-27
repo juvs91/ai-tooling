@@ -986,3 +986,521 @@ genericizar en otros 4 (`ux-expert`, `bdd-writer`, `unknown-domain-protocol`, `a
 `database-expert`). **Principio:** antes de asumir que una referencia a un repo/proyecto
 desconocido es "inventada", buscar en `git log --all --grep` — puede ser un rename incompleto, no
 una fabricación.
+
+## 2026-09-29 — HLWSS Observer Fase 0: implementación + validación exhaustiva (vendor/hlwss)
+
+**Contexto:** Fase 0 del Observer LLM (PRD v0.4 en `docs/prds/observer-llm/`) implementada en
+`vendor/hlwss/` — Observer PyTorch+MPS sobre Qwen3-0.6B, ADR-0060, branch `ex-observer-llm`.
+
+### Decisiones técnicas
+- Todas las fórmulas de bytes (attn/FFN/embed/KV) validadas contra config real de Qwen3-0.6B:
+  total calculado 1.400 GiB, head_dim explícito 128 (no el derivado 64 — `hidden²` hubiera dado -33%).
+- V1 con criterio 0.0 (perfecto) sobre 256 tokens × 5 prompts; V4 reproducible; V3 95.7% (umbral 95%).
+
+### Errores encontrados y resolución (todos en runtime real, los tests sintéticos no los atraparon)
+1. **FFN denso emitido 5×/paso** (V1 77% off): el fallthrough de `block_id_for_module` mapeaba
+   cualquier hijo de `mlp` (gate/up/down/act_fn) a `L{i}.ffn`. Solo el container posee el bloque.
+   Lección: los tests con cfg sintético nunca ejecutaron `instrument()` contra un modelo denso real.
+2. **V4 emparejaba por run_id alfabético**: `dd17159c` (smoke 16 tok, cronológicamente primero)
+   quedaba "último" alfabéticamente y se emparejaba con una corrida de 256 → FALLA falsa.
+   Fix: ordenar por `timestamp_utc` + emparejar solo mismos `generated_tokens`.
+3. **NaN en tuplas V4**: `layer`/`token_pos` NaN (embed/prefill) hacen `tuple != tuple` aunque
+   idénticas. Fix: normalizar a None en `_v4_seq`. El hash por `repr` ya era robusto.
+4. **V1 sobre trazas concatenadas duplicaba token_pos**: smoke (16 tok) + corrida (256 tok) del
+   mismo prompt suman bytes en t=1..15 (~2×). Fix: V1 por corrida y agregar (mean criterion, all-pass).
+5. **Baseline HLWSS_OFF contaminaba V1/V4**: metadata ahora lleva `hooks: on|off`; los checks
+   filtran las baseline. Sin hooks solo hay eventos KV derivados (7,168 vs 36,864 eventos).
+6. **DuckDB**: `SUM(x)/1e6 FILTER (WHERE ...)` es error de parser — el FILTER va pegado al
+   agregado: `SUM(x) FILTER (...) / 1e6`. Faltó test de analyze (se agregó `tests/test_analyze.py`).
+
+### Patrones que funcionaron
+- `task-verify.sh` como gate final obligó a escribir el checklist con paths reales
+  (`.venv/bin/python`, `cd vendor/hlwss`) — el checklist con `python` genérico resolvió al venv
+  equivocado (claude-code-proxy). Nunca poner `./scripts/task-verify.sh` dentro de su propio checklist.
+- Backfill honesto de metadata (`hooks=off`) en vez de re-correr: la corrida baseline era conocida.
+- Hallazgo analítico inmediato del analyze: lm_head domina (79.7 GB tocados / 256 pasos ≈ 311 MB/paso,
+  tied con embed), ~2.4 GB bytes/paso en denso 0.6B — el "working set" real de decode son los pesos.
+
+### Pendientes / notas
+- LOC paquete hlwss ~1,000 (límite blando plan: 800; umbral review R5: 2,000) — decisión del owner.
+- `prompts/validation.json` tiene 5 prompts; V3 quedó justo (95.7%): overhead de hooks ~4.3%.
+- Paso 9 del plan (línea de cadencia de tests en CLAUDE.md) requiere aprobación — CLAUDE.md está
+  fuera del scope de esta tarea.
+
+## 2026-10-02 — HLWSS Fase 0.5: Ollama Spill Curve (implementada + ejecutada)
+
+**Contexto:** PRD §4, ADR-0061, plan `.claude/plans/observer-llm-fase-05.md`. Máquina corregida a 16GB
+(propietario confirmó; PRD v0.4 §0/§4/§4.1/§4.2 actualizados; fuente 13 = Jev/System One).
+
+### Hallazgos empíricos (los que ninguna fuente publica)
+1. **Ley num_ctx/2 (Ollama 0.34.3):** el prompt útil ≈ num_ctx/2 (2048→1026, 4096→2050, 8192→4098,
+   32768→17744 completo). Para 64k de contexto REAL hay que pasar `--ctx 131072`. Confirmada dos veces
+   (probe directo + Caso 0 cuyo turno 7 truncó exacto en 65,538).
+2. **El stall del propietario fue REPRODUCIDO y explicado** (Caso 0: 9B, ctx 131072, 8 turnos,
+   keep_alive 30m): tok/s 13.0 → 12.6 → 11.3 → 9.5 → 8.7 → **0.15** → **0.22** → 5.3. Causa medida:
+   RSS runner pico 10.12GB + swapused +10GB (9→19GB) + 89GB de pageins en 67 min. No es "Ollama bug":
+   es SPILL-KV clásico — cada token del decode pagina desde SSD (~518 MB/s efectivos medidos).
+3. **El colapso exige acumulación, no solo num_ctx:** la escalera (3 modelos × ctx {8k,32k,131k},
+   2 turnos, unload entre corridas) quedó TODA en FIT (12.7–17.1 tok/s). El acantilado aparece solo
+   con multi-turno + keep-alive + contexto creciente más allá de la ventana.
+4. **7B @ 131k encaja sin dolor** (KV ~3.8GB alloc + 4.7GB pesos); el 9B es quien cruza en 16GB.
+
+### Decisiones técnicas
+- Criterio de régimen SPILL = **swapins > 1GB** (pageins no sirve: incluye carga del modelo con
+  file cache frío — falsos positivos en el primer heuristic).
+- Runner de Ollama 0.34.3 = proceso `llama-server` (no "ollama runner"); pgrep por patrón
+  "llama-server". Y el runner NO existe hasta que empieza la carga → resolución perezosa de PID
+  en el sampler (pid cerrado en None → re-resolver cada muestra).
+- Swap "usado" no viene de vm_stat: `sysctl vm.swapusage` (formato "used = 8147.88M").
+
+### Errores/encontrados en runtime
+- `--ctx` argparse → atributo `ctx` (no num_ctx). Chequeo glob alfabético vs mtime al inspeccionar
+  trazas (uuid no ordena cronológico).
+- LOC Fase 0.5: ~314 (ollama_probe 198 + cli ~116) vs límite 200 del plan — desviación reportada;
+  total proyecto ~1,343 < 2,000 (umbral duro R5). Owner decide recorte.
+- RSS muestras = 0 en primeros smokes por doble causa (patrón pgrep + pid stale) — ahora con
+  test implícito vía smoke.
+
+### Estado
+- 29/29 tests, gate 3/3 (pytest + smoke live + report). Trazas: Caso 0 + 9 escalera + smokes en
+  vendor/hlwss/traces/, CSV `traces/spill-curve.csv`. Scope cerrado por el gate.
+- Próximo: E1 early-exit (plan aprobado pendiente) o model loader; o corridas 14B/32B si el
+  owner autoriza descargas.
+
+## 2026-10-02 (2) — Experimento num_ctx/2 + E1-A early-exit probes
+
+### Hallazgos
+1. **Mecanismo de la ley num_ctx/2 resuelto (parcialmente):** experimento
+   discriminador (mismo prompt 53k, num_ctx fijo 8192, num_predict 64 vs 4000)
+   → el borde usable quedó idéntico (4098). **Descartada la reserva para
+   salida**; es una partición fija 50/50 del lado del servidor Ollama 0.34.x
+   (`usable = num_ctx/2 + 2` exacto en 3 puntos). Causa raíz exacta pendiente
+   de source-diving. Documentado en
+   `ai-notes/findings/ollama-num-ctx-half-law-experiment.md`.
+2. **E1-A primer resultado real (Qwen3-0.6B, 64 tokens, prompt validation #0):**
+   el argmax NO se estabiliza hasta la capa 27/28 → bytes ahorrables = 0 a
+   τ≥0.90. Perfil "late commitment": acuerdo ~0 hasta capa 18, subida
+   0.14→0.22→0.27→0.34→0.56→0.69→1.0 en las últimas 7 capas. Entropía logit-lens
+   coherente (4.1 nats difusas temprano → 1.84 final). **Conclusión honesta:**
+   para early exit con acuerdo de argmax estricto hacen falta τ más laxos,
+   tokens-que-salen-temprano por posición, o prompts más longevos — un prompt
+   no es evidencia. E1-B queda gated por más datos de E1-A.
+3. **Bug propio de entropía en early_exit.py (autodetectado):** clamp sobre el
+   log (`clamp_min(-1e-9)`) aplastaba toda la distribución → entropía 0 siempre.
+   La versión del adapter (`clamp_min(-1e9)`) es correcta — trazas Fase 0 sanas.
+   Forma correcta: clamp sobre las PROBS (`probs.clamp_min(1e-12).log()`).
+   Lección: fórmulas con log+clamp merecen test con distribución conocida.
+
+### Decisiones
+- ADR-0062 (staged): E1-A mide sin cortar, solo estadísticos (argmax/entropía/
+  top1 por capa/token, nunca logits completos), reporte en metadata.early_exit,
+  probe coexiste con Adapter (una pasada = traza Fase 0 + E1-A, insumo V1-E).
+- τ no se fija: se reporta first_layer_at para {0.90, 0.95, 0.99}; elegir τ es
+  decisión de E1-B con PPL en mano.
+
+### Errores
+- Test con valor esperado mal calculado (softmax([2,0,0,0]) = 0.711/0.096×3,
+  H≈0.918 — yo había puesto 0.576/1.04). Regla: cuando un test de valores
+  conocidos falla, recalcular a mano ANTES de tocar el código (casi "arreglo"
+  el código correcto).
+- scope-gate: escribir vendor/hlwss requiere ADR staged (git add basta, no
+  commit) + scope build por sesión.
+
+### LOC
+early_exit.py ~120 + tests ~110 + cli ~15 → proyecto ~1,590 < 2,000 (R5 OK).
+
+## 2026-10-02 (3) — E1-A batch: distribución de estabilización (n=15 corridas, 960 tokens)
+
+### Hallazgo principal (negative result honesto, con matices)
+Sobre Qwen3-0.6B (28 capas), greedy, 12 prompts diversos (+3 corridas previas
+= 15 corridas): la curva media de acuerdo argmax-vs-final es ~0 hasta la capa
+14, sube tarde: 0.27@18, 0.58@21, 0.84@25, 0.89@26, 1.0@27.
+
+- **Salida estática estricta (toda la secuencia a una profundidad, τ=0.90):**
+  ahorro >0 en 10/15 corridas pero saliendo en capa ~26/28 → solo 1-2 capas
+  ≈ **3-7% del tráfico de pesos**. Palanca DÉBIL en esta forma.
+- **Cota superior oracle por-token:** de la CDF (mean_s ≈ 28 − Σacuerdo ≈ 21),
+  un token típico estabiliza en capa ~21 → salida dinámica per-token ideal
+  ahorraría ~7/28 capas ≈ **25% del tráfico del decoder**. No realizable
+  directamente (no se conoce el argmax final online; requiere predictor
+  estilo CALM). La hipótesis "respuestas cortas estabilizan temprano" NO se
+  confirmó ni en "capital de Francia" (capa 26).
+- Conclusión: E1-B (corte real) queda gated; antes habría que probar predictor
+  de confianza (CALM) o aceptar τ laxo. La tesis global NO se invalida:
+  residencia/tiering/MoE son palancas independientes, y MoE es la dirección
+  de la industria (más pesos en disco, menos tocados por token).
+
+### Decisiones
+- `hlwss report early-exit --traces --model --csv`: agrega curvas de acuerdo
+  (la curva ES la CDF de estabilización) + conteo de corridas con ahorro>0 por τ.
+- Prompts diversos en prompts/e1a-batch.json (12: factual/código/mate/poesía/
+  traducción/sí-no/lista/secuencia) — diseñados para contrastar estabilización.
+
+### Errores / notas operativas
+- scope_file_for_session sin CLAUDE_CODE_SESSION_ID en shell cae al fallback
+  legacy .claude/task-scope.json (task-verify de la sesión no lo ve; se
+  verificó a mano y se limpió).
+- El report agregó 15 corridas (las 3 corridas sueltas previas del mismo
+  modelo entraron al filtro) — más datos, no bug, pero a saberlo.
+- CSV de la curva: traces/e1a-batch-curve.csv.
+
+## 2026-10-02 (4) — Fase 0.6: MoE REAL observado (Qwen1.5-MoE-A2.7B)
+
+### EL número (tesis alimentada)
+Sobre 64 tokens decode, 1 prompt (validation #0), MoE real 14.3B/2.7B-activos:
+- **fracción de pesos de expertos tocada por token: 6.7%** (96 de 1440
+  bloques = 24 capas × top-4 exacto — sanity check perfecto)
+- **concentración: 567 bloques (39% del total) cubren 90% de los accesos,
+  reuso medio 8.6× por bloque** → localidad temporal fuerte: una política
+  expert-aware mantiene ~2.6GB caliente en vez de 6.6GB
+- bytes activos/token totales: 3365 MiB (siempre-caliente bf16: attn+shared+
+  lm_head ≈ 2.9GB + 442MB expertos int4). Run: traces/e820370d-*
+- V2: OK 1512 pasos (gate sobre modelo real). Caveat: 1 prompt — el batch
+  amplio queda para la próxima sesión.
+
+### Decisiones
+- Cuantización MIXTA: expertos fusionados (tensores 3D) → **int4 propio**
+  (`quant_int4.py`: group=64, escala fp16, nibbles uint8, dequant perezoso
+  solo de expertos seleccionados); resto bf16. ~10.5GB en RAM, 0.71 tok/s.
+- Registry: `expert_dtype_bytes` separado (layout mixto real).
+- V2: `want` ahora se construye de `sel` (selección real del router), no de
+  topk recomputable — los near-ties bf16 (~1 ulp, 60 expertos) rompen distinto
+  MPS vs CPU (medido: 2/168 flips). En path fusionado V2 verifica plumbing.
+
+### Bugs encontrados (clase: container-only block ownership)
+1. `shared_expert`: regla `tail[1:2]==["shared_expert"]` mapeaba container +
+   gate/up/down/act → **5 emisiones por paso (bytes 5× inflados)**. Primer
+   modelo con shared_expert real lo expuso. Fix: solo `len(tail)==2`.
+2. Misma regla latente para expertos no fusionados (`experts.N.proy` mapeaba
+   a `L{i}.expert.N`). Fix: solo `len(tail)==3`.
+3. v2 recomputable-topk no era robusto a near-ties cross-device.
+
+### Errores de terceros documentados
+- torchao int4 exige `mslk` (librería CERRADA de Meta, no pública; el paquete
+  PyPI "mslk" es un placeholder 0.0.0 sin módulo — ojo, posible typosquat).
+- bnb 4-bit SÍ funciona en MPS (validado) pero solo cuantiza nn.Linear 2D;
+  los expertos fusionados 3D quedan fuera → por eso el formato propio.
+
+### Notas operativas
+- Los "2 tensores meta" = rotary_emb.inv_freq + original_inv_freq (buffers
+  vestigiales; transformers 5.x recalcula en forward) — inocuos, verificado.
+- Cache bf16 de 28GB retenido (disco OK, 300GB+ libres); descartar cuando
+  Fase 1 tenga loader propio si hace falta.
+- LOC: 1,866/2,000 (R5) — margen 134 LOC. El siguiente feature grande debe
+  recortar o pedir bump del límite al dueño.
+
+## 2026-10-06 — LOC diet (hlwss-loc-diet): resultado honesto NEGATIVO en LOC
+
+Intento de dieta sobre los 3 archivos editables (cli.py, ollama_probe.py,
+early_exit.py; registry/checks/adapter_torch quedaron fuera por ser núcleo
+de verificación). Resultado medido: **1,866 → 1,871 (+5)**, 44/44 tests
+verdes, `report spill` funcional.
+
+### Qué se hizo
+- `_metas(traces, model)` en cli.py: las 5 rutas que caminaban metadata.json
+  (report spill / early-exit / moe / check V1 / check V4) ahora comparten un
+  solo walker. Bonus real: V1 leía cada metadata DOS veces (json.loads por
+  condición) — ahora una.
+- `_run(cmd)` en ollama_probe.py: deduplica el try/except de subprocess.run
+  en runner_pid/_rss_bytes/vm_stat/swapused (4 usos).
+- `_request(host, path, payload)`: deduplica la construcción del Request
+  HTTP entre http_json y run_turn.
+- early_exit.py: `_per_layer_top1` eliminado (se almacenaba y NUNCA se
+  exportaba en report()) — el único ahorro neto real (−2).
+
+### Lección (patrón que falló)
+Extraer helpers en Python tiene costo fijo ~7 líneas (def + docstring +
+blank). El boilerplate duplicado era de solo 3 líneas por sitio. Con <5
+sitios, el helper NO paga en LOC — solo en DRY/auditoría. Regla: contar
+los sitios de duplicación ANTES de extraer; se necesitan ≥5-6 usos para
+ganar líneas, no solo claridad.
+
+### Conclusión estratégica
+La grasa estimada (150-250 LOC) NO existe en los archivos editables: el
+código de verificación ya es denso y correcto. El presupuesto real:
+1,871/2,000 → margen 129 LOC. El Simulator (~200 LOC) necesitará el ADR de
+bump del cap R5 (criterio del dueño ya definido: "puede subir siempre que
+lo medido sea verídico y fidedigno").
+
+## 2026-10-06 — Simulator Fase 0.7: la tesis se sostiene en régimen SPILL
+
+Replay de las 3 trazas Qwen1.5-MoE reales bajo 3 políticas (lru piso /
+hlwss pin+SLRU candidata / oracle Belady techo), sweep 6–12GB.
+
+### El número
+- **8GB (spill): hlwss −9.9% bytes vs LRU, cierra 55% del gap al óptimo.**
+- 10GB+ (FIT): hlwss −2.4% (peor) — con todo el working set cabiendo, la
+  política es overhead. Negativo honesto, esperado, documentado.
+- Pin mínimo viable: 7.38GB → régimen útil de la tesis ∈ [7.4, 9.5]GB.
+- Resultado idéntico en las 3 corridas → determinismo del pipeline validado.
+
+### Lección dura (patrón que casi corrompe el resultado)
+Primer run: hlwss "ganaba al oráculo" (−70%). Artefacto contable: (1) el pin
+se contaba residente SIN costo de carga; (2) incluía bloques PHANTOM
+(`L{i}.ffn` denso que registry.build() crea para todo cfg pero un MoE real
+no tiene — el fix de _pinned es intersectar con el stream). Regla nueva:
+**en simuladores de memoria, auditá primero el costo de carga de lo
+"pre-residente" y la existencia real de los bloques del universo.**
+
+### Detalles técnicos
+- `dict.popitem(last=False)` es API de OrderedDict, no de dict — y la
+  anotación `x: OrderedDict = {}` NO cambia el constructor (sigue dict
+  plano). Type hints no construyen tipos.
+- El primer toque de un bloque pinneado es MISS (es la carga en frío), no
+  hit — la simetría transferred/hit-fraction es parte del contrato.
+- ADR-0064 (cap R5 2,000→2,500, criterio dueño) + ADR-0065 (diseño) staged.
+  LOC actual: 2,140/2,500.
+
+## 2026-10-08 — Análisis del gap al oráculo (go/no-go prefetch, Fase 0.7)
+
+- **Tres hipótesis, tres NO-GOs con datos:** (1) prefetch por ventana de
+  recencia NO-GO (distancia de repetición p50=115 toques vs 29 slots;
+  window-recall 25% a K=128); (2) 2Q NO-GO (3,271 vs 2,986 MiB LRU); (3) "el
+  pin es demasiado grande" NO-GO (sweep de cobertura top-50/70/90%: 11.40 /
+  11.19 / 10.78 GiB — top-90% mejor en ambos budgets). Más pin estático = mejor.
+- **Lección metodológica:** cuando un análisis diseña 3 candidatos, que los 3
+  fallen ordenadamente (cada uno por razón distinta y verificable) es un
+  resultado positivo, no un fracaso: cierra el espacio de políticas estáticas
+  y localiza el valor restante (dinámico) con precisión.
+- **Decomposición del gap:** oráculo ≈ piso teórico (cada bloque 1 vez, 9.49
+  GiB); hlwss retransfiere 1.46 GiB de repeticiones de cola no-pinneada =
+  miss estructural (distancia ≫ capacidad), no de política. El gap NO es
+  capturable con historial → prefetch desprioritizado en Fase 1.
+- **Veredicto Fase 1 acotado:** valor restante = detección de régimen (soltar
+  pin en FIT, +8.6% en 8.75GB+) + hot-set que encoge con el budget (el pin
+  fijo de 7.38GB se cae a 6GB; la versión dinámica recorta cobertura en vez
+  de volverse infeasible). Caveat: 1 run de 64 tokens; re-evaluar localidad
+  de tema con max_tokens ≥512.
+- Análisis completo: `ai-notes/findings/simulator-fase-07.md` §gap-oráculo.
+
+## 2026-10-13 — Fase 1 preflight: hlwss-adaptive (ADR-0066)
+
+- **Componentes mecánicos validados con matices:** shrink-to-fit restaura
+  viabilidad y gana ~−25% en 7–7.25GB (zona INFEASIBLE antes); régimen FIT
+  elimina la pérdida del −8.0% a 9.5GB — pero el boundary es el WS único
+  (9.32GB), no el crossover lru↔hlwss (8.6GB): en 8.75–9.25GB la pérdida vs
+  LRU es spill real, NO overhead evitable. Corrección honesta a la predicción
+  del plan.
+- **Negativo honesto (β=0.9 a 6GB): pin parcial peor que LRU (−15.8%).**
+  Con SLRU remainder de 0.6GB (bajo umbral de retención), cualquier byte
+  quitado al pin es regalado: la cobertura extra que da β=1.0 (37→68%)
+  convierte misses en hits a costo cero. Lección: **el sliver SLRU solo
+  vale si puede retener la cola reutilizable; medir ese umbral antes de
+  fijar β.**
+- **Lección de diseño:** β=1.0 (pin hasta el budget completo) es no-regret —
+  nunca pierde vs LRU, replica a la estática exactamente donde cabe. Un
+  default con un acantilado conocido (−15.8%) es peor default que uno con
+  peor caso +1.5%.
+- β óptimo depende del budget (≈1.0 ≤6.5GB, ≈0.9 7–7.5GB, ≥8.5GB
+  irrelevante) → la "asignación dinámica" del oráculo tiene versión
+  mecánica: regla de umbral sobre el remainder. Próximo análisis, no código.
+- Sweep + tabla β: `ai-notes/findings/simulator-fase-07.md` §Fase 1 preflight.
+
+## 2026-10-15 — G1 Gemma 3n E2B: anatomía PLE (ADR-0067)
+
+Hallazgos en `ai-notes/findings/g1-gemma3n-anatomia.md`. Lo esencial:
+
+- **El eje MoE↔3n es filas-vs-bloques.** MoE: esparcidad en espacio de
+  pesos (expertos, accionable por pin). 3n: esparcidad en espacio de
+  vocabulario (filas PLE, 46% de pesos con 0.0004% de demanda) → invisible
+  a políticas por bloques. Acantilado binario en simulación: LRU 0% hits
+  a ≤8GB (91% del WS), pin infeasible, oracle solo −78% a 8GB.
+- **El acantilado es de granularidad, no del modelo:** el OS pagina a 4KB
+  y las ~92 filas PLE calientes caben en ~11MB. Caso más hostil para la
+  tesis "model-aware > OS LRU": sin señal de prefetch (secuencial L0→L29
+  estricto, 63/63) y la señal de residencia ya la explota el hardware.
+- **ple.proj es el costo oculto del PLE:** la proyección global densa
+  (31.46MB) se lee entera por token; domina 2000:1 a las filas de tabla.
+  "PLE barato" = tablas baratas, proyección cara.
+- **Bug de instrumentación real:** módulos hermanos compartiendo un bloque
+  de familia + métodos auxiliares sin hook (`altup.predict`) → conteo 3×
+  inflado. V1 lo detectó (desviación constante 3.99%). Regla: un bloque,
+  un owner (laurel), como mlp→ffn. Fórmula de bytes validada contra params
+  reales del checkpoint, no contra doc.
+- **V1 criterion=0.0 es alcanzable** si la fórmula esperada se valida
+  contra el checkpoint real.
+- **V3 en M2: varianza de tokps 3.7× según carga de máquina** (0.91–3.48
+  en corridas idénticas). Overhead real de hooks: no detectable (ratio
+  1.018 par limpio intercalado). V3 de una corrida aislada es no
+  concluyente — usar pares intercalados/medianas.
+- **`activation_sparsity_pattern` del `-it` tiene 0 capas sparse** — la
+  activation sparsity viene apagada de fábrica; G1.5 queda sin sujeto en
+  este checkpoint. Leer la config REAL antes de instrumentar vale sesiones.
+- **Gemma3nForCausalLM carga text-only del checkpoint multimodal** (0
+  MISSING, towers UNEXPECTED) sin dep `timm`; nombres de módulo sin
+  `language_model.` — el mapping acepta ambos prefijos.
+
+## Exp1 (OLMoE falsación) + G2 (cuantizar-vs-política) — 2026-10-21
+
+- **Falsación MIXTA (Exp1).** P1 demanda (2.36GB/tok, 17.1% WS) y P2 valle
+  de spill (win −15.7% @8GB, valle [8,11]GB, WS 11.86GB) CONFIRMADAS en un
+  MoE arquitectónicamente opuesto a Qwen1.5. La tesis "sparsity de
+  activación topk → valle de spill" es ley del MoE (2/2 modelos, magnitud
+  predicha por % activo). P3 (Jaccard cross-token) y P4 (concentración de
+  frecuencia) FALSADAS: eran artefactos de Qwen. OLMoE: Jaccard 0.30
+  (2.4× azar → prefetch viable, el NO-GO cae por modelo) y routing plano
+  (top-8 cubre ~51%, no 90%). El win del spill viene del SLRU frío por
+  sparsity estructural (12.5% activo), NO del pin por frecuencia → el pin
+  top-90% está sobrejustado a Qwen; shrink-to-fit con cobertura medida.
+- **V1 prefill MoE fusionado:** OLMoE ejecuta expertos POR POSICIÓN del
+  prompt en prefill (topk×prompt_len filas/capa, 272/capa con prompt 34).
+  Qwen1.5 (path por submódulos) emite 1 vez/capa — por eso el conteo viejo
+  pasaba. El decode era exacto (criterion 0.0000) con la fórmula MoE nueva;
+  el criterio principal nunca estuvo roto. Lección: validar checks contra
+  DOS implementaciones del mismo concepto antes de darlos por generales.
+- **G2: cuantizar (primer orden) vs política (segundo).** Sobre gemma3n:
+  int4-todo mueve el umbral fit 11GB→4GB (−64%); ninguna política online lo
+  logra (en denso, pin > budget siempre → infeasible; mejor régimen
+  feasible = LRU 0% hits bajo el umbral). Con 4GB: bf16 inutilizable
+  (645GB transferidos), int4 perfecto (3.93GB 1×). Regla práctica:
+  cuantizar hasta WS_cuantizado ≤ budget; política solo si aún no cabe.
+  Caveat: KV agregado (~2GB) no escalable por cuantización de pesos —
+  weights-fit (2.21GB) ≠ sim-WS-fit (3.93GB).
+- **Bug de caso en scale_blocks:** cli.py uppercasing de factores vs clave
+  `weights` minúscula → S3 corría como identidad y "pasaba" todos los
+  tests (los tests usaban minúscula). Lección: normalizar casing en UN
+  punto (la función, no el caller) y cubrir el path cli→función en tests,
+  no solo la función aislada.
+- **V3 bajo swap no es medible por tokps absoluto** (0.01 tokps, 1.5h por
+  corrida de 64 tokens con 13.8GB en 16GB): la conclusión de overhead
+  queda heredada de G1 (ratio 1.018 en condiciones limpias); la corrida
+  OFF es por protocolo, no por señal nueva.
+
+## 2026-10-25 — Fase 1 engine real (ADR-0069): el ranking de políticas se INVIERTE en hardware
+
+- **Hallazgo central**: el sim (ADR-0065/0066) decía "hlwss-pin gana −15.7%
+  @8GB sobre LRU" en OLMoE; el hardware real dice "pin pierde ~2×" (16.3–17.3GB
+  vs 7.7–9.1GB en 6–12GB, 64 tokens). La inversión se reproduce en la 2ª
+  arquitectura MoE (Qwen1.5: 326 vs 152GB @12GB) y en denso (gemma3n: 489 vs
+  310GB @8GB). Doc: ai-notes/findings/fase1-engine-real.md.
+- **Mecanismo**: el sim modela la política como *orden de evicción*;
+  `madvise(WILLNEED)` real es *prefetch activo con costo*. Con routing flat
+  (Exp1 P4), la frecuencia running a 64 tokens cubre casi todos los expertos →
+  el pin set rota → cada experto recién pinneado se pagina especulativamente →
+  pin transfiere ≈1.1× WS total sin importar el budget (16.3GB constantes).
+  En prefill, el MoE fused (topk×prompt_len filas/capa) dispara una tormenta
+  WILLNEED de 14.9GB (2× LRU). LRU converge a steady state con 0 faults/token
+  en ~8 tokens; la fracción EXPERT residente final es LA MISMA bajo ambas
+  políticas (12.5 vs 12.7%) — la diferencia es solo cuánto se transfirió.
+- **El LRU del sim era el artefacto**: LRU sim @8GB = 22.2GB vs LRU hw 8.3GB
+  (~2.5×). El sim cobra cada touch frío sin readahead ni caché tibio. Gran
+  parte del "win" de política del sim era ganancia contra su propio LRU
+  pesimista. Lección: antes de creer en una política, validar el BASELINE
+  contra hardware; un sim que solo modela la política nueva y no el mecanismo
+  del baseline produce rankings invertidos.
+- **ru_maxrss en macOS viene en BYTES, no KB** (Linux): peak_rss reportado
+  3119GB → real 3.05GB. Bug clásico multiplataforma; normalizar con
+  `sys.platform`. 
+- **`sysctl vm.swapusage` separa `used`, `=`, valor por espacios** — parsear
+  con regex `used = (\d+\.?\d*)M`, no por tokens `used=`. El parser viejo
+  devolvía 0.0 silenciosamente y "pasaba" el sanity check porque 0 es
+  plausible.
+- **Caché tibio contamina pageins entre corridas** (page cache por-vnode
+  sobrevive procesos): E1 (bytes ≥ único tocado) falla como cheque absoluto;
+  E3 (Qwen3 n=5): CV 0.96 en absolutos. La señal válida es el ranking
+  pareado + perfiles por token, no los GB absolutos. Medir frío requiere
+  `purge` (sudo, no disponible) — documentado como caveat E8.
+- **Glue de loaders que hay que presupuestar** (todas las variantes que
+  encontramos HOY, todas necesarias): (1) transformers 5.x fusiona expertos
+  OLMoE Y Qwen2Moe (gate_up_proj/down_proj) → _UnfusedExperts con vistas
+  por-experto (matemática idéntica, 2 lineares); (2) checkpoint gemma3n
+  multimodal: remap `model.language_model.` → `model.`, dropear torres;
+  (3) buffers meta no persistentes por familia de modelo: inv_freq con theta
+  por layer_type desde `rope_parameters`, embed_scale (`scalar_embed_scale`),
+  router_input_scale (hidden**-1), per_layer scales — materializar genérico
+  con fallo ruidoso; (4) marcadores 'ple'/'ple.proj' de gemma3n no son
+  bloques físicos: bind() debe verificar `bid in registry.blocks()`;
+  (5) AutoModelForCausalLM exige `from_config`, Gemma3nForCausalLM NO la
+  expone (wrapper multimodal) → duck-type `hasattr(cls, "from_config")`.
+- **LOC cap 2900 se sostuvo** con recortes de docstrings/comentarios (2899
+  final) — el glue de arriba (~40 líneas) se pagó íntegro con golf de líneas;
+  en retrospectiva un cap un poco mayor (2950) habría ahorrado ~30 min de
+  micro-recortes, pero el ejercicio mantuvo el paquete honesto.
+
+## 2026-10-25 — Fase 2: evicción pura (hlwss-evict), cierre de la inversión
+
+- **Hallazgo**: el 100% de la penalización 2× de hlwss-pin era el prefetch
+  WILLNEED. hlwss-evict (mismo pin + DONTNEED, cero WILLNEED, flag
+  `Policy.prefetch = name == "hlwss-pin"`, engine.py:262) colapsa sobre
+  os-lru: OLMoE b=6 → evict 7.48GB vs lru 8.05–8.17 (−7%, cap de evicción
+  ata) vs pin 15.11GB (2.02×). gemma3n b=6: evict 286.2 vs lru 288.6
+  (empate) vs pin 419.3.
+- **Divergencia estructural #2 sim-vs-hardware**: el WS único tocado a 64
+  tokens es ~7253MB (saturación de `resident_bytes` en policy.jsonl), la mitad
+  del WS a-priori del registry (14.57GB) que cobran el sim y el flag `fit`.
+  Consecuencia: a b≥8 el cap de evicción nunca ata → hlwss-evict emitió 0
+  madvise y fue bit-a-bit os-lru; el "valle" del sim en [8,11]GB no existe a
+  64 tokens en hardware. El sim cobra WS a-priori; el hardware solo paga lo
+  tocado.
+- **Control de ruido ideal gratis**: evict ≡ lru a b≥8 dio el piso de ruido
+  pareado ±5% (lru reps @12: 7.15/7.84). Toda comparación futura debe exceder
+  este piso para declarar efecto.
+- **Lección Qwen3**: modelo demasiado pequeño + caché tibio = sin señal;
+  `budget_eff` puede salir negativo si otros procesos fluctúan. Descartado
+  como sujeto de política.
+- **Puerta abierta principal**: spill real en corridas largas (routing flat
+  hace crecer el WS tocado hasta los 1024 expertos) — test OLMoE b=8 ×
+  tokens {64,128,256,512}, evict vs lru. Si el win crece con tokens, la
+  política tiene frontera de utilidad; si no, el techo es el LRU del OS y el
+  proyecto pivota a cuantización (G2b) / embed desagregado.
+- Detalle mecánico: el cap de evicción usa budget nominal (engine.py:309),
+  no _PIN_FRAC × budget; con pin ~0.9×budget queda margen fino (~0.6GB en
+  b=6) — si el pin crece a más tokens el cap puede volverse inalcanzable.
+
+## 2026-10-26 — Fase 3: horizonte largo, W(t) satura, valle refutado
+
+- **Test**: OLMoE b=8 × tokens {64,128,256,512} × {os-lru, hlwss-evict} (8
+  corridas intercaladas). Resultado: 0 evicciones en todas; pageins planos
+  (7.6–8.9GB, sin crecimiento con tokens; pares dentro del ruido ±5%).
+- **Hallazgo central**: `resident_bytes` = exactamente 7253MB en t=64/128/
+  256/512 — el WS tocado satura antes de t=64 y entre t=64 y t=512 no se
+  toca ni un bloque nuevo. La localidad del routing en greedy decode es
+  FUERTE (reutilización de ~660/1024 expertos), no plana como sugería la
+  cuenta combinatoria de cobertura uniforme (Fase 2 §3 era pessimista en
+  ese punto: asumía uniformidad; el router concentra).
+- **Predicción falsable #1 de la tesis: REFUTADA.** El valle del sim no
+  existe a b=8 en ningún horizonte. Frontera de utilidad de la política:
+  budget < W_sat (~7.25GB, este modelo/prompt/modo), sin importar tokens.
+- **Decisión de proyecto derivada**: política de residencia = segundo orden
+  puro salvo dispositivos con RAM < W_sat. Levers restantes en orden:
+  cuantización (G2b), embed desagregado (0.7GB por 1 página/token), y como
+  entregable científico: W_sat como propiedad medible del modelo (predice
+  a priori si la política puede ganar en un dispositivo).
+- Caveat: un prompt, greedy. Sampling o prompts diversos podrían expandir
+  W(t); el engine lo mide igual si se quiere cerrar.
+
+## 2026-10-26 — Fase 4: W_sat caracterizado + transición de fase W=RAM
+
+- W_sat medible y estable: OLMoE greedy p0 = 7253MB en 10+ corridas; p1
+  (prompt diverso) = 6797MB (−6%); Qwen1.5-MoE 128t = 5981MB (archivo 27GB).
+  El prefill fija la cobertura; decode greedy añade casi nada (localidad por
+  bucle de ruta).
+- **Sampling T=1 cambia todo**: W cruza el budget 8GB → 9177 evictions de
+  churn, 382.7GB transferidos (48× greedy). Transición de fase abrupta:
+  +5% de W sobre el presupuesto = thrash. Confirma la formulación de la
+  tesis §3 (costo discontinuo en W=RAM, working-set model).
+- El valle del sim "no existe en el eje tokens" (Fase 3) pero SÍ en el
+  espacio modo×budget: greedy mantiene W bajo; sampling lo dispara. La
+  localidad que salvaba al greedy era una propiedad del modo, no del modelo.
+- Replicación fría b=6 (flush 12GB, sin sudo): lru 8.49 / evict 8.12 =
+  −4.4% (vs −7% tibio). Dirección confirmada; la ventaja de la política vive
+  en refaults, no en misses de compulsión.
+- Fix técnico: sampling en engine requirió nan_to_num sobre logits bf16
+  (OLMoE bajo presión emite inf/nan) + float32 para el softmax. Flag
+  --temperature (ADR-0070). LOC 2897 (golf: docstrings + blank lines).
+- Caveat fases: trazas Fase 1 no comparables en resident_bytes con Fase 2+
+  (fixes de conteo drain/bind; Δ 3.8%).
+
+## 2026-10-26 — Puerta final cerrada: política vs LRU en thrash puro
+
+- Pareado b=8 sampling T=1 128t: lru 80.0GB vs evict 78.9GB (−1.3%,
+  empate dentro del ruido). Ambas churnean ~0.62GB/token; la corrida 512t
+  (382.7GB ≈ 0.75GB/token) confirma la tasa. En thrash puro el orden de
+  desalojo deja de importar: todo se toca poco y todo se rechaza.
+- Patrón total de pares con spill real: evict gana 3/3 pero poco (−7%,
+  −4.4%, −1.3%), diluyéndose con el churn. Efecto débil consistente.
+- VEREDICTO DEL PROYECTO: la política de residencia model-aware no le gana
+  al LRU del OS en ningún régimen medible. La jerarquía de levers queda:
+  cuantización > política (≤7% condicionada) > prefetch (negativo).
+  Decisión práctica: no pelear contra el kernel; cuantizar (G2b como
+  proyecto nuevo con scoping propio si se retoma el objetivo práctico).

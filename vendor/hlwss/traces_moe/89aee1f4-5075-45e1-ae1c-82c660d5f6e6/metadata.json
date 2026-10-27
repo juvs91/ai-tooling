@@ -1,0 +1,348 @@
+{
+  "schema_version": "0.4",
+  "run_id": "89aee1f4-5075-45e1-ae1c-82c660d5f6e6",
+  "timestamp_utc": "2026-09-29T15:20:05.872251+00:00",
+  "model_id": "synthetic-qwen3moe-tiny",
+  "quant": "float32",
+  "n_layers": 4,
+  "n_experts": 8,
+  "backend": "pytorch",
+  "backend_version": "2.14.0",
+  "hardware": "arm64",
+  "os": "macOS-26.6.2-arm64-arm-64bit",
+  "ram_total_gb": 16.0,
+  "ram_available_gb": null,
+  "ssd_model_path": "synthetic-qwen3moe-tiny",
+  "seed": 42,
+  "temperature": 0.0,
+  "do_sample": false,
+  "prompt_hash": "e710f26ae319bfa600716dd23234e112333ab832641cec46e746e5047418eac9",
+  "max_tokens": 16,
+  "context_window": 1024,
+  "kv_model": {
+    "0": "full",
+    "1": "full",
+    "2": "full",
+    "3": "full"
+  },
+  "kv_page_tokens": 16,
+  "sample_n": 1,
+  "capture_distributions": false,
+  "quality_harness": "wikitext2-ppl-slice-v1",
+  "clock": "time.monotonic_ns",
+  "swap_used_at_start_gb": null,
+  "raw": [
+    "Swapins:                                    13548298.",
+    "Swapouts:                                   16295091."
+  ],
+  "prompt_index": 0,
+  "prompt_len": 24,
+  "prompt_text_hash": "0722c2278b7af8d5ea585c13f75d0a6f4bb4a69e0a0a498ea56a347d00917a73",
+  "generated_tokens": 16,
+  "elapsed_s": 1.92,
+  "tokps": 8.33,
+  "registry": {
+    "n_layers": 4,
+    "n_experts": 8,
+    "context_window": 1024,
+    "dtype_bytes": 4,
+    "blocks": {
+      "embed": {
+        "layer": null,
+        "component": "EMBED",
+        "size_bytes": 1048576,
+        "tied_with": null
+      },
+      "lm_head": {
+        "layer": null,
+        "component": "LM_HEAD",
+        "size_bytes": 1048576,
+        "tied_with": null
+      },
+      "L0.attn": {
+        "layer": 0,
+        "component": "ATTN",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L0.ffn": {
+        "layer": 0,
+        "component": "FFN",
+        "size_bytes": 1572864,
+        "tied_with": null
+      },
+      "L0.kv": {
+        "layer": 0,
+        "component": "KV",
+        "size_bytes": 1048576,
+        "tied_with": null,
+        "aggregated": true,
+        "derived": true
+      },
+      "L0.expert.0": {
+        "layer": 0,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L0.expert.1": {
+        "layer": 0,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L0.expert.2": {
+        "layer": 0,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L0.expert.3": {
+        "layer": 0,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L0.expert.4": {
+        "layer": 0,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L0.expert.5": {
+        "layer": 0,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L0.expert.6": {
+        "layer": 0,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L0.expert.7": {
+        "layer": 0,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L1.attn": {
+        "layer": 1,
+        "component": "ATTN",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L1.ffn": {
+        "layer": 1,
+        "component": "FFN",
+        "size_bytes": 1572864,
+        "tied_with": null
+      },
+      "L1.kv": {
+        "layer": 1,
+        "component": "KV",
+        "size_bytes": 1048576,
+        "tied_with": null,
+        "aggregated": true,
+        "derived": true
+      },
+      "L1.expert.0": {
+        "layer": 1,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L1.expert.1": {
+        "layer": 1,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L1.expert.2": {
+        "layer": 1,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L1.expert.3": {
+        "layer": 1,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L1.expert.4": {
+        "layer": 1,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L1.expert.5": {
+        "layer": 1,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L1.expert.6": {
+        "layer": 1,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L1.expert.7": {
+        "layer": 1,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L2.attn": {
+        "layer": 2,
+        "component": "ATTN",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L2.ffn": {
+        "layer": 2,
+        "component": "FFN",
+        "size_bytes": 1572864,
+        "tied_with": null
+      },
+      "L2.kv": {
+        "layer": 2,
+        "component": "KV",
+        "size_bytes": 1048576,
+        "tied_with": null,
+        "aggregated": true,
+        "derived": true
+      },
+      "L2.expert.0": {
+        "layer": 2,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L2.expert.1": {
+        "layer": 2,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L2.expert.2": {
+        "layer": 2,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L2.expert.3": {
+        "layer": 2,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L2.expert.4": {
+        "layer": 2,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L2.expert.5": {
+        "layer": 2,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L2.expert.6": {
+        "layer": 2,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L2.expert.7": {
+        "layer": 2,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L3.attn": {
+        "layer": 3,
+        "component": "ATTN",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L3.ffn": {
+        "layer": 3,
+        "component": "FFN",
+        "size_bytes": 1572864,
+        "tied_with": null
+      },
+      "L3.kv": {
+        "layer": 3,
+        "component": "KV",
+        "size_bytes": 1048576,
+        "tied_with": null,
+        "aggregated": true,
+        "derived": true
+      },
+      "L3.expert.0": {
+        "layer": 3,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L3.expert.1": {
+        "layer": 3,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L3.expert.2": {
+        "layer": 3,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L3.expert.3": {
+        "layer": 3,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L3.expert.4": {
+        "layer": 3,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L3.expert.5": {
+        "layer": 3,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L3.expert.6": {
+        "layer": 3,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      },
+      "L3.expert.7": {
+        "layer": 3,
+        "component": "EXPERT",
+        "size_bytes": 786432,
+        "tied_with": null
+      }
+    },
+    "kv_pages_template": {
+      "kv_page_tokens": 16,
+      "kv_page_bytes": 16384,
+      "n_pages_for_context_window": 64,
+      "id_pattern": "L{i}.kv.p{j}"
+    },
+    "kv_model_layers": {
+      "0": "full",
+      "1": "full",
+      "2": "full",
+      "3": "full"
+    }
+  }
+}

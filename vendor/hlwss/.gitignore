@@ -1,0 +1,6 @@
+.venv/
+traces/
+__pycache__/
+*.parquet
+*.egg-info/
+.pytest_cache/

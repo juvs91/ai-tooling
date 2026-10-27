@@ -1,0 +1,23 @@
+{
+  "run_id": "5d3b0703-a6df-43d1-aa6d-4f18b8257235",
+  "model_id": "Qwen/Qwen3-0.6B",
+  "policy": "hlwss-evict",
+  "budget_gb": 0.7,
+  "slack_gb": 0.5,
+  "pressure_gb": 15.98,
+  "ram_total_gb": 17.2,
+  "budget_eff_gb": 0.36,
+  "fit": false,
+  "ws_total_gb": 5.89,
+  "calibrate": false,
+  "tokens": 64,
+  "elapsed_s": 9.8,
+  "pageins_total_bytes": 0,
+  "majflt_start": 41,
+  "majflt_end": 41,
+  "n_evictions": 2048,
+  "n_willneed": 0,
+  "peak_rss_gb": 2.04,
+  "weight_resident_end_gb": 1.2,
+  "prompt_len": 29
+}
