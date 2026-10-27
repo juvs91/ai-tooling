@@ -15,13 +15,21 @@ El dueño autorizó la descarga (2026-10-02).
 
 1. **Modelo:** Qwen/Qwen1.5-MoE-A2.7B — el MoE público real más pequeño con
    estructura de expertos genuina (60 expertos, top-4, 2.7B activos).
-2. **Cuantización 4-bit vía torchao (weight-only int4)** para caber en 16GB
-   (14.3B bf16 = 28GB no cabe; int4 ≈ 8GB sí). La cuantización es *habilitador
-   de observación*, NO objeto de estudio: se registra en metadata y listo.
-3. **`dtype_bytes` explícito (0.5)** en el registry: `model.dtype` reporta el
-   dtype de las escalas (bf16) bajo torchao, no los bytes reales por peso.
-   Los touch_size deben reflejar bytes reales en RAM (int4), no el dtype de
-   cómputo. Se expone como flag `--dtype-bytes` (default: comportamiento previo).
+2. **Cuantización mixta (ajustada en implementación):** los expertos de
+   Qwen2MoE llegan FUSIONADOS en transformers 5.x (tensores 3D por capa, no
+   Linear individuales) — ni bitsandbytes ni torchao los cuantizan (torchao
+   int4 exige `mslk`, librería cerrada no pública). **Decisión final:**
+   formato int4 propio group-wise (GROUP=64, escala fp16, nibbles en uint8,
+   `hlwss/quant_int4.py`) con dequant perezoso solo de expertos seleccionados
+   (~6.6GB), y el RESTO del modelo en bf16 (~3.6GB). Total ~10.5GB en RAM.
+   El dequant perezoso es además la semilla conceptual de la política de
+   residencia de Fase 1 (traer solo lo pedido).
+3. **`dtype_bytes` por componente:** `BlockRegistry` acepta
+   `expert_dtype_bytes` separado (expertos int4 ≈ 0.53 B/peso vs 2.0 bf16 del
+   resto). Flags CLI: `--int4-experts`, `--dtype-bytes`, `--expert-dtype-bytes`.
+   Nota: V1 (bytes esperados) usa un dtype único al re-derivar; para corridas
+   MoE mixtas la comparación V1 de expertos queda deshabilitada — V2 (router)
+   es el gate de este fase.
 4. **Sin cambios al schema de eventos ni al engine.** V2 ya captura selección
    de expertos; el adapter ya maneja expertos fusionados (transformers 5.x).
    El análisis nuevo es agregación: frecuencia por experto, working set único

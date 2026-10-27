@@ -83,3 +83,46 @@ Hallazgos de exploración que fijan el diseño (transformers 5.17.0 local):
 - **Riesgo de acceso**: google/gemma-3n-E2B-it es gated en HF; requiere
   licencia aceptada y autenticación del dueño. Sin eso, el código y los
   tests quedan listos pero la corrida espera.
+
+## Actualización 2026-10-14 — Resolución del riesgo de acceso
+
+El dueño eligió el **mirror comunitario `unsloth/gemma-3n-E2B-it`**
+(ungated) sobre autenticarse en HF. Justificación:
+
+- Mismos **safetensors bf16** que el checkpoint oficial → los tamaños de
+  traza y bytes transferidos son directamente comparables con lo que daría
+  el repo de Google (no es un re-quantizado tipo MLX 8-bit, que rompería
+  la comparabilidad).
+- La anatomía de acceso (la pregunta científica de G1) no depende del
+  origen de los pesos: mismos shapes, mismos módulos.
+- Caveat registrado: confianza en tercero (unsloth) para integridad de
+  pesos; irrelevante para medir patrones de acceso, relevante si los
+  pesos se usaran para evaluación de calidad de generación (no es el
+  caso en G1).
+
+## Actualización 2026-10-15 — Decisiones de instrumentación validadas contra
+el checkpoint real
+
+1. **Carga text-only**: `Gemma3nForConditionalGeneration` exige `timm`
+   (vision tower) al construirse. Se usa `Gemma3nForCausalLM`: carga los
+   pesos de lenguaje del checkpoint multimodal (towers = UNEXPECTED,
+   0 MISSING) y expone los módulos como `model.*` (sin el segmento
+   `language_model.`). El mapping de nombres acepta ambos prefijos.
+2. **Owner único de `L{i}.aug` = `laurel`** (mismo patrón que
+   `mlp` → `L{i}.ffn`): `altup` se invoca vía métodos `.predict()` /
+   `.correct()` (sin forward hook), y `per_layer_input_gate` /
+   `per_layer_projection` son hermanos que disparan hook propio. Si los
+   cuatro emitieran el bloque, el conteo saldría 3× inflado (bug real
+   detectado por V1: desviación 3.99% constante = 190MB/paso).
+3. **Fórmula `_aug_bytes` validada contra parámetros reales** (exacta):
+   laurel = 2·h·rank + h (norm); altup = h·n + n³ + n² + 2h
+   (modality_router + prediction_coefs[n×n²] + correction_coefs[n×n] +
+   router_norm + output_scale); gates = 2·h·ple_dim.
+4. **`ple.proj` en la fórmula V1**: la proyección global PLE es un
+   Linear denso que se lee entero (31.5MB/paso) — se suma una vez por
+   paso en `expected_bytes_per_step`, y el conteo de prefill pasa a
+   `2 + 4·n_layers + n_layers + 1`.
+5. **Dato científico inesperado**: el checkpoint `-it` tiene
+   `activation_sparsity_pattern` con **0 capas sparse** — la activation
+   sparsity del FFN viene desactivada de fábrica en E2B-it. El
+   experimento G1.5 (columnas FFN) queda sin sujeto en este checkpoint.
