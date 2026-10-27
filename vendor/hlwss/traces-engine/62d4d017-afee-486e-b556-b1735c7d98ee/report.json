@@ -1,0 +1,23 @@
+{
+  "run_id": "62d4d017-afee-486e-b556-b1735c7d98ee",
+  "model_id": "allenai/OLMoE-1B-7B-0924-Instruct",
+  "policy": "os-lru",
+  "budget_gb": 6.0,
+  "slack_gb": 0.5,
+  "pressure_gb": 10.68,
+  "ram_total_gb": 17.2,
+  "budget_eff_gb": 5.82,
+  "fit": false,
+  "ws_total_gb": 14.57,
+  "calibrate": false,
+  "tokens": 64,
+  "elapsed_s": 48.6,
+  "pageins_total_bytes": 8768634880,
+  "majflt_start": 4743,
+  "majflt_end": 539938,
+  "n_evictions": 0,
+  "n_willneed": 0,
+  "peak_rss_gb": 3.04,
+  "weight_resident_end_gb": 2.36,
+  "prompt_len": 34
+}

@@ -11,8 +11,8 @@
     "python.analysis.extraPaths": [
         "/Volumes/case-sensitive/ai-tooling/vendor/claude-code-proxy"
     ],
-    "python-envs.defaultEnvManager": "ms-python.python:poetry",
-    "python-envs.defaultPackageManager": "ms-python.python:poetry",
+    "python-envs.defaultEnvManager": "ms-python.python:venv",
+    "python-envs.defaultPackageManager": "ms-python.python:pip",
 
     "scm.diffDecorations": "all",
     "scm.diffDecorationsGutterAction": "diff",

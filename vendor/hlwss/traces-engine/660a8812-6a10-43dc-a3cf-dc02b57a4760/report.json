@@ -1,0 +1,23 @@
+{
+  "run_id": "660a8812-6a10-43dc-a3cf-dc02b57a4760",
+  "model_id": "unsloth/gemma-3n-E2B-it",
+  "policy": "os-lru",
+  "budget_gb": 6.0,
+  "slack_gb": 0.5,
+  "pressure_gb": 10.68,
+  "ram_total_gb": 17.2,
+  "budget_eff_gb": 5.63,
+  "fit": false,
+  "ws_total_gb": 10.83,
+  "calibrate": false,
+  "tokens": 64,
+  "elapsed_s": 616.1,
+  "pageins_total_bytes": 310012215296,
+  "majflt_start": 41,
+  "majflt_end": 18921685,
+  "n_evictions": 0,
+  "n_willneed": 0,
+  "peak_rss_gb": 3.78,
+  "weight_resident_end_gb": 2.91,
+  "prompt_len": 29
+}

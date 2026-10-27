@@ -1,0 +1,23 @@
+{
+  "run_id": "d260abc9-9996-4efa-b626-f348adf176e5",
+  "model_id": "Qwen/Qwen3-0.6B",
+  "policy": "hlwss-pin",
+  "budget_gb": 0.7,
+  "slack_gb": 0.5,
+  "pressure_gb": 15.98,
+  "ram_total_gb": 17.2,
+  "budget_eff_gb": 0.76,
+  "fit": false,
+  "ws_total_gb": 5.89,
+  "calibrate": false,
+  "tokens": 64,
+  "elapsed_s": 15.4,
+  "pageins_total_bytes": 334168064,
+  "majflt_start": 27,
+  "majflt_end": 20423,
+  "n_evictions": 2048,
+  "n_willneed": 7424,
+  "peak_rss_gb": 1.95,
+  "weight_resident_end_gb": 1.51,
+  "prompt_len": 29
+}

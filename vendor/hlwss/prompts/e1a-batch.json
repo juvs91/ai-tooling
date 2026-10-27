@@ -1,0 +1,17 @@
+{
+  "description": "E1-A batch: 12 prompts diversos para medir la distribución de estabilización del argmax por capa. Hipótesis: respuestas cortas/factuales estabilizan temprano, generación abierta no.",
+  "prompts": [
+    "What is the capital of France?",
+    "What is 17 plus 25?",
+    "Name the planet known as the Red Planet.",
+    "Translate to Spanish: the house is big.",
+    "Is the sky blue? Answer yes or no.",
+    "What is the chemical symbol for water?",
+    "Write a Python function that returns the factorial of n.",
+    "Explain how a hash table works in a short paragraph.",
+    "Write a four-line poem about the ocean.",
+    "List three primary colors.",
+    "Summarize in one sentence why the sky appears blue.",
+    "Continue the sequence with one number: 2, 4, 8, 16,"
+  ]
+}
