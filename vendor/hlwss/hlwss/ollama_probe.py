@@ -1,4 +1,4 @@
-"""Ollama probe — observación EXTERNA de Ollama (Fase 0.5, PRD §4, ADR-0061).
+"""Ollama probe — observación EXTERNA de Ollama (Fase 0.5, PRD §4, ADR-0071).
 
 Ollama es caja negra: nada se instrumenta por dentro. Se miden dos planos:
   server_metric — API /api/generate (stream): eval/prompt_eval/load durations

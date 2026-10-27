@@ -1,4 +1,4 @@
-# ADR-0061: Fase 0.5 — Ollama Spill Curve (observación externa)
+# ADR-0071: Fase 0.5 — Ollama Spill Curve (observación externa)
 
 **Estado:** Aceptado (2026-10-02) · **Fase:** 0.5 · **Plan:** `.claude/plans/observer-llm-fase-05.md` · **PRD:** v0.4 §4
 

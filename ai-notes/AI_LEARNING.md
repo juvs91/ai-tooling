@@ -1029,7 +1029,7 @@ una fabricación.
 
 ## 2026-10-02 — HLWSS Fase 0.5: Ollama Spill Curve (implementada + ejecutada)
 
-**Contexto:** PRD §4, ADR-0061, plan `.claude/plans/observer-llm-fase-05.md`. Máquina corregida a 16GB
+**Contexto:** PRD §4, ADR-0071, plan `.claude/plans/observer-llm-fase-05.md`. Máquina corregida a 16GB
 (propietario confirmó; PRD v0.4 §0/§4/§4.1/§4.2 actualizados; fuente 13 = Jev/System One).
 
 ### Hallazgos empíricos (los que ninguna fuente publica)
