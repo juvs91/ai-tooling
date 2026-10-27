@@ -1,0 +1,43 @@
+# example-ventas-api-ci.yml — CI del servicio ventas/api (renombrar: <iniciativa>-<servicio>-ci.yml)
+# Ref: ADR-0060. Corre en merge a main (este trigger) y en PRs (branch policy
+# "Build validation" de main con filtro de path ventas/api/* y _shared/libs/auth/*:
+# en Azure Repos el bloque `pr:` del YAML se ignora).
+#
+# ⚠️ trigger.paths.include debe cubrir servicePath + dependsOn. Los triggers no
+# aceptan parámetros, así que la lista vive dos veces: check-paths falla si divergen.
+
+trigger:
+  batch: true                  # merges seguidos → un run; el hash de contenido cubre lo saltado
+  branches:
+    include:
+      - main
+      - hotfix/ventas-api/*   # tests + tag -hotfix.N automático
+  paths:
+    include:
+      - ventas/api
+      - _shared/libs/auth
+
+pr: none
+
+variables:
+  SERVICE_NAME: ventas-api
+  SERVICE_PATH: ventas/api
+
+stages:
+  - stage: CI
+    jobs:
+      - template: ../templates/jobs/python-ci.yml
+        parameters:
+          workingDirectory: ventas/api
+          pipelineFile: pipelines/services/example-ventas-api-ci.yml
+          dependsOn: [_shared/libs/auth]
+
+      - template: ../templates/jobs/acr-build.yml
+        parameters:
+          serviceName: ventas-api
+          servicePath: ventas/api
+          dependsOn: [_shared/libs/auth]
+          acrName: metalsaacr                  # TODO: nombre real del ACR
+          imageRepository: ventas/api
+          azureSubscription: sc-azure-acr-wif  # TODO: service connection Azure RM (workload identity)
+          dependsOnJobs: [python_ci]

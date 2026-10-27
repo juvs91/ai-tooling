@@ -1504,3 +1504,54 @@ Hallazgos en `ai-notes/findings/g1-gemma3n-anatomia.md`. Lo esencial:
   cuantización > política (≤7% condicionada) > prefetch (negativo).
   Decisión práctica: no pelear contra el kernel; cuantizar (G2b como
   proyecto nuevo con scoping propio si se retoma el objetivo práctico).
+## Session 2026-10-15: settings que no aplicaban, validación de hooks y Azure Pipelines simulado (ADR-0061)
+
+### `autoCompactWindow` es un entero de tokens: las fracciones se ignoraban en silencio
+`.claude/settings.json` tenía `"autoCompactWindow": 0.9` (y el template de Kimi `0.80`).
+El validador de Claude Code 2.1.301 lo define como `int().min(1e5).max(1e6).optional().catch(void 0)`:
+cualquier otro valor se descarta **sin avisar**. Por eso "el override no se hace" en la otra laptop:
+nunca se aplicó en ninguna. Ahora `settings.json` (compartido) ya no fija `model` ni
+`autoCompactWindow`; van en `.claude/settings.local.json` por máquina, y `test_cc_kimi_init`
+exige un entero en rango. **Lección:** ante un setting "que no hace nada", revisar el schema
+real del binario (`grep -ao` alrededor del nombre) antes de buscar problemas de precedencia.
+
+### Validar fixes de hooks = reproducir el bug con el código viejo
+Harness old (`5528cd1`) vs new (`HEAD`) por stdin: 19/19 casos tienen bug con el código
+viejo y no con el nuevo. Tres casos parecían "no reproducidos" y eran errores del harness: T6
+miraba el ítem equivocado del checklist, y T7b daba exit 0 con el viejo porque decía
+"Nothing to verify" (un falso completo, que justamente era el bug). **Lección:** un exit 0
+no significa éxito; hay que revisar qué imprimió.
+
+### Bug pendiente: `edit-drift-detector.sh` escribe `.claude/drift-state/` en el cwd
+Usa `.cwd` del stdin en vez de la raíz del proyecto (el mismo tipo de bug que se corrigió en
+scope-gate/intent-bootstrap). Tras un `cd` del agente deja directorios `.claude/` en
+subcarpetas; uno llegó a colarse en un commit. Fix sugerido: `project_root` de
+`task-scope-lib.sh`. Mientras tanto, no hacer `cd` en Bash (usar rutas absolutas).
+
+### Azure Pipelines: lógica fuera del YAML + simulador (ADR-0061)
+- Cada step es `bash scripts/ci-<x>.sh <comando>`. Las entradas van como variables del job
+  (`CI_*`) o en el `env:` del step, y las salidas como `##vso[...]`. Los tests estáticos
+  verifican que cada `ci_require` esté cableado.
+- Gotcha de Azure: los jobs `deployment` **no** hacen checkout implícito. El placeholder
+  funcionaba con un `echo` inline y al llamar a `scripts/` necesitó `checkout: self`.
+- Gotcha de Azure: `PublishTestResults@2` sin archivos solo avisa. `'false'` (string) es
+  truthy en expresiones. Sin `persistCredentials` el agente no puede empujar tags.
+- El simulador detecta lo que el test estático no ve: renombrar `plan.source` → `plan.src`
+  pasa el estático y el simulador lo reporta como `faltan variables de entorno: CI_SOURCE`.
+- Docker Desktop no levantaba (la distro `docker-desktop` estaba Stopped y `/usr/bin/docker`
+  era un symlink roto). Decisión: Docker Engine nativo en WSL (sin licencia de Desktop,
+  igual que `ubuntu-latest`).
+
+### Primera corrida real del simulador (Docker Desktop, 2026-10-15): 9/9 escenarios, 52 aserciones
+Hallazgos al correr de verdad (ninguno aparecía con fakes):
+- **Bug real del template:** `check-paths` corría ANTES de `UsePythonVersion` → python del
+  sistema sin PyYAML (y PEP 668 impide instalarlo). Fix: el step va después y `ci-python.sh`
+  instala PyYAML si falta.
+- `docker buildx imagetools create` contra un registry OCI real conserva el digest en el
+  re-tag (pendiente de ADR-0060, validado salvo la auth de ACR).
+- Infra del simulador: nginx resuelve upstreams al arrancar (recrear el registry → 502, hay que
+  recrear nginx también); `--force-recreate` conserva volúmenes anónimos (`--renew-anon-volumes`);
+  `registry:2` rechaza `_catalog?n>1000`.
+- **Mutación enmascarada:** "error de listado = no existe" no se detectaba porque el fallo
+  simulado de auth también rompía `az acr login`. Se agregó el modo `list` (login OK, listar
+  falla). **Lección:** si una mutación no se detecta, revisar si otra falla la está tapando.

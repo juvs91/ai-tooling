@@ -1,0 +1,136 @@
+# stages/service-release.yml — release de un servicio disparado por tag git (ADR-0060).
+#
+#   <svc>@X.Y.Z-dev.N     → imagen ctx del contenido del tag (build si falta) → X.Y.Z-dev.N → dev
+#   <svc>@X.Y.Z-rc.N      → igual                                              → X.Y.Z-rc.N  → qa
+#   <svc>@X.Y.Z-hotfix.N  → igual (hotfix/* nunca pasó por main)              → …-hotfix.N  → prod
+#   <svc>@X.Y.Z           → digest del último X.Y.Z-rc.N, solo si el contenido
+#                           no cambió desde ese rc (same-content)             → X.Y.Z       → prod
+#
+# Los tags publicados en ACR quedan bloqueados (tag + manifest). Re-correr un
+# release es idempotente; re-apuntar un tag a otro digest falla.
+#
+# Los gates humanos viven en los Environments (Approvals & checks), no aquí:
+# configura approvals en qa y prod. La condición de los stages de prod es
+# defensa en profundidad (solo refs/tags/*), no el gate principal.
+#
+# La lógica vive en scripts/ci-service.sh (ADR-0061); este YAML solo cablea.
+parameters:
+  - name: serviceName          # ej: ventas-api (prefijo del tag git)
+    type: string
+  - name: servicePath          # ej: ventas/api
+    type: string
+  - name: dependsOn            # libs compartidas, ej: [_shared/libs/auth]
+    type: object
+    default: []
+  - name: acrName
+    type: string
+  - name: imageRepository      # ej: ventas/api
+    type: string
+  - name: azureSubscription
+    type: string
+  - name: dockerfile
+    type: string
+    default: ''
+  - name: buildContext
+    type: string
+    default: .
+  - name: environments         # nombres de los Azure Environments
+    type: object
+    default:
+      dev: dev
+      qa: qa
+      prod: prod
+  - name: deploySteps          # pasos de despliegue reales; vacío = placeholder
+    type: stepList
+    default: []
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+stages:
+  - stage: Resolve
+    displayName: Resolver tag
+    condition: startsWith(variables['Build.SourceBranch'], 'refs/tags/')
+    jobs:
+      - job: resolve
+        pool: ${{ parameters.pool }}
+        variables:
+          CI_SERVICE_NAME: ${{ parameters.serviceName }}
+          CI_SERVICE_PATH: ${{ parameters.servicePath }}
+          CI_DEPENDS_ON: ${{ join(' ', parameters.dependsOn) }}
+        steps:
+          - template: ../steps/checkout.yml
+
+          - bash: bash scripts/ci-service.sh validate-tag
+            name: tag
+            displayName: Validar tag
+
+          - bash: bash scripts/ci-service.sh plan-release
+            name: plan
+            displayName: Origen de la imagen
+            env:
+              CI_TAG_ENV: $(tag.env)
+              CI_TAG_NAME: $(tag.name)
+              CI_TAG_VERSION: $(tag.version)
+
+  - stage: Publish
+    displayName: Publicar en ACR
+    dependsOn: Resolve
+    jobs:
+      - job: publish
+        pool: ${{ parameters.pool }}
+        variables:
+          CI_ENV: $[ stageDependencies.Resolve.resolve.outputs['tag.env'] ]
+          CI_IMAGE_TAG: $[ stageDependencies.Resolve.resolve.outputs['tag.image_tag'] ]
+          CI_SOURCE: $[ stageDependencies.Resolve.resolve.outputs['plan.source'] ]
+          CI_NEEDS_BUILD: $[ stageDependencies.Resolve.resolve.outputs['plan.needsBuild'] ]
+          CI_SERVICE_PATH: ${{ parameters.servicePath }}
+          CI_ACR_NAME: ${{ parameters.acrName }}
+          CI_IMAGE_REPOSITORY: ${{ parameters.imageRepository }}
+          CI_DOCKERFILE: ${{ parameters.dockerfile }}
+          CI_BUILD_CONTEXT: ${{ parameters.buildContext }}
+        steps:
+          - template: ../steps/checkout.yml
+
+          - task: AzureCLI@2
+            name: acr
+            displayName: ensure-ctx + promote
+            inputs:
+              azureSubscription: ${{ parameters.azureSubscription }}
+              scriptType: bash
+              scriptLocation: scriptPath
+              scriptPath: scripts/ci-service.sh
+              arguments: publish-release
+
+  - ${{ each env in parameters.environments }}:
+    - stage: Deploy_${{ env.key }}
+      displayName: Deploy → ${{ env.value }}
+      dependsOn: [Resolve, Publish]
+      ${{ if eq(env.key, 'prod') }}:
+        condition: >-
+          and(succeeded(),
+              startsWith(variables['Build.SourceBranch'], 'refs/tags/'),
+              in(dependencies.Resolve.outputs['resolve.tag.env'], 'prod', 'hotfix'))
+      ${{ else }}:
+        condition: and(succeeded(), eq(dependencies.Resolve.outputs['resolve.tag.env'], '${{ env.key }}'))
+      jobs:
+        - deployment: deploy
+          environment: ${{ env.value }}
+          pool: ${{ parameters.pool }}
+          variables:
+            CI_IMAGE_REF: $[ stageDependencies.Publish.publish.outputs['acr.imageRef'] ]
+            CI_ENVIRONMENT: ${{ env.value }}
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - ${{ if eq(length(parameters.deploySteps), 0) }}:
+                    # Los jobs deployment no hacen checkout implícito; el placeholder
+                    # necesita scripts/ (sin historia: no consulta tags).
+                    - checkout: self
+                      fetchDepth: 1
+                    - bash: bash scripts/ci-service.sh deploy-placeholder
+                      displayName: Deploy (placeholder)
+                  - ${{ else }}:
+                    - ${{ parameters.deploySteps }}

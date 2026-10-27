@@ -1,0 +1,59 @@
+# jobs/python-ci.yml — lint + tests de un servicio/lib Python con uv.
+# Corre en PR (branch policy "Build validation") y en merge a main.
+# La lógica vive en scripts/ci-python.sh (ADR-0061); este YAML solo cablea.
+parameters:
+  - name: workingDirectory     # ej: ventas/api
+    type: string
+  - name: pipelineFile         # este YAML, para validar trigger.paths contra dependsOn
+    type: string
+  - name: dependsOn            # libs compartidas que entran al servicio, ej: [_shared/libs/auth]
+    type: object
+    default: []
+  - name: pythonVersion
+    type: string
+    default: '3.12'
+  - name: uvVersion            # vacío = última; fija una versión para builds reproducibles
+    type: string
+    default: ''
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+jobs:
+  - job: python_ci
+    displayName: Python CI · ${{ parameters.workingDirectory }}
+    pool: ${{ parameters.pool }}
+    variables:
+      # Entradas de scripts/ci-python.sh (las variables del job llegan como env)
+      CI_WORKING_DIRECTORY: ${{ parameters.workingDirectory }}
+      CI_PIPELINE_FILE: ${{ parameters.pipelineFile }}
+      CI_DEPENDS_ON: ${{ join(' ', parameters.dependsOn) }}
+      CI_UV_VERSION: ${{ parameters.uvVersion }}
+    steps:
+      - template: ../steps/checkout.yml
+
+      # Después de UsePythonVersion: check-paths lee YAML con PyYAML y el python
+      # del sistema (PEP 668) no permite instalarlo.
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: ${{ parameters.pythonVersion }}
+
+      - bash: bash scripts/ci-python.sh check-paths
+        displayName: Validar trigger.paths vs dependsOn
+
+      - bash: bash scripts/ci-python.sh install-uv
+        displayName: Instalar uv
+
+      - bash: bash scripts/ci-python.sh lint
+        displayName: Lint (ruff)
+
+      - bash: bash scripts/ci-python.sh test
+        displayName: Tests (pytest)
+
+      - task: PublishTestResults@2
+        condition: succeededOrFailed()
+        inputs:
+          testResultsFormat: JUnit
+          testResultsFiles: $(Agent.TempDirectory)/test-results.xml
+          testRunTitle: ${{ parameters.workingDirectory }}

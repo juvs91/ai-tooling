@@ -1,0 +1,81 @@
+# stages/python-lib-release.yml — publica una lib Python de _shared/libs en Azure Artifacts.
+# Ref: ADR-0060 §10. Disparado por tag git <lib>@X.Y.Z[-dev.N|-rc.N].
+#
+#   <lib>@X.Y.Z-dev.N → X.Y.Z.devN → @Local (solo feed base)
+#   <lib>@X.Y.Z-rc.N  → X.Y.ZrcN   → view Prerelease
+#   <lib>@X.Y.Z       → X.Y.Z      → view Release
+#   <lib>@…-hotfix.N  → rechazado (una lib corrige con un patch nuevo)
+#
+# Las versiones en un feed son inmutables: cada ambiente publica su propia versión
+# PEP 440 desde el mismo SHA (no hay re-tag como en ACR). Re-correr un tag ya
+# publicado se detecta y se salta.
+#
+# Requiere: feed con views Prerelease/Release; "<Proyecto> Build Service" como
+# Feed Publisher (Contributor) — necesario para publicar y para promover a views.
+#
+# La lógica vive en scripts/ci-pylib.sh (ADR-0061); este YAML solo cablea.
+parameters:
+  - name: libName              # prefijo del tag git, ej: auth
+    type: string
+  - name: libPath              # ej: _shared/libs/auth
+    type: string
+  - name: artifactFeed         # feed de proyecto: <proyecto>/<feed>, de organización: <feed>
+    type: string
+  - name: pythonVersion
+    type: string
+    default: '3.12'
+  - name: views
+    type: object
+    default:
+      rc: Prerelease
+      prod: Release
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+stages:
+  - stage: Publish
+    displayName: Publicar ${{ parameters.libName }}
+    condition: startsWith(variables['Build.SourceBranch'], 'refs/tags/')
+    jobs:
+      - job: publish
+        pool: ${{ parameters.pool }}
+        variables:
+          # Entradas de scripts/ci-pylib.sh (las variables del job llegan como env)
+          CI_LIB_NAME: ${{ parameters.libName }}
+          CI_LIB_PATH: ${{ parameters.libPath }}
+          CI_ARTIFACT_FEED: ${{ parameters.artifactFeed }}
+          CI_VIEW_RC: ${{ parameters.views.rc }}
+          CI_VIEW_PROD: ${{ parameters.views.prod }}
+        steps:
+          - template: ../steps/checkout.yml
+
+          - bash: bash scripts/ci-pylib.sh validate
+            name: tag
+            displayName: Validar tag y versión
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+
+          - bash: bash scripts/ci-pylib.sh build
+            displayName: Build (uv)
+            env:
+              CI_PEP440: $(tag.pep440)
+
+          - task: TwineAuthenticate@1
+            inputs:
+              artifactFeed: ${{ parameters.artifactFeed }}
+
+          - bash: bash scripts/ci-pylib.sh upload
+            displayName: Upload → Azure Artifacts
+            env:
+              CI_PEP440: $(tag.pep440)
+
+          - bash: bash scripts/ci-pylib.sh promote-view
+            displayName: Promover a view
+            env:
+              CI_PEP440: $(tag.pep440)
+              CI_TAG_ENV: $(tag.env)
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)

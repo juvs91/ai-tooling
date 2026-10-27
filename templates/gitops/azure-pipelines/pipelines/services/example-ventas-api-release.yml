@@ -1,0 +1,27 @@
+# example-ventas-api-release.yml — release del servicio ventas/api por tag git.
+# Ref: ADR-0060. Separado del CI a propósito: solo tags, sin paths (Learn no
+# documenta si `paths` se evalúa en pushes de tags — no dependemos de eso).
+#
+# Tags: ventas-api@X.Y.Z-dev.N · -rc.N · -hotfix.N · X.Y.Z (ver release.sh)
+
+trigger:
+  branches:
+    exclude: ['*']             # nunca por rama
+  tags:
+    include: ['ventas-api@*']
+
+pr: none
+
+stages:
+  - template: ../templates/stages/service-release.yml
+    parameters:
+      serviceName: ventas-api
+      servicePath: ventas/api
+      dependsOn: [_shared/libs/auth]
+      acrName: metalsaacr                      # TODO
+      imageRepository: ventas/api
+      azureSubscription: sc-azure-acr-wif      # TODO
+      environments:                            # Azure Environments (approvals en qa y prod)
+        dev: ventas-api-dev
+        qa: ventas-api-qa
+        prod: ventas-api-prod

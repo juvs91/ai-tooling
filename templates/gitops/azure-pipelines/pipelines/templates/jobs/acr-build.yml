@@ -1,0 +1,106 @@
+# jobs/acr-build.yml — imagen del servicio identificada por contenido (ADR-0060).
+#
+#   PR (Build validation) → docker build sin push (valida el Dockerfile)
+#   merge a main          → ensure-ctx: build+push de <repo>:ctx-<hash> solo si no
+#                           existe, y lock de tag + manifest
+#                         → (autoDevTag) tag git <servicio>@<versión>-dev.<BuildId>,
+#                           que dispara el pipeline de release → Environment dev
+#   push a hotfix/<servicio>/* → docker build sin push
+#                         → (autoHotfixTag) tag git <servicio>@<X.Y.Z>-hotfix.<N+1>,
+#                           que dispara el release → prod (contrato de release.sh hotfix).
+#                           Recuerda: `release.sh cherry` a main es obligatorio después.
+#
+# La lógica vive en scripts/ci-service.sh (ADR-0061); este YAML solo cablea.
+# Requiere: scripts/ci-{lib,service,image,acr}.sh en el repo; service connection
+# Azure RM con workload identity y rol AcrPush sobre el registry. Con autoDevTag o
+# autoHotfixTag: la identidad "<Proyecto> Build Service" necesita Contribute + Create tag.
+parameters:
+  - name: serviceName          # nombre en tags git: <iniciativa>-<servicio>, ej: ventas-api
+    type: string
+  - name: servicePath          # ej: ventas/api
+    type: string
+  - name: dependsOn            # misma lista que trigger.paths.include (sin servicePath)
+    type: object
+    default: []
+  - name: acrName              # nombre corto del ACR, ej: metalsaacr
+    type: string
+  - name: imageRepository      # repositorio en ACR, ej: ventas/api
+    type: string
+  - name: azureSubscription    # service connection Azure RM (workload identity)
+    type: string
+  - name: dockerfile
+    type: string
+    default: ''                # vacío = <servicePath>/Dockerfile
+  - name: buildContext         # raíz del repo: el Dockerfile copia servicio + libs
+    type: string
+    default: .
+  - name: trunkBranch
+    type: string
+    default: main
+  - name: autoDevTag
+    type: boolean
+    default: true
+  - name: autoHotfixTag
+    type: boolean
+    default: true
+  - name: dependsOnJobs        # ej: [python_ci] — no publicar si los tests fallan
+    type: object
+    default: []
+  - name: pool
+    type: object
+    default:
+      vmImage: ubuntu-latest
+
+jobs:
+  - job: acr_build
+    displayName: Imagen · ${{ parameters.serviceName }}
+    dependsOn: ${{ parameters.dependsOnJobs }}
+    pool: ${{ parameters.pool }}
+    variables:
+      IS_TRUNK: $[ eq(variables['Build.SourceBranch'], 'refs/heads/${{ parameters.trunkBranch }}') ]
+      IS_HOTFIX: $[ startsWith(variables['Build.SourceBranch'], 'refs/heads/hotfix/${{ parameters.serviceName }}/') ]
+      # Entradas de scripts/ci-service.sh (las variables del job llegan como env)
+      CI_SERVICE_NAME: ${{ parameters.serviceName }}
+      CI_SERVICE_PATH: ${{ parameters.servicePath }}
+      CI_DEPENDS_ON: ${{ join(' ', parameters.dependsOn) }}
+      CI_ACR_NAME: ${{ parameters.acrName }}
+      CI_IMAGE_REPOSITORY: ${{ parameters.imageRepository }}
+      CI_DOCKERFILE: ${{ parameters.dockerfile }}
+      CI_BUILD_CONTEXT: ${{ parameters.buildContext }}
+    steps:
+      - template: ../steps/checkout.yml
+        parameters:
+          persistCredentials: ${{ or(parameters.autoDevTag, parameters.autoHotfixTag) }}
+
+      - bash: bash scripts/ci-service.sh context
+        name: ctx
+        displayName: Hash de contenido
+
+      - bash: bash scripts/ci-service.sh validate-build
+        displayName: docker build (validación, sin push)
+        condition: and(succeeded(), ne(variables.IS_TRUNK, 'True'))
+        env:
+          CI_CTX: $(ctx.ctx)
+
+      - task: AzureCLI@2
+        name: publish
+        displayName: ensure-ctx → ACR
+        condition: and(succeeded(), eq(variables.IS_TRUNK, 'True'))
+        inputs:
+          azureSubscription: ${{ parameters.azureSubscription }}
+          scriptType: bash
+          scriptLocation: scriptPath
+          scriptPath: scripts/ci-service.sh
+          arguments: publish-ctx
+        env:
+          CI_CTX: $(ctx.ctx)
+
+      - ${{ if parameters.autoDevTag }}:
+        - bash: bash scripts/ci-service.sh tag-dev
+          displayName: Tag -dev automático
+          condition: and(succeeded(), eq(variables.IS_TRUNK, 'True'))
+
+      - ${{ if parameters.autoHotfixTag }}:
+        - bash: bash scripts/ci-service.sh tag-hotfix
+          displayName: Tag -hotfix automático
+          condition: and(succeeded(), eq(variables.IS_HOTFIX, 'True'))

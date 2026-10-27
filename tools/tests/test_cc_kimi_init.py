@@ -70,6 +70,12 @@ class CcKimiInitTest(unittest.TestCase):
         self.assertTrue(settings.is_file())
         data = json.loads(settings.read_text())
         self.assertEqual(data["model"], "kimi-for-coding")
+        # Claude Code valida autoCompactWindow como entero de tokens en [100000, 1000000]
+        # y descarta en silencio cualquier otro valor (p. ej. la fracción 0.80).
+        window = data["autoCompactWindow"]
+        self.assertIsInstance(window, int)
+        self.assertGreaterEqual(window, 100_000)
+        self.assertLessEqual(window, int(data["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]))
         self.assertEqual(data["env"]["ANTHROPIC_BASE_URL"], "https://api.kimi.com/coding")
         self.assertNotIn("ANTHROPIC_API_KEY", data["env"],
                          "la key NO va en el env del proyecto — gana sobre apiKeyHelper y rompe requests")

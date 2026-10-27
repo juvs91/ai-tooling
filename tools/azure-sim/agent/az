@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""az (shim del simulador) — solo los subcomandos de `az acr` que usa scripts/ci-acr.sh,
+contra el registry real del simulador (registry:2 detrás de nginx + azure_mock).
+
+  az acr login --name N
+  az acr repository list --name N -o tsv
+  az acr repository show-tags --name N --repository R -o tsv
+  az acr repository show --name N --image R:T --query digest -o tsv
+  az acr repository update --name N --image R:T|R@D --write-enabled false --delete-enabled false -o none
+
+Cualquier otro comando → exit 99 (el simulador no inventa comportamiento).
+Fallas inyectables (POST /_sim/acr/fail en azure_mock): "auth" → todo `az acr`
+responde como un 401/AuthorizationFailed de ACR; "list" → solo listar falla (login OK).
+
+Variables: SIM_ACR_URL (http://localhost:5000), SIM_MOCK_URL (http://localhost:8082).
+"""
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+REG = os.environ.get("SIM_ACR_URL", "http://localhost:5000")
+MOCK = os.environ.get("SIM_MOCK_URL", "http://localhost:8082")
+ACCEPT = ", ".join([
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+])
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def http(method: str, url: str, data: dict | None = None, headers: dict | None = None):
+    body = json.dumps(data).encode() if data is not None else None
+    req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+    if body:
+        req.add_header("Content-Type", "application/json")
+    return urllib.request.urlopen(req, timeout=30)
+
+
+def arg(a: list, flag: str) -> str:
+    if flag not in a:
+        die(f"falta {flag}", 2)
+    return a[a.index(flag) + 1]
+
+
+def split_image(image: str) -> tuple:
+    if "@" in image:
+        repo, digest = image.split("@", 1)
+        return repo, digest
+    repo, tag = image.rsplit(":", 1)
+    return repo, tag
+
+
+def manifest_digest(repo: str, ref: str) -> str | None:
+    try:
+        with http("HEAD", f"{REG}/v2/{repo}/manifests/{ref}", headers={"Accept": ACCEPT}) as r:
+            return r.headers.get("Docker-Content-Digest")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        die(f"registry respondió {e.code} para {repo}:{ref}")
+
+
+def main(a: list) -> None:
+    if a[:1] != ["acr"]:
+        die(f"az (simulador): comando no soportado: az {' '.join(a)}", 99)
+    sub = a[1:3] if a[1:2] == ["repository"] else a[1:2]
+    with http("GET", f"{MOCK}/_sim/acr/fail") as r:
+        mode = json.load(r)["mode"]
+    # auth: todo `az acr` falla. list: login OK pero listar falla (permiso de lectura
+    # faltante o fallo de red puntual) — el caso donde confundir error con "no existe"
+    # dispararía un rebuild.
+    if mode == "auth" or (mode == "list" and sub in (["repository", "list"], ["repository", "show-tags"])):
+        die("(AuthorizationFailed) The client does not have authorization to perform action "
+            "'Microsoft.ContainerRegistry/registries/...' — simulated by azure-sim")
+
+    if sub == ["login"]:
+        arg(a, "--name")
+        print("Login Succeeded")
+        return
+    if sub == ["repository", "list"]:
+        with http("GET", f"{REG}/v2/_catalog?n=1000") as r:
+            print("\n".join(json.load(r).get("repositories") or []))
+        return
+    if sub == ["repository", "show-tags"]:
+        repo = arg(a, "--repository")
+        try:
+            with http("GET", f"{REG}/v2/{repo}/tags/list") as r:
+                print("\n".join(sorted(json.load(r).get("tags") or [])))
+        except urllib.error.HTTPError as e:
+            die(f"repository {repo} not found ({e.code})")
+        return
+    if sub == ["repository", "show"]:
+        repo, ref = split_image(arg(a, "--image"))
+        d = manifest_digest(repo, ref)
+        if d is None:
+            die(f"manifest {repo}:{ref} not found")
+        if "--query" in a and arg(a, "--query") == "digest":
+            print(d)
+        else:
+            print(json.dumps({"digest": d, "name": ref}))
+        return
+    if sub == ["repository", "update"]:
+        image = arg(a, "--image")
+        repo, ref = split_image(image)
+        if manifest_digest(repo, ref) is None:
+            die(f"image {image} not found")
+        body = {"image": image}
+        for flag, key in (("--write-enabled", "write"), ("--delete-enabled", "delete")):
+            if flag in a:
+                body[key] = arg(a, flag).lower() == "true"
+        with http("POST", f"{MOCK}/_sim/acr/locks", body):
+            pass
+        return
+    die(f"az (simulador): comando no soportado: az {' '.join(a)}", 99)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

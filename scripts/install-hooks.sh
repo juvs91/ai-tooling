@@ -35,7 +35,8 @@ copy_distributable() {
     local dst_dir="$2"
     local label="$3"
     local count=0
-    for f in "$src_dir"/*.sh; do
+    # *.py también: los scripts de pipeline usan helpers Python (ci_pyproject.py)
+    for f in "$src_dir"/*.sh "$src_dir"/*.py; do
         [ -f "$f" ] || continue
         grep -q "^# distributable: true" "$f" 2>/dev/null || continue
         # cp+mv (no cp directo): un hook puede invocarse a sí mismo (ver
@@ -72,7 +73,9 @@ for f in "$HOOKS_SOURCE"/*.sh; do
 
     name=$(basename "$f")
     event=$(grep "^# event:" "$f" | head -1 | awk '{print $3}')
-    matcher=$(grep "^# matcher:" "$f" | head -1 | awk '{print $3}')
+    # Quitar comillas: `# matcher: ""` debe producir el string vacío (match-all),
+    # no el literal de dos caracteres `""` que no matchea ningún evento.
+    matcher=$(grep "^# matcher:" "$f" | head -1 | sed -e 's/^# matcher:[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/')
     timeout_val=$(grep "^# timeout:" "$f" | head -1 | awk '{print $3}')
     is_async=false
     grep -q "^# async: true" "$f" && is_async=true

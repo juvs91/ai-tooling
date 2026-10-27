@@ -25,17 +25,25 @@ FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
-LIB="$CWD/.claude/hooks/task-scope-lib.sh"
+# Resolve against the project root, not the session cwd: after a `cd` in Bash
+# the cwd is a subdirectory, the scope file isn't found there, and every edit
+# was allowed (fail-open). The lib lives next to this hook.
+LIB="$(dirname "${BASH_SOURCE[0]}")/task-scope-lib.sh"
 if [ -f "$LIB" ]; then
   source "$LIB"
-  SCOPE_FILE=$(scope_file_for_session "$CWD" "$SESSION_ID")
+  ROOT=$(project_root "$CWD")
+  SCOPE_FILE=$(scope_file_for_session "$ROOT" "$SESSION_ID")
 else
-  SCOPE_FILE="$CWD/.claude/task-scope.json"
+  ROOT="$CWD"
+  SCOPE_FILE="$ROOT/.claude/task-scope.json"
 fi
 [ -f "$SCOPE_FILE" ] || exit 0
 
-RELATIVE="${FILE#$CWD/}"
-SCOPE_RELATIVE="${SCOPE_FILE#$CWD/}"
+# A relative file_path is relative to the session cwd
+case "$FILE" in /*) ;; *) FILE="$CWD/$FILE" ;; esac
+
+RELATIVE="${FILE#$ROOT/}"
+SCOPE_RELATIVE="${SCOPE_FILE#$ROOT/}"
 
 # Always allow writing the current session's scope file (or the legacy fixed
 # path, still valid when no session_id is available)

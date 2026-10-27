@@ -1,0 +1,17 @@
+# example-auth-release.yml — publica _shared/libs/auth en Azure Artifacts por tag git.
+# Tags: auth@X.Y.Z-dev.N (@Local) · auth@X.Y.Z-rc.N (Prerelease) · auth@X.Y.Z (Release)
+
+trigger:
+  branches:
+    exclude: ['*']
+  tags:
+    include: ['auth@*']
+
+pr: none
+
+stages:
+  - template: ../templates/stages/python-lib-release.yml
+    parameters:
+      libName: auth
+      libPath: _shared/libs/auth
+      artifactFeed: PRO_ALL_INNO/python-libs   # TODO: <proyecto>/<feed>

@@ -15,6 +15,18 @@
 #      en cada corrida), así que este hook mantiene uno nuevo aquí:
 #      .claude/.last_hook_sync.
 #
+# Ubicación de ai-tooling (sin rutas absolutas en el marker):
+#   $AI_TOOLING_HOME  →  .local_path del marker (~ y $HOME se expanden)  →  sin sync de hooks
+#
+# Salvaguardas:
+#   - Throttle de hooks solo se escribe si install-hooks.sh terminó OK — un
+#     fallo ya no queda oculto 24h.
+#   - Skills: si .agents/skills tiene cambios sin commitear, NO se sincroniza
+#     (sync_skills.sh sobrescribía ediciones locales — ADR-0043 Addendum 4).
+#   - No se sincroniza un repo consigo mismo (ai-tooling con su propio marker).
+#   - Lock con mkdir (portable, sin flock en macOS) contra sesiones simultáneas.
+#   - Todo se registra en .claude/sync.log (antes: salida descartada).
+#
 # No borra nada (ni skills obsoletas ni hooks eliminados en ai-tooling) — eso
 # sigue siendo un paso manual, igual que sync_skills.sh tampoco poda.
 # Ver ADR-0047.
@@ -22,44 +34,91 @@
 set -uo pipefail
 
 INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
 [ -z "$CWD" ] && CWD="$(pwd)"
 
-REPO_ROOT=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || echo "$CWD")
+REPO_ROOT="${CLAUDE_PROJECT_DIR:-}"
+[ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT" ] || REPO_ROOT=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || echo "$CWD")
 MARKER="$REPO_ROOT/.ai-tooling"
 
 # Sin marker no hay de dónde sincronizar — no-op silencioso, no es un error.
 [ -f "$MARKER" ] || exit 0
 
+mkdir -p "$REPO_ROOT/.claude"
+LOG="$REPO_ROOT/.claude/sync.log"
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG"; }
+
+_mtime() {
+  if [[ "$(uname)" == "Darwin" ]]; then stat -f%m "$1" 2>/dev/null || echo 0
+  else stat -c%Y "$1" 2>/dev/null || echo 0; fi
+}
+
+# ── Lock ──────────────────────────────────────────────────────────────────────
+LOCK="$REPO_ROOT/.claude/.sync.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  # Lock huérfano (sesión que murió a mitad de sync): >10 min se reclama.
+  if [ $(( $(date +%s) - $(_mtime "$LOCK") )) -gt 600 ]; then
+    rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || exit 0
+    log "lock huérfano reclamado"
+  else
+    exit 0
+  fi
+fi
+trap 'rm -rf "$LOCK"' EXIT
+
+# ── Resolver ai-tooling ───────────────────────────────────────────────────────
+AI_TOOLING_DIR="${AI_TOOLING_HOME:-}"
+if [ -z "$AI_TOOLING_DIR" ]; then
+  AI_TOOLING_DIR=$(jq -r '.local_path // empty' "$MARKER" 2>/dev/null)
+  AI_TOOLING_DIR="${AI_TOOLING_DIR/#\~/$HOME}"
+  AI_TOOLING_DIR="${AI_TOOLING_DIR//\$HOME/$HOME}"
+fi
+
+if [ -n "$AI_TOOLING_DIR" ] && [ -d "$AI_TOOLING_DIR" ]; then
+  SRC_REAL=$(cd "$AI_TOOLING_DIR" && pwd -P)
+  DST_REAL=$(cd "$REPO_ROOT" && pwd -P)
+  if [ "$SRC_REAL" = "$DST_REAL" ]; then
+    log "skip: el repo es la fuente de ai-tooling (no se sincroniza consigo mismo)"
+    exit 0
+  fi
+fi
+
 # ── 1. Skills ─────────────────────────────────────────────────────────────────
 if [ -f "$REPO_ROOT/.agents/sync_skills.sh" ]; then
-    bash "$REPO_ROOT/.agents/sync_skills.sh" >/dev/null 2>&1 || true
+  if [ -n "$(git -C "$REPO_ROOT" status --porcelain -- .agents/skills 2>/dev/null)" ]; then
+    log "skills: skip — .agents/skills tiene cambios locales sin commitear"
+  elif OUT=$(bash "$REPO_ROOT/.agents/sync_skills.sh" 2>&1); then
+    [ -n "$OUT" ] && log "skills: OK — $(printf '%s' "$OUT" | tail -n 1)"
+  else
+    log "skills: ERROR — $(printf '%s' "$OUT" | tail -n 3 | tr '\n' ' ')"
+  fi
 fi
 
 # ── 2. Hooks/scripts ───────────────────────────────────────────────────────────
-AI_TOOLING_DIR=$(jq -r '.local_path // empty' "$MARKER" 2>/dev/null)
-AI_TOOLING_DIR="${AI_TOOLING_DIR/#\~/$HOME}"
-
 if [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING_DIR/scripts/install-hooks.sh" ]; then
-    THROTTLE="$REPO_ROOT/.claude/.last_hook_sync"
-    NEEDS_SYNC=true
+  THROTTLE="$REPO_ROOT/.claude/.last_hook_sync"
+  NEEDS_SYNC=true
 
-    if [ -f "$THROTTLE" ]; then
-        if [[ "$(uname)" == "Darwin" ]]; then
-            MTIME=$(stat -f%m "$THROTTLE" 2>/dev/null || echo 0)
-        else
-            MTIME=$(stat -c%Y "$THROTTLE" 2>/dev/null || echo 0)
-        fi
-        NOW=$(date +%s)
-        AGE_HOURS=$(( (NOW - MTIME) / 3600 ))
-        [ "$AGE_HOURS" -lt 24 ] && NEEDS_SYNC=false
-    fi
+  if [ -f "$THROTTLE" ]; then
+    AGE_HOURS=$(( ($(date +%s) - $(_mtime "$THROTTLE")) / 3600 ))
+    [ "$AGE_HOURS" -lt 24 ] && NEEDS_SYNC=false
+  fi
 
-    if $NEEDS_SYNC; then
-        bash "$AI_TOOLING_DIR/scripts/install-hooks.sh" "$REPO_ROOT" >/dev/null 2>&1 || true
-        mkdir -p "$(dirname "$THROTTLE")"
-        date -u +"%Y-%m-%dT%H:%M:%SZ" > "$THROTTLE"
+  if $NEEDS_SYNC; then
+    if OUT=$(bash "$AI_TOOLING_DIR/scripts/install-hooks.sh" "$REPO_ROOT" 2>&1); then
+      date -u +"%Y-%m-%dT%H:%M:%SZ" > "$THROTTLE"
+      log "hooks: OK desde $AI_TOOLING_DIR"
+    else
+      log "hooks: ERROR (se reintenta en la próxima sesión) — $(printf '%s' "$OUT" | tail -n 3 | tr '\n' ' ')"
     fi
+  fi
+elif [ -n "$AI_TOOLING_DIR" ]; then
+  log "hooks: skip — no existe $AI_TOOLING_DIR/scripts/install-hooks.sh"
+fi
+
+# Mantener el log acotado
+if [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 500 ]; then
+  tail -n 200 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
 fi
 
 exit 0
