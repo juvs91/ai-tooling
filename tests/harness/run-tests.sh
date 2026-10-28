@@ -44,7 +44,8 @@ assert_contains "$FIX/.claude/hooks/block-dangerous.sh" "# custom local" "la mod
 # con --force sí sobrescribe
 bash "$AI_TOOLING/scripts/install-hooks.sh" "$FIX" --apply --force >/dev/null 2>&1
 assert_not_contains "$FIX/.claude/hooks/block-dangerous.sh" "# custom local" "--force sí sobrescribe"
-ls "$FIX/.claude/".harness-backup-*.tar.gz >/dev/null 2>&1 && ok "backup tarball existe" || bad "no se generó backup"
+ls -d "$FIX/.claude/".harness-backup-*/ >/dev/null 2>&1 && ok "backup dir existe" || bad "no se generó backup"
+grep -q "# custom local" "$FIX/.claude/".harness-backup-*/block-dangerous.sh.bak 2>/dev/null && ok "backup preserva la versión local" || bad "backup sin contenido local"
 
 echo "══ T4: dedupe — hook en settings.json no se duplica en settings.local.json ══"
 new_fixture

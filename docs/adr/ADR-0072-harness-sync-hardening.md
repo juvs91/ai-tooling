@@ -13,7 +13,8 @@
 >   `quality-gate.sh` ⊂ `ts-quality-gate.sh`).
 > - Fase 2: `install-hooks.sh` reescrito con manifest `.harness-manifest.json`,
 >   dry-run por default, dedupe por basename contra `settings.json` y backup
->   tarball. `auto-sync-daily.sh` lo invoca con `--apply`. Tests
+>   en **directorio plano** `.harness-backup-<ts>/` (rollback = copiar los
+>   `.bak` de vuelta; se descartó tarball por sobre-ingeniería). `auto-sync-daily.sh` lo invoca con `--apply`. Tests
 >   `tests/harness/run-tests.sh`: **16/16 verdes** (T1 dry-run no escribe,
 >   T2 apply instala, T3 modificación local protegida + force + backup,
 >   T4 dedupe, T5 regresión jq opt-out, T6 doctor librerías/substring).
@@ -112,9 +113,9 @@ marker del consumer declara `ai_tool_version` con major distinto → warn fuerte
   revisión): `settings.json` usa `bash .claude/hooks/x.sh` e install-hooks usa
   `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh` — el texto del command difiere
   aunque sea el mismo hook. Cero duplicados cross-file.
-- **Backup antes de escribir:** tarball `.claude/.harness-backup-<ts>.tar.gz`
-  con todo archivo que va a sobrescribir + el `settings.local.json` previo.
-  Rollback = descomprimir.
+- **Backup antes de escribir:** directorio `.claude/.harness-backup-<ts>/`
+  con cada archivo que va a sobrescribir (como `.bak`) + el
+  `settings.local.json` previo. Rollback = copiar los `.bak` de vuelta.
 
 **M4. Test del harness con fixture repo:** `tests/harness/` en ai-tooling con
 un repo fake (marker + hooks dummy) y casos: opt-out false respeta (regresión

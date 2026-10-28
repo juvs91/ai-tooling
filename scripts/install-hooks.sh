@@ -23,8 +23,9 @@
 # Dedupe: hooks ya registrados en settings.json del proyecto (match por
 # basename del script) NO se duplican en settings.local.json.
 #
-# Backup: antes de sobrescribir, tarball .claude/.harness-backup-<ts>.tar.gz
-# con cada archivo afectado + settings.local.json previo.
+# Backup: antes de sobrescribir, directorio .claude/.harness-backup-<ts>/ con
+# cada archivo afectado (como .bak) + settings.local.json previo.
+# Rollback = copiar los .bak de vuelta.
 #
 # Discovery dinámico: copia archivos con "# distributable: true" en sus headers.
 # Idempotente: seguro de ejecutar múltiples veces.
@@ -194,7 +195,8 @@ if [ "$MODE" = "dry-run" ]; then
     exit 0
 fi
 
-# Backup de lo que se va a sobrescribir + settings.local.json previo
+# Backup de lo que se va a sobrescribir + settings.local.json previo.
+# Directorio plano (no tarball): se inspecciona con ls y el rollback es cp.
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP_DIR="$TARGET/.claude/.harness-backup-$TS"
 NEEDS_BACKUP=false
@@ -212,8 +214,7 @@ if $NEEDS_BACKUP; then
         if [ -f "$dst" ]; then cp "$dst" "$BACKUP_DIR/$(basename "$dst").bak" 2>/dev/null || true; fi
     done
     if [ -f "$SETTINGS_FILE" ]; then cp "$SETTINGS_FILE" "$BACKUP_DIR/settings.local.json.bak"; fi
-    tar -czf "$BACKUP_DIR.tar.gz" -C "$TARGET/.claude" "$(basename "$BACKUP_DIR")" && rm -rf "$BACKUP_DIR"
-    echo "✓ backup: $BACKUP_DIR.tar.gz"
+    echo "✓ backup: $BACKUP_DIR/ (rollback = copiar de vuelta los .bak)"
 fi
 
 # Aplicar copias (cp+mv atómico: un hook puede invocarse a sí mismo — ADR-0047)
