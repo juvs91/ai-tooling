@@ -42,8 +42,17 @@ default, escribe solo con intención, y todo lo que escribe es reversible.**
 
 ### Fase 1 — Visibilidad (sin cambiar comportamiento de escritura)
 
-**M1. `harness-doctor.sh` (nuevo, en `scripts/`)** — diagnóstico read-only que
-corre al final de `auto-sync-daily.sh` y loguea a `sync.log`:
+**M1. `harness-doctor.sh` (nuevo, en `scripts/`)** — diagnóstico read-only.
+**No existía:** `scripts/cc-health` es health-check HTTP del cc-proxy (otro
+dominio); ninguna pieza del harness audita su propio estado hoy.
+
+Decisión de deployment clave: el doctor **NO es distributable** —
+`auto-sync-daily.sh` lo invoca directo desde `$AI_TOOLING_DIR/scripts/`
+(igual que invoca `install-hooks.sh`), así el consumer siempre corre la
+versión más nueva del diagnóstico y el doctor mismo no puede quedar stale.
+Corre al final de `auto-sync-daily.sh` y loguea a `sync.log` (async, presupuesto
+< 2s: sha256 de ~30 archivos es trivial); si el consumer no tiene `jq`, degrada
+a solo los chequeos de archivos/versión.
 
 - Marker: ¿`local_path` existe? ¿`ai_tool_version` del marker vs `VERSION` del
   toolbox (nuevo archivo, abajo)?
@@ -53,6 +62,11 @@ corre al final de `auto-sync-daily.sh` y loguea a `sync.log`:
   reporta "N archivos con drift" **sin escribir nada**. Esto convierte el
   opt-out `sync_hooks: false` de "congelado e invisible" a "congelado pero
   monitoreado" — resuelve el riesgo 5.
+  **Caveat (corrección de esta revisión):** sin el manifest de M3, el doctor no
+  puede distinguir "drift por versión vieja" de "divergencia intencional del
+  consumer" (ej. doc-guard.sh con ajustes locales). Por eso en fase 1 el drift
+  es **solo informativo** (lista archivos, no juzga); la clasificación
+  "modificado localmente vs desactualizado" llega con el manifest en M3.
 - doclens: versión toolbox vs stamp del consumer.
 
 **M2. `VERSION` en la raíz de ai-tooling** + chequeo de compatibilidad: si el
@@ -72,8 +86,11 @@ marker del consumer declara `ai_tool_version` con major distinto → warn fuerte
   registraría); escribe solo con `--apply`. `auto-sync-daily.sh` lo invoca con
   `--apply` únicamente cuando `sync_hooks: true`.
 - **Dedupe de settings:** al regenerar `settings.local.json`, leer primero
-  `settings.json` del proyecto y **no registrar hooks que ya estén ahí**
-  (match por command). Cero duplicados cross-file.
+  `settings.json` del proyecto y **no registrar hooks que ya estén ahí**.
+  **Match por basename del script**, no por command literal (corrección de esta
+  revisión): `settings.json` usa `bash .claude/hooks/x.sh` e install-hooks usa
+  `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh` — el texto del command difiere
+  aunque sea el mismo hook. Cero duplicados cross-file.
 - **Backup antes de escribir:** tarball `.claude/.harness-backup-<ts>.tar.gz`
   con todo archivo que va a sobrescribir + el `settings.local.json` previo.
   Rollback = descomprimir.
