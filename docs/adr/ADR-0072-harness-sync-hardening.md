@@ -1,8 +1,26 @@
 # ADR-0072: Hardening del harness de sync — mitigación de riesgos
 
-- **Estado:** Propuesto
+- **Estado:** Aceptado — **Fase 1 (M1+M2) y Fase 2 (M3+M4) implementadas 2026-10-28**
 - **Fecha:** 2026-10-28
 - **Autor:** Juve + Kimi
+
+> **Registro de implementación (2026-10-28):**
+> - Fase 1: `scripts/harness-doctor.sh` (híbrido toolbox-first + distribuido) +
+>   `VERSION` 0.9.0. Validado en school-system: detectó 3 huérfanos reales y 6
+>   hooks con drift en su primera corrida. Fix posterior: librerías sourced
+>   (ej. `task-scope-lib.sh` vía `LIB=...; source "$LIB"`) excluidas de
+>   huérfanos; referencias con boundary match (evita el falso negativo
+>   `quality-gate.sh` ⊂ `ts-quality-gate.sh`).
+> - Fase 2: `install-hooks.sh` reescrito con manifest `.harness-manifest.json`,
+>   dry-run por default, dedupe por basename contra `settings.json` y backup
+>   tarball. `auto-sync-daily.sh` lo invoca con `--apply`. Tests
+>   `tests/harness/run-tests.sh`: **16/16 verdes** (T1 dry-run no escribe,
+>   T2 apply instala, T3 modificación local protegida + force + backup,
+>   T4 dedupe, T5 regresión jq opt-out, T6 doctor librerías/substring).
+>   Dry-run real contra school-system: los 6 hooks con drift quedan
+>   "adoptado como local" (protegidos), dedupe de 16 hooks, 0 escrituras.
+> - Pendiente: M5 (dedupe convención documentada) y decidir el destino de los
+>   3 huérfanos + 6 drift de school-system (decisión de Juve).
 
 ---
 

@@ -64,7 +64,16 @@ if [ -d "$REPO_ROOT/.claude/hooks" ]; then
   ORPHANS=""
   for f in "$REPO_ROOT/.claude/hooks"/*.sh; do
     b=$(basename "$f")
-    echo "$REG" | grep -q "/$b" || ORPHANS="$ORPHANS $b"
+    echo "$REG" | grep -q "/$b" && continue
+    # No es huérfano si otro hook lo referencia (librería sourceada vía variable,
+    # ej. LIB="$CWD/.claude/hooks/task-scope-lib.sh" + source "$LIB")
+    _ref=false
+    for g in "$REPO_ROOT/.claude/hooks"/*.sh; do
+      [ "$g" = "$f" ] && continue
+      grep -qE "(^|[^a-zA-Z0-9._-])$b" "$g" 2>/dev/null && { _ref=true; break; }
+    done
+    $_ref && continue
+    ORPHANS="$ORPHANS $b"
   done
   [ -n "$ORPHANS" ] && warn "hooks huérfanos (en disco, no registrados):$ORPHANS"
 

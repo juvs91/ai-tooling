@@ -119,7 +119,8 @@ if [ "$SYNC_HOOKS" = "true" ] && [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING_D
   fi
 
   if $NEEDS_SYNC; then
-    if OUT=$(bash "$AI_TOOLING_DIR/scripts/install-hooks.sh" "$REPO_ROOT" 2>&1); then
+    # --apply: install-hooks.sh ahora es dry-run por default (ADR-0072 M3)
+    if OUT=$(bash "$AI_TOOLING_DIR/scripts/install-hooks.sh" "$REPO_ROOT" --apply 2>&1); then
       date -u +"%Y-%m-%dT%H:%M:%SZ" > "$THROTTLE"
       log "hooks: OK desde $AI_TOOLING_DIR"
     else
