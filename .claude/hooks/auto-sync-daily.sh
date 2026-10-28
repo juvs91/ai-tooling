@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
-# auto-sync-daily.sh — SessionStart: mantiene skills y hooks sincronizados con ai-tooling.
+# auto-sync-daily.sh — SessionStart: mantiene skills, hooks y tools sincronizados con ai-tooling.
 # distributable: true
 # event: SessionStart
 # matcher: ""
 # timeout: 30
 # async: true
 #
-# Dos sub-sistemas, cada uno con su propio throttle de 24h:
+# Tres sub-sistemas, cada uno con su propio throttle y opt-out via marker
+# (.ai-tooling: "sync_skills": false / "sync_hooks": false / "sync_doclens": false):
 #   1. Skills — llama a .agents/sync_skills.sh. Ese script YA trae su propio
 #      throttle (.agents/.last_sync) — este hook no reimplementa nada, solo
 #      lo invoca en cada sesión; el script decide si ya sincronizó hoy.
 #   2. Hooks/scripts — llama a install-hooks.sh del repo fuente (ai-tooling).
 #      install-hooks.sh NO trae throttle propio (reescribe settings.local.json
 #      en cada corrida), así que este hook mantiene uno nuevo aquí:
-#      .claude/.last_hook_sync.
+#      .claude/.last_hook_sync. OJO: regenera settings.local.json — si el
+#      proyecto registra sus propios hooks en settings.json, usa
+#      "sync_hooks": false para evitar duplicados.
+#   3. doclens — llama a doclens/sync.sh del toolbox (copia versionada hacia
+#      scripts/doclens.py). Es no-op cuando las versiones coinciden — no
+#      necesita throttle propio, igual que sync_skills.sh.
 #
 # Ubicación de ai-tooling (sin rutas absolutas en el marker):
 #   $AI_TOOLING_HOME  →  .local_path del marker (~ y $HOME se expanden)  →  sin sync de hooks
@@ -83,8 +89,16 @@ if [ -n "$AI_TOOLING_DIR" ] && [ -d "$AI_TOOLING_DIR" ]; then
   fi
 fi
 
+# ── Opt-outs por marker (default: todo activo) ────────────────────────────────
+_flag() { # _flag <nombre> -> "true"/"false" (jq // trata false como vacío: usar has())
+  jq -r --arg f "$1" 'if has($f) then .[$f] else true end' "$MARKER" 2>/dev/null || echo "true"
+}
+SYNC_SKILLS=$(_flag sync_skills)
+SYNC_HOOKS=$(_flag sync_hooks)
+SYNC_DOCLENS=$(_flag sync_doclens)
+
 # ── 1. Skills ─────────────────────────────────────────────────────────────────
-if [ -f "$REPO_ROOT/.agents/sync_skills.sh" ]; then
+if [ "$SYNC_SKILLS" = "true" ] && [ -f "$REPO_ROOT/.agents/sync_skills.sh" ]; then
   if [ -n "$(git -C "$REPO_ROOT" status --porcelain -- .agents/skills 2>/dev/null)" ]; then
     log "skills: skip — .agents/skills tiene cambios locales sin commitear"
   elif OUT=$(bash "$REPO_ROOT/.agents/sync_skills.sh" 2>&1); then
@@ -95,7 +109,7 @@ if [ -f "$REPO_ROOT/.agents/sync_skills.sh" ]; then
 fi
 
 # ── 2. Hooks/scripts ───────────────────────────────────────────────────────────
-if [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING_DIR/scripts/install-hooks.sh" ]; then
+if [ "$SYNC_HOOKS" = "true" ] && [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING_DIR/scripts/install-hooks.sh" ]; then
   THROTTLE="$REPO_ROOT/.claude/.last_hook_sync"
   NEEDS_SYNC=true
 
@@ -112,8 +126,20 @@ if [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING_DIR/scripts/install-hooks.sh" ]
       log "hooks: ERROR (se reintenta en la próxima sesión) — $(printf '%s' "$OUT" | tail -n 3 | tr '\n' ' ')"
     fi
   fi
-elif [ -n "$AI_TOOLING_DIR" ]; then
+elif [ -n "$AI_TOOLING_DIR" ] && [ "$SYNC_HOOKS" = "true" ]; then
   log "hooks: skip — no existe $AI_TOOLING_DIR/scripts/install-hooks.sh"
+fi
+
+# ── 3. doclens ─────────────────────────────────────────────────────────────────
+# sync.sh ya es no-op cuando las versiones coinciden (compara VERSION del
+# toolbox vs scripts/.doclens-version del consumer) — sin throttle externo,
+# misma filosofía que sync_skills.sh: el hook invoca, el script decide.
+if [ "$SYNC_DOCLENS" = "true" ] && [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING_DIR/doclens/sync.sh" ]; then
+  if OUT=$(bash "$AI_TOOLING_DIR/doclens/sync.sh" "$REPO_ROOT" 2>&1); then
+    [ -n "$OUT" ] && log "doclens: OK — $(printf '%s' "$OUT" | grep -E 'sincronizado|al día|ya está' | tail -n 1)"
+  else
+    log "doclens: ERROR — $(printf '%s' "$OUT" | tail -n 3 | tr '\n' ' ')"
+  fi
 fi
 
 # Mantener el log acotado
