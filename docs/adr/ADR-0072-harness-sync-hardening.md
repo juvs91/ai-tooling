@@ -46,10 +46,13 @@ default, escribe solo con intención, y todo lo que escribe es reversible.**
 **No existía:** `scripts/cc-health` es health-check HTTP del cc-proxy (otro
 dominio); ninguna pieza del harness audita su propio estado hoy.
 
-Decisión de deployment clave: el doctor **NO es distributable** —
-`auto-sync-daily.sh` lo invoca directo desde `$AI_TOOLING_DIR/scripts/`
-(igual que invoca `install-hooks.sh`), así el consumer siempre corre la
-versión más nueva del diagnóstico y el doctor mismo no puede quedar stale.
+Decisión de deployment (corregida en la segunda revisión): **híbrido**. El
+doctor SÍ se distribuye (header `distributable: true`, vive en `scripts/`) para
+que exista aun cuando el toolbox no esté montado (otra máquina, CI, clon
+fresco) — pero `auto-sync-daily.sh` lo invoca **toolbox-first**: prefiere
+`$AI_TOOLING_DIR/scripts/harness-doctor.sh` (siempre la versión más nueva) y
+cae a la copia distribuida solo como fallback. Así el vigía no puede quedar
+stale en el camino crítico y nunca deja de existir en el consumer.
 Corre al final de `auto-sync-daily.sh` y loguea a `sync.log` (async, presupuesto
 < 2s: sha256 de ~30 archivos es trivial); si el consumer no tiene `jq`, degrada
 a solo los chequeos de archivos/versión.

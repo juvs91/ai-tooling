@@ -142,6 +142,20 @@ if [ "$SYNC_DOCLENS" = "true" ] && [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING
   fi
 fi
 
+# ── 4. Doctor (ADR-0072 M1) ────────────────────────────────────────────────────
+# Híbrido: toolbox-first (siempre la versión más nueva) con fallback a la copia
+# distribuida en el consumer. Read-only; sus líneas van al sync.log.
+DOCTOR=""
+[ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING_DIR/scripts/harness-doctor.sh" ] && DOCTOR="$AI_TOOLING_DIR/scripts/harness-doctor.sh"
+[ -z "$DOCTOR" ] && [ -f "$REPO_ROOT/scripts/harness-doctor.sh" ] && DOCTOR="$REPO_ROOT/scripts/harness-doctor.sh"
+if [ -n "$DOCTOR" ]; then
+  if OUT=$(bash "$DOCTOR" "$REPO_ROOT" 2>&1); then
+    printf '%s\n' "$OUT" | grep -E 'WARN|OK —' | while IFS= read -r line; do log "doctor: $line"; done
+  else
+    log "doctor: ERROR — $(printf '%s' "$OUT" | tail -n 1)"
+  fi
+fi
+
 # Mantener el log acotado
 if [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 500 ]; then
   tail -n 200 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
