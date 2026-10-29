@@ -81,9 +81,13 @@ if echo "$COMMAND" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f'; then
       rest=$(echo "$segment" | sed -E 's/.*rm[[:space:]]+-[a-zA-Z]*r[a-zA-Z]*f//')
       for target in $rest; do
         case "$target" in -*) continue ;; esac
-        resolved=$(python3 -c "import os,sys; print(os.path.abspath(sys.argv[1]))" "$target" 2>/dev/null) || continue
+        # realpath (no abspath): con doble montaje (/case-sensitive → /Volumes/case-sensitive)
+        # el target y las rutas de `git worktree list` (siempre físicas) deben compararse
+        # canónicos — si no, el prefijo alterno evadía la regla (ADR-0073).
+        resolved=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$target" 2>/dev/null) || continue
         while IFS= read -r wt_path; do
           [ -z "$wt_path" ] && continue
+          wt_path=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$wt_path" 2>/dev/null || echo "$wt_path")
           if [ "$resolved" = "$wt_path" ] || [[ "$wt_path" == "$resolved"/* ]]; then
             echo "BLOCKED: '$wt_path' es un git worktree activo (target resuelto: $resolved). Usa: git worktree remove $wt_path" >&2
             exit 2

@@ -47,6 +47,13 @@ REPO_ROOT="${CLAUDE_PROJECT_DIR:-}"
 [ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT" ] || REPO_ROOT=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || echo "$CWD")
 MARKER="$REPO_ROOT/.ai-tooling"
 
+# ADR-0073: dentro de un worktree enlazado (sesión lanzada con --worktree) no se
+# sincroniza nada — skills, install-hooks y doclens escriben archivos TRACKEADOS
+# y los meterían en la rama del worktree. Se sincroniza desde el checkout principal.
+_GD=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-dir 2>/dev/null)
+_GC=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+[ -n "$_GD" ] && [ "$_GD" != "$_GC" ] && exit 0
+
 # Sin marker no hay de dónde sincronizar — no-op silencioso, no es un error.
 [ -f "$MARKER" ] || exit 0
 
@@ -101,7 +108,9 @@ SYNC_DOCLENS=$(_flag sync_doclens)
 if [ "$SYNC_SKILLS" = "true" ] && [ -f "$REPO_ROOT/.agents/sync_skills.sh" ]; then
   if [ -n "$(git -C "$REPO_ROOT" status --porcelain -- .agents/skills 2>/dev/null)" ]; then
     log "skills: skip — .agents/skills tiene cambios locales sin commitear"
-  elif OUT=$(bash "$REPO_ROOT/.agents/sync_skills.sh" 2>&1); then
+  # `cd` antes de invocar: la copia de sync_skills.sh de un consumer resuelve su
+  # raíz por el cwd y install-hooks nunca la actualiza (ADR-0073) — este hook sí.
+  elif OUT=$(cd "$REPO_ROOT" && bash .agents/sync_skills.sh 2>&1); then
     [ -n "$OUT" ] && log "skills: OK — $(printf '%s' "$OUT" | tail -n 1)"
   else
     log "skills: ERROR — $(printf '%s' "$OUT" | tail -n 3 | tr '\n' ' ')"

@@ -17,21 +17,35 @@ set -euo pipefail
 
 INPUT=$(cat)
 FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null || true)
+CWD=$(echo "$INPUT" | jq -r '.cwd // "."' 2>/dev/null || echo ".")
 
 [[ -z "$FILE" ]] && exit 0
 
 # Normalizar: quitar ./ inicial
 FILE="${FILE#./}"
 
+# ADR-0073: el repo es el del ARCHIVO editado, no el cwd del proceso del hook.
+# Dentro de un worktree anidado (.claude/worktrees/<n>/) el path relativo al
+# checkout principal no matcheaba ningún prefijo guardado → fail-open; y el ADR
+# staged que cuenta es el del índice de ese worktree.
+LIB="$(dirname "${BASH_SOURCE[0]}")/task-scope-lib.sh"
+REPO_ROOT=""
+if [ -f "$LIB" ] && . "$LIB" && declare -F repo_of_file >/dev/null; then
+  repo_of_file "$FILE" "$CWD" || true
+  [[ -z "$RF_TOP" ]] && exit 0   # fuera de un repo git: no aplica
+  REPO_ROOT="$RF_TOP"
+  FILE="$RF_FILE"
+fi
+REPO_ROOT=${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo ".")}
+
 # Normalizar: si es ruta absoluta, quitar el REPO_ROOT
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
 if [[ "$FILE" == "$REPO_ROOT"/* ]]; then
-  FILE="${FILE#$REPO_ROOT/}"
+  FILE="${FILE#"$REPO_ROOT"/}"
 fi
 
 # ── Directorio de ADRs (configurable) ────────────────────────────────────────
 ADR_PATH="docs/adr"
-CONFIG_FILE=".claude/adr-gate.conf"
+CONFIG_FILE="$REPO_ROOT/.claude/adr-gate.conf"
 if [ -f "$CONFIG_FILE" ] && grep -qE '^adr_path:' "$CONFIG_FILE" 2>/dev/null; then
   ADR_PATH=$(grep -E '^adr_path:' "$CONFIG_FILE" | head -1 | sed 's/^adr_path:[[:space:]]*//' | sed 's:/*$::')
 fi
@@ -139,9 +153,12 @@ done
 # No basta con "existe algún ADR nuevo" — debe mencionar el prefijo guardado
 # (GUARDED_REASON) que disparó el gate, si no cualquier ADR sin relación
 # (p.ej. de trabajo previo sin commitear) bypasea la protección para siempre.
+# `|| true`: sin ADRs nuevos el grep sale 1 y, con `set -euo pipefail`, la
+# asignación mataba el hook con exit 1 — que Claude Code trata como error NO
+# bloqueante: el gate fallaba abierto justo cuando debía bloquear (ADR-0073).
 NEW_ADR_FILES=$(git -C "$REPO_ROOT" status --porcelain "${ADR_PATH}/" 2>/dev/null \
-  | grep -E '^(\?\?|A ).*\.(md|txt|rst)$' 2>/dev/null \
-  | cut -c4-)
+  | grep -E '^(\?\?|A.).*\.(md|txt|rst)$' 2>/dev/null \
+  | cut -c4- || true)
 
 while IFS= read -r adr_rel; do
   [ -z "$adr_rel" ] && continue

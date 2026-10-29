@@ -1,10 +1,11 @@
 # Find repository root directory
 cc_repo_dir() {
     local dir="$(pwd)"
-    while [[ ! -d "$dir/.git" && "$dir" != "/" ]]; do
+    # -e (no -d): en un worktree enlazado .git es un ARCHIVO (ADR-0073)
+    while [[ ! -e "$dir/.git" && "$dir" != "/" ]]; do
         dir="$(dirname "$dir")"
     done
-    if [[ -d "$dir/.git" ]]; then
+    if [[ -e "$dir/.git" ]]; then
         echo "$dir"
     else
         echo "ERROR: Not in a git repository" >&2

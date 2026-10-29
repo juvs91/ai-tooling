@@ -11,11 +11,23 @@
 INPUT=$(cat)
 TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' | tr -cd 'a-zA-Z0-9_-')
 
-STATE_DIR="$CWD/.claude/drift-state"
+# ADR-0073: estado en la raíz canónica de la sesión (antes en el .cwd: tras un
+# `cd` creaba .claude/drift-state/ en subdirectorios — llegó a commitearse) y
+# contador por sesión (antes por cksum del cwd: cada `cd` reiniciaba la cuenta).
+LIB="$(dirname "${BASH_SOURCE[0]}")/task-scope-lib.sh"
+ROOT=""
+if [ -f "$LIB" ] && . "$LIB" && declare -F state_root >/dev/null; then
+  ROOT=$(state_root "$CWD")
+fi
+ROOT=${ROOT:-$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)}
+ROOT=${ROOT:-$CWD}
+
+STATE_DIR="$ROOT/.claude/drift-state"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
-PROJECT_HASH=$(echo "$CWD" | cksum | cut -d' ' -f1)
-COUNTER_FILE="$STATE_DIR/edit-count-$PROJECT_HASH"
+COUNTER_KEY="${SESSION_ID:-$(echo "$ROOT" | cksum | cut -d' ' -f1)}"
+COUNTER_FILE="$STATE_DIR/edit-count-$COUNTER_KEY"
 
 # Limpia archivos de drift-state con más de 24h
 find "$STATE_DIR" -maxdepth 1 -type f -mmin +1440 -delete 2>/dev/null || true
@@ -29,7 +41,7 @@ if [ "$TOOL" = "Bash" ]; then
         echo "  Quality checkpoint:" >&2
         echo "  1. Errores TS resueltos? (npx tsc --noEmit)" >&2
         echo "  2. TODOs actualizados? Tareas marcadas done tienen verification?" >&2
-        echo "  3. Scope siguiente tarea definido en .claude/task-scope.json?" >&2
+        echo "  3. Scope siguiente tarea definido en .claude/sessions/<session>-task-scope.json?" >&2
         echo "  4. Codigo de produccion no roto? (revisar imports/exports)" >&2
     fi
     exit 0

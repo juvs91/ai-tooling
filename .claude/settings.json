@@ -142,7 +142,7 @@
         "description": "ADR Gate: bloquea edits a vendor/ y .agents/ sin ADR staged"
       },
       {
-        "matcher": "Workflow|Agent",
+        "matcher": "Workflow",
         "hooks": [
           {
             "type": "command",
@@ -150,7 +150,7 @@
             "timeout": 5
           }
         ],
-        "description": "Worktree isolation gate: advierte parallel(agent()) sin isolation: 'worktree'; redirige Agent→Workflow para paralelismo aislado"
+        "description": "Worktree isolation gate: advierte (additionalContext, sin permissionDecision) cuando un Workflow lanza más agent() en paralelo que los que llevan isolation: 'worktree' (ADR-0073)"
       },
       {
         "matcher": "Agent|EnterPlanMode",
@@ -282,7 +282,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.agents/sync_skills.sh\" 2>/dev/null || true",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && bash .agents/sync_skills.sh 2>/dev/null || true",
             "timeout": 30
           }
         ],

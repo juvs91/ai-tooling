@@ -15,19 +15,30 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
 
 [ -z "$SESSION_ID" ] && exit 0
-[ -f "$CWD/.claude/no-skill-gate" ] && exit 0
+
+# ADR-0073: estado en la raíz canónica de la sesión, no en el .cwd (que sigue a
+# un `cd` o a un worktree y dejaba .claude/ basura en subdirectorios).
+LIB="$(dirname "${BASH_SOURCE[0]}")/task-scope-lib.sh"
+ROOT=""
+if [ -f "$LIB" ] && . "$LIB" && declare -F state_root >/dev/null; then
+  ROOT=$(state_root "$CWD")
+fi
+ROOT=${ROOT:-$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)}
+ROOT=${ROOT:-$CWD}
+
+[ -f "$ROOT/.claude/no-skill-gate" ] && exit 0
 
 # Sanitizar SESSION_ID para uso seguro como nombre de archivo
 SESSION_ID=$(echo "$SESSION_ID" | tr -cd 'a-zA-Z0-9_-')
 [ -z "$SESSION_ID" ] && exit 0
 
-SESSIONS_DIR="$CWD/.claude/sessions"
+SESSIONS_DIR="$ROOT/.claude/sessions"
 SESSION_MARKER="$SESSIONS_DIR/$SESSION_ID"
 
 mkdir -p "$SESSIONS_DIR"
 
 # Asegurar sessions/ en .claude/.gitignore para no commitear estado de sesión
-CLAUDE_GITIGNORE="$CWD/.claude/.gitignore"
+CLAUDE_GITIGNORE="$ROOT/.claude/.gitignore"
 if [ ! -f "$CLAUDE_GITIGNORE" ] || ! grep -qF 'sessions/' "$CLAUDE_GITIGNORE" 2>/dev/null; then
   echo 'sessions/' >> "$CLAUDE_GITIGNORE"
 fi
@@ -38,8 +49,8 @@ find "$SESSIONS_DIR" -maxdepth 1 -type f -mmin +2880 -delete 2>/dev/null || true
 # Si ya procesamos esta sesión → salir silencioso (no repetir la instrucción)
 [ -f "$SESSION_MARKER" ] && exit 0
 
-SKILL_FILE="$CWD/.agents/skills/workflow/workflow-coordinator/SKILL.md"
-AGENTS_FILE="$CWD/AGENTS.md"
+SKILL_FILE="$ROOT/.agents/skills/workflow/workflow-coordinator/SKILL.md"
+AGENTS_FILE="$ROOT/AGENTS.md"
 
 # NOTE: task-scope.json existing (from intent-bootstrap.sh) does NOT mean
 # workflow-coordinator's actual routing table (AGENTS.md) was consulted —

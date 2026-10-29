@@ -29,9 +29,13 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 # the cwd is a subdirectory, the scope file isn't found there, and every edit
 # was allowed (fail-open). The lib lives next to this hook.
 LIB="$(dirname "${BASH_SOURCE[0]}")/task-scope-lib.sh"
-if [ -f "$LIB" ]; then
-  source "$LIB"
+ROOT=""
+if [ -f "$LIB" ] && . "$LIB" && declare -F project_root >/dev/null; then
   ROOT=$(project_root "$CWD")
+  # ADR-0073: canonizar ROOT ANTES de construir SCOPE_FILE para que ambos
+  # compartan prefijo (/case-sensitive → /Volumes/case-sensitive); si no,
+  # SCOPE_RELATIVE queda absoluto y se bloquea editar el propio scope.
+  declare -F canon_path >/dev/null && ROOT=$(canon_path "$ROOT")
   SCOPE_FILE=$(scope_file_for_session "$ROOT" "$SESSION_ID")
 else
   ROOT="$CWD"
@@ -42,8 +46,15 @@ fi
 # A relative file_path is relative to the session cwd
 case "$FILE" in /*) ;; *) FILE="$CWD/$FILE" ;; esac
 
-RELATIVE="${FILE#$ROOT/}"
-SCOPE_RELATIVE="${SCOPE_FILE#$ROOT/}"
+# ADR-0073: FILE canónico (mismo criterio que ROOT) y repo al que pertenece
+RF_TOP=""
+if declare -F repo_of_file >/dev/null; then
+  repo_of_file "$FILE" "$CWD"
+  [ -n "$RF_FILE" ] && FILE="$RF_FILE"
+fi
+
+RELATIVE="${FILE#"$ROOT"/}"
+SCOPE_RELATIVE="${SCOPE_FILE#"$ROOT"/}"
 
 # Always allow writing the current session's scope file (or the legacy fixed
 # path, still valid when no session_id is available)
@@ -51,9 +62,24 @@ case "$RELATIVE" in
   "$SCOPE_RELATIVE"|.claude/task-scope.json) exit 0 ;;
 esac
 
-# Paths outside the project directory are outside scope-gate's jurisdiction.
-# scope-gate only protects project files. External paths (e.g. ~/.claude/plans/,
-# /tmp/) are allowed — they are not project files subject to scope drift.
+# Worktrees (ADR-0073): un archivo en un worktree del MISMO repo (mismo git
+# common-dir) — anidado en .claude/worktrees/<n>/ o hermano ../x — es código del
+# mismo proyecto: se evalúa relativo a la raíz equivalente de ese worktree
+# (conservando el offset de un subproyecto, ej. apps/web).
+if [ -n "$RF_TOP" ]; then
+  case "$RELATIVE" in
+    "$FILE"|.claude/worktrees/*)
+      git_info "$ROOT"
+      if [ -n "$GI_COMMON" ] && [ "$RF_COMMON" = "$GI_COMMON" ] && [ "$RF_TOP" != "$GI_TOP" ]; then
+        OFFSET="${ROOT#"$GI_TOP"}"
+        case "$FILE" in "$RF_TOP$OFFSET"/*) RELATIVE="${FILE#"$RF_TOP$OFFSET"/}" ;; esac
+      fi
+      ;;
+  esac
+fi
+
+# Jurisdicción = archivos del proyecto, incluidos sus worktrees. Lo demás (un
+# repo ajeno, ~/.claude/plans/, /tmp/) no está sujeto a scope drift.
 [ "$RELATIVE" = "$FILE" ] && exit 0
 
 TASK_NAME=$(jq -r '.task // .task_id // "current task"' "$SCOPE_FILE")

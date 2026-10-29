@@ -39,7 +39,7 @@ Eres el **Workflow Coordinator** de ai-tooling. Tu única tarea al cargar es:
 | React, Next.js, TypeScript, componente, hook | `senior-frontend` | `.agents/skills/software/frontend/senior-frontend/SKILL.md` |
 | base de datos, SQL, schema, AlloyDB, Alembic | `database-expert` | `.agents/skills/infrastructure/database-expert/SKILL.md` |
 | CI/CD, pipeline, Docker, deploy, Cloud Run | `gitops-expert` | `.agents/skills/infrastructure/gitops-expert/SKILL.md` |
-| monorepo, trunk-based, tag por proyecto, release.sh | `gitops-monorepo` | `.agents/skills/infrastructure/gitops-monorepo/SKILL.md` |
+| monorepo, trunk-based, worktree, EnterWorktree, tag por proyecto, release.sh | `gitops-monorepo` | `.agents/skills/infrastructure/gitops-monorepo/SKILL.md` |
 | seguridad, auth, crypto, OWASP, JWT | `security-expert` | `.agents/skills/security/security-expert/SKILL.md` |
 | planear ticket, desglosar story, Jira ticket | `ticket-planner` | `.agents/skills/workflow/ticket-planner/SKILL.md` |
 | implementar ticket, ejecutar plan, codifica | `ticket-implementation` | `.agents/skills/workflow/ticket-implementation/SKILL.md` |

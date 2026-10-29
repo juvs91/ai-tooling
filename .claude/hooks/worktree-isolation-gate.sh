@@ -1,69 +1,40 @@
 #!/bin/bash
 # distributable: true
 # event: PreToolUse
-# matcher: Workflow|Agent
+# matcher: Workflow
 # timeout: 5
-# worktree-isolation-gate.sh — PreToolUse hook (Workflow + Agent tools)
-# Ref: ADR-0044-worktree-gitops-integration.md
+# worktree-isolation-gate.sh — PreToolUse hook (Workflow)
+# Ref: ADR-0044-worktree-gitops-integration.md, ADR-0073-worktrees-nativos-harness.md
 #
-# Advierte si:
-#   1. Un Workflow script tiene parallel(agent()) sin isolation: 'worktree'
-#   2. El tool Agent es invocado directamente con lenguaje que sugiere paralelismo
-#      (el Agent tool NO soporta isolation: 'worktree' — usar Workflow en su lugar)
+# Advierte si un script de Workflow lanza más agent() de los que llevan
+# isolation: 'worktree' — agentes en paralelo escribiendo el mismo árbol se pisan.
 #
-# Siempre exit 0 — advierte pero no bloquea.
+# Siempre exit 0 — advierte pero no bloquea. El aviso va como
+# hookSpecificOutput.additionalContext: el stderr de un PreToolUse con exit 0
+# NUNCA llega al modelo. Sin permissionDecision a propósito: "allow" saltaría
+# el prompt de permisos (auto-aprobaría el Workflow) y "defer" descarta el
+# additionalContext.
+#
+# ADR-0073: se eliminó el caso del tool Agent. Decía que Agent no soporta
+# isolation: 'worktree' — falso (sí lo soporta) — y decidía por palabras del
+# prompt ("en paralelo"), que no dicen nada de concurrencia real.
 
 INPUT=$(cat)
 TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
+[ "$TOOL" = "Workflow" ] || exit 0
 
-# ── Case 1: Workflow tool ────────────────────────────────────────────────────
-if [ "$TOOL" = "Workflow" ]; then
-  SCRIPT=$(echo "$INPUT" | jq -r '.tool_input.script // empty')
-  [ -z "$SCRIPT" ] && exit 0
+SCRIPT=$(echo "$INPUT" | jq -r '.tool_input.script // empty')
+[ -z "$SCRIPT" ] && exit 0
 
-  # Ya tiene isolation — OK
-  if echo "$SCRIPT" | grep -qE "isolation.*worktree"; then
-    exit 0
-  fi
+# Sin paralelismo no hay conflicto en disco
+echo "$SCRIPT" | grep -qE 'parallel\(|pipeline\(|Promise\.all' || exit 0
 
-  if echo "$SCRIPT" | grep -q "parallel(" && echo "$SCRIPT" | grep -q "agent("; then
-    HAS_WRITES=0
-    if echo "$SCRIPT" | grep -qE "Edit|Write|isolation|worktree|write|edit"; then
-      HAS_WRITES=1
-    fi
+AGENTS=$(printf '%s' "$SCRIPT" | grep -oE '(^|[^a-zA-Z0-9_.])agent\(' | wc -l | tr -d ' ')
+ISOLATED=$(printf '%s' "$SCRIPT" | tr '\n' ' ' | grep -oE "isolation[[:space:]]*:[[:space:]]*['\"]worktree['\"]" | wc -l | tr -d ' ')
 
-    if [ "$HAS_WRITES" -gt "0" ]; then
-      echo "WORKTREE [warn]: parallel(agent()) con posibles writes sin isolation: 'worktree'." >&2
-      echo "  Agrega { isolation: 'worktree' } a cada agent() para evitar conflictos en disco." >&2
-      echo "  Ref: ADR-0044-worktree-gitops-integration.md" >&2
-    else
-      echo "WORKTREE [info]: parallel(agent()) sin isolation: 'worktree' detectado." >&2
-      echo "  Si los agentes solo leen archivos, es seguro ignorar este aviso." >&2
-      echo "  Si escriben archivos, agrega isolation: 'worktree' para evitar conflictos." >&2
-    fi
-  fi
+[ "$AGENTS" -gt 0 ] || exit 0
+[ "$ISOLATED" -ge "$AGENTS" ] && exit 0
 
-  exit 0
-fi
-
-# ── Case 2: Agent tool (no soporta isolation: 'worktree') ───────────────────
-if [ "$TOOL" = "Agent" ]; then
-  PROMPT=$(echo "$INPUT" | jq -r '.tool_input.prompt // empty')
-  [ -z "$PROMPT" ] && exit 0
-
-  # Detecta lenguaje que sugiere múltiples agentes paralelos siendo lanzados
-  if echo "$PROMPT" | grep -qiE "parallel|en paralelo|simultán|concurrente|múltiples agentes|multiple agents|lanza.*agent|spawn.*agent"; then
-    echo "WORKTREE [warn]: Agent tool no soporta isolation: 'worktree'." >&2
-    echo "  Para paralelismo con aislamiento de archivos, usa el Workflow tool:" >&2
-    echo "    await parallel([" >&2
-    echo "      () => agent(task1, { isolation: 'worktree' })," >&2
-    echo "      () => agent(task2, { isolation: 'worktree' })," >&2
-    echo "    ]);" >&2
-    echo "  Para análisis read-only, el Agent tool directo es seguro." >&2
-    echo "  Ref: ADR-0044-worktree-gitops-integration.md" >&2
-  fi
-
-  exit 0
-fi
-
+MSG="WORKTREE: el Workflow lanza $AGENTS agent() en paralelo y solo $ISOLATED con isolation: 'worktree'. Si esos agentes ESCRIBEN archivos, agrega { isolation: 'worktree' } a cada agent() para que no se pisen en disco; si solo leen, ignora este aviso. Ref: ADR-0073."
+jq -n --arg ctx "$MSG" '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $ctx}}'
 exit 0

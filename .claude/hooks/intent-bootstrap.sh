@@ -38,7 +38,7 @@ mkdir -p "$ROOT/.claude/sessions"
 _lang_markers() {
   local dir="$1" depth="$2"
   find "$dir" -maxdepth "$depth" \
-    \( -name node_modules -o -name .git -o -name .venv -o -name vendor -o -name target \) -prune -o \
+    \( -name node_modules -o -name .git -o -name .venv -o -name vendor -o -name target -o -path "$dir/.claude/worktrees" \) -prune -o \
     -type f \( -name tsconfig.json -o -name package.json -o -name pyproject.toml -o -name setup.py \
                -o -name go.mod -o -name Cargo.toml -o -name pom.xml -o -name build.gradle -o -name build.gradle.kts \) \
     -print 2>/dev/null \
@@ -99,7 +99,7 @@ done
 # Items are convention-free: structure + file listings only. Commands run from
 # the project root (task-verify.sh). Excluded dirs are pruned by name — a
 # `grep -v .git` would also drop any path containing e.g. "digital".
-PRUNE="\( -name node_modules -o -name .git -o -name __pycache__ -o -name .venv -o -name vendor -o -name target \) -prune -o"
+PRUNE="\( -name node_modules -o -name .git -o -name __pycache__ -o -name .venv -o -name vendor -o -name target -o -path ./.claude/worktrees \) -prune -o"  # worktrees: ADR-0073
 ITEMS=()
 
 if [ "$BASE_MODE" = "analysis" ]; then

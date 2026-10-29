@@ -1566,3 +1566,27 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   `intent-bootstrap.sh` agrega `<docs>/plans` a `analysis_write_paths`.
 - Los tests de `ci-service.sh`/azure-sim fallan en macOS porque usan `mapfile` (no existe en bash 3.2).
   Esta falla ya existía y es independiente de este cambio.
+
+### Worktrees nativos de Claude Code en el harness — ADR-0073 (2026-10-29)
+- **Decisión:** NO hooks `WorktreeCreate`/`WorktreeRemove` (reemplazan la creación nativa, apagan
+  `.worktreeinclude`, se propagarían a todos los consumers). Vía nativa + hooks conscientes de worktrees.
+- **Verificado en vivo (Fase 0, CC 2.1.312):** el cwd del PROCESO hook sigue al `cd` del Bash tool;
+  `CLAUDE_PROJECT_DIR` se queda en la raíz principal incluso en un subagente aislado; `isolation` sí llega en
+  `tool_input` de Agent; el subagente comparte session id; sus eventos traen `agent_id` (el hilo principal no);
+  NO hay variable de entorno que distinga principal de subagente (`CLAUDE_CODE_CHILD_SESSION=1` en ambos).
+- **Bug reproducido en vivo:** tras `cd scripts`, `skill-load-gate` bloqueó `Agent` (buscaba el marker
+  relativo al cwd). Y los hooks basados en `.cwd` crean `.claude/` basura en subdirectorios — ya se había
+  commiteado en `vendor/hlwss/.claude/`. **Regla:** el estado de sesión SIEMPRE vía `state_root` de la lib.
+- **Bug preexistente encontrado por los tests:** `adr-gate.sh` (`set -euo pipefail`) salía con exit 1 cuando
+  no había ADRs nuevos (grep sin match en una asignación) → error NO bloqueante → el gate fallaba abierto
+  justo en el caso a bloquear. **Lección:** en hooks con `set -e`, toda `X=$(… | grep …)` necesita `|| true`;
+  y exit 1 ≠ exit 2 en Claude Code.
+- **Lecciones de diseño (9 rondas de validación adversarial):** comparar paths siempre canonizados (doble
+  montaje `/case-sensitive` → `/Volumes/case-sensitive`; git imprime físicos); worktree enlazado ⇔
+  `--git-dir` ≠ `--git-common-dir` (la primera entrada de `worktree list` miente en submódulos y
+  `--separate-git-dir`); `permissionDecision: "allow"` auto-aprueba el tool — un hook de solo-aviso usa
+  `additionalContext` sin decisión; stderr con exit 0 en PreToolUse nunca llega al modelo; un ADR staged y
+  luego editado queda `AM` (el gate aceptaba solo `A `).
+- **Operativo:** no hacer `cd` persistente en Bash durante una sesión con estos hooks viejos — usar rutas
+  absolutas o subshells `( cd … )`. `protect-skill-gate-bypass.sh` da falso positivo con cualquier `>` si el
+  comando nombra el archivo protegido (registrado como fuera de alcance).

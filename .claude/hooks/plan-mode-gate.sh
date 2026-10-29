@@ -8,20 +8,32 @@
 
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
 
 [ -z "$SESSION_ID" ] && exit 0
-[ -f ".claude/no-plan-gate" ] && exit 0   # escape hatch manual
+
+# ADR-0073: estado en la raíz canónica de la sesión, no en el cwd del proceso
+# (que sigue a un `cd` o a un worktree).
+LIB="$(dirname "${BASH_SOURCE[0]}")/task-scope-lib.sh"
+ROOT=""
+if [ -f "$LIB" ] && . "$LIB" && declare -F state_root >/dev/null; then
+  ROOT=$(state_root "$CWD")
+fi
+ROOT=${ROOT:-$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)}
+ROOT=${ROOT:-$CWD}
+
+[ -f "$ROOT/.claude/no-plan-gate" ] && exit 0   # escape hatch manual
 
 SESSION_ID=$(echo "$SESSION_ID" | tr -cd 'a-zA-Z0-9_-')
 [ -z "$SESSION_ID" ] && exit 0
 
-SESSIONS_DIR=".claude/sessions"
+SESSIONS_DIR="$ROOT/.claude/sessions"
 MARKER="${SESSIONS_DIR}/${SESSION_ID}-plan-gate"
 
 mkdir -p "$SESSIONS_DIR"
 
 # Asegurar sessions/ en .claude/.gitignore
-CLAUDE_GITIGNORE=".claude/.gitignore"
+CLAUDE_GITIGNORE="$ROOT/.claude/.gitignore"
 if [ ! -f "$CLAUDE_GITIGNORE" ] || ! grep -qF 'sessions/' "$CLAUDE_GITIGNORE" 2>/dev/null; then
   echo 'sessions/' >> "$CLAUDE_GITIGNORE"
 fi

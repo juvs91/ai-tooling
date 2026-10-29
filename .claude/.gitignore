@@ -6,3 +6,4 @@ task-scope.json
 sync.log
 .sync.lock/
 .last_hook_sync
+/worktrees/

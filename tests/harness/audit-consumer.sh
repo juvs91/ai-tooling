@@ -74,8 +74,8 @@ fi
 echo "══ A7: harness completo en consumer — doble corrida, sin side effects ══"
 if [ -f "$CONSUMER/.claude/hooks/auto-sync-daily.sh" ] && git -C "$CONSUMER" rev-parse >/dev/null 2>&1; then
   GIT_BEFORE=$(git -C "$CONSUMER" status --porcelain | shasum -a 256)
-  echo "{\"cwd\":\"$CONSUMER\"}" | bash "$CONSUMER/.claude/hooks/auto-sync-daily.sh" >/dev/null 2>&1; E1=$?
-  echo "{\"cwd\":\"$CONSUMER\"}" | bash "$CONSUMER/.claude/hooks/auto-sync-daily.sh" >/dev/null 2>&1; E2=$?
+  echo "{\"cwd\":\"$CONSUMER\"}" | CLAUDE_PROJECT_DIR="$CONSUMER" bash "$CONSUMER/.claude/hooks/auto-sync-daily.sh" >/dev/null 2>&1; E1=$?
+  echo "{\"cwd\":\"$CONSUMER\"}" | CLAUDE_PROJECT_DIR="$CONSUMER" bash "$CONSUMER/.claude/hooks/auto-sync-daily.sh" >/dev/null 2>&1; E2=$?
   GIT_AFTER=$(git -C "$CONSUMER" status --porcelain | shasum -a 256)
   [ "$E1" = "0" ] && [ "$E2" = "0" ] && ok "doble corrida exit 0" || bad "exit codes: $E1/$E2"
   [ "$GIT_BEFORE" = "$GIT_AFTER" ] && ok "working tree intacto tras 2 corridas" || bad "el harness tocó el working tree"

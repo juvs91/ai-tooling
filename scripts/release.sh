@@ -148,7 +148,8 @@ require_project_dir() {
 
 # Verifica que el repo tiene historial completo (CI shallow clone fix)
 require_full_history() {
-  if [[ -f .git/shallow ]]; then
+  # --git-path: correcto desde subdirectorios y worktrees (.git es archivo ahí) — ADR-0073
+  if [[ -f "$(git rev-parse --path-format=absolute --git-path shallow)" ]]; then
     info "shallow clone detectado — fetching full history"
     local remote; remote=$(resolve_remote)
     git fetch --unshallow "$remote" --quiet
@@ -564,7 +565,7 @@ cmd_cherry() {
     if git cherry-pick "$sha" 2>/dev/null; then
       ok "$t aplicado"
       cherry_count=$((cherry_count + 1))
-    elif [[ -f .git/CHERRY_PICK_HEAD ]]; then
+    elif [[ -f "$(git rev-parse --path-format=absolute --git-path CHERRY_PICK_HEAD)" ]]; then
       # Distinguir commit vacío (ya aplicado de otra forma) de conflicto real
       local conflicts; conflicts=$(git diff --name-only --diff-filter=U 2>/dev/null)
       if [[ -z "$conflicts" ]]; then
@@ -722,6 +723,27 @@ _replicate_sparse_checkout() {
   info "sparse checkout replicado en el worktree: $paths"
 }
 
+# Checkout principal (primera entrada de `git worktree list`), para que los
+# paths por defecto de worktree no dependan del cwd (desde un worktree anidado
+# en .claude/worktrees/ creaban el nuevo DENTRO de él) — ADR-0073
+_main_worktree_dir() {
+  git worktree list --porcelain | awk '/^worktree /{sub(/^worktree /,""); print; exit}'
+}
+
+# Rama de worktree "mergeada" solo si tiene ≥1 commit PROPIO contenido en el
+# trunk. Un worktree nativo recién creado (sin commits) es ancestro del trunk y
+# antes salía como candidato. El commit de creación sale del reflog de la rama;
+# sin reflog (expirado, rama traída del remoto) → desconocido, no se lista.
+_wt_branch_merged() {
+  local br="$1" target="$2" created own
+  git rev-parse --verify -q "$br" >/dev/null || return 1
+  created=$(git reflog show --format=%H "refs/heads/$br" 2>/dev/null | tail -1)
+  [[ -n "$created" ]] || return 1
+  own=$(git rev-list --count "$created..$br" 2>/dev/null || echo 0)
+  [[ "$own" -ge 1 ]] || return 1
+  git merge-base --is-ancestor "$br" "$target" 2>/dev/null
+}
+
 cmd_worktree() {
   local sub="${1:-list}"
   shift || true
@@ -734,7 +756,7 @@ cmd_worktree() {
     add)
       local branch="${1:-}"
       require_arg "$branch" "rama requerida\n  uso: release.sh worktree add <rama> [<path>]"
-      local wt_path="${2:-../${branch//\//-}}"
+      local wt_path="${2:-$(_main_worktree_dir)/../${branch//\//-}}"
       git worktree add "$wt_path" "$branch"
       _replicate_sparse_checkout "$wt_path"
       ok "worktree creado en: $wt_path"
@@ -743,7 +765,7 @@ cmd_worktree() {
     add-branch)
       local branch="${1:-}"
       require_arg "$branch" "nueva rama requerida\n  uso: release.sh worktree add-branch <rama> [<path>] [<base>]"
-      local wt_path="${2:-../${branch//\//-}}"
+      local wt_path="${2:-$(_main_worktree_dir)/../${branch//\//-}}"
       local base="${3:-$(trunk_branch)}"
       git worktree add "$wt_path" -b "$branch" "$base"
       _replicate_sparse_checkout "$wt_path"
@@ -767,19 +789,21 @@ cmd_worktree() {
       local remote; remote=$(resolve_remote)
       git fetch "$remote" "$trunk" --quiet 2>/dev/null || true
 
-      info "candidatos a limpiar (ramas ya mergeadas a $trunk):"
-      local found=0
+      info "candidatos a limpiar (ramas con commits propios ya mergeados a $trunk):"
+      local found=0 wt_path="" wt_branch="" line
       while IFS= read -r line; do
-        local wt_path wt_branch
-        wt_path=$(echo "$line" | awk '{print $1}')
-        wt_branch=$(echo "$line" | grep -oE '\[[^]]+\]' | tr -d '[]')
-        [[ -z "$wt_branch" ]] && continue
-        git rev-parse "$wt_branch" &>/dev/null || continue
-        if git merge-base --is-ancestor "$wt_branch" "$remote/$trunk" 2>/dev/null; then
-          warn "  $wt_path  [$wt_branch]"
-          found=1
-        fi
-      done < <(git worktree list | tail -n +2)
+        case "$line" in
+          "worktree "*) wt_path="${line#worktree }"; wt_branch="" ;;
+          "branch refs/heads/"*) wt_branch="${line#branch refs/heads/}" ;;
+          "")
+            if [[ -n "$wt_branch" ]] && _wt_branch_merged "$wt_branch" "$remote/$trunk"; then
+              warn "  $wt_path  [$wt_branch]"
+              found=1
+            fi
+            wt_path=""; wt_branch=""
+            ;;
+        esac
+      done < <(git worktree list --porcelain | awk 'NR==1,/^$/{next} {print} END{print ""}')
 
       [[ $found -eq 0 ]] && ok "ningún candidato" || true
       info "para eliminar: ./scripts/release.sh worktree rm <path>"

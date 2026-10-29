@@ -21,7 +21,19 @@
 set -euo pipefail
 
 # ── Configuración ──────────────────────────────────────────────────────────────
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo ".")"
+# ADR-0073: raíz = repo donde vive ESTE script (no el cwd del proceso, que tras
+# un `cd` o dentro de un worktree apunta a otro árbol). Fallback: git del cwd.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+[ -d "$REPO_ROOT/.agents" ] || REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo ".")"
+
+# Nunca sincronizar dentro de un worktree enlazado (git-dir ≠ common-dir):
+# sobrescribiría los .agents/skills/ TRACKEADOS de esa rama.
+_GD=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)
+_GC=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+if [ -n "$_GD" ] && [ "$_GD" != "$_GC" ]; then
+  exit 0
+fi
+
 MARKER="$REPO_ROOT/.ai-tooling"
 LAST_SYNC="$REPO_ROOT/.agents/.last_sync"
 CACHE_DIR="$REPO_ROOT/.agents/_repo"

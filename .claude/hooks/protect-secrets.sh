@@ -22,8 +22,19 @@ FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 # 1. Proteger archivos trackeados por git (no gitignored)
 #    git check-ignore -q retorna 0 si el archivo ES ignorado, 1 si NO lo es
 #    Usa REPO_ROOT + ruta relativa para evitar fallos con rutas absolutas
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
-REL_PATH="${FILE_PATH#$REPO_ROOT/}"
+#    ADR-0073: el repo es el del ARCHIVO (no el cwd del proceso): con
+#    .claude/worktrees/ gitignorado en el principal, un archivo de un worktree
+#    anidado se veía "ignorado" y se saltaba el escaneo. Fuera de un repo se
+#    sigue escaneando (fail-closed, igual que antes).
+INPUT_CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
+LIB="$(dirname "${BASH_SOURCE[0]}")/task-scope-lib.sh"
+REPO_ROOT=""
+if [ -f "$LIB" ] && . "$LIB" && declare -F repo_of_file >/dev/null; then
+  repo_of_file "$FILE_PATH" "$INPUT_CWD"
+  if [ -n "$RF_TOP" ]; then REPO_ROOT="$RF_TOP"; FILE_PATH="$RF_FILE"; fi
+fi
+REPO_ROOT=${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo ".")}
+REL_PATH="${FILE_PATH#"$REPO_ROOT"/}"
 if ! git -C "$REPO_ROOT" check-ignore -q "$REL_PATH" 2>/dev/null; then
   # El archivo NO está gitignored → verificar si el contenido tiene secrets
   CONTENT=$(echo "$INPUT" | jq -r '.tool_input.content // .tool_input.new_string // empty')

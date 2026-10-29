@@ -15,7 +15,8 @@ version: "1.0.0"
 **Nunca uses `Agent` tool directo para análisis paralelo del frontend.**  
 Usa `Workflow` tool con `parallel(agent(), { isolation: 'worktree' })`.
 
-El `Agent` tool no soporta `isolation: 'worktree'`. Sin isolation, agentes concurrentes compiten en el mismo working tree y Kimi K2 genera `tool_use` malformados bajo carga. Tasa de crash documentada: 67%.
+El `Workflow` tool orquesta el fan-out por zonas de forma determinista (fases, labels, resultados agregados); por eso es la vía para este análisis. Sin isolation, agentes concurrentes compiten en el mismo working tree y Kimi K2 genera `tool_use` malformados bajo carga. Tasa de crash documentada: 67%.
+(El `Agent` tool **sí** acepta `isolation: "worktree"` — verificado en ADR-0073; para un subagente suelto que escribe archivos, úsalo ahí.)
 
 ---
 

@@ -18,6 +18,7 @@
 #      settings.local.json -> huérfanos y duplicados cross-file
 #   4. drift (informativo): sha256 de distributables del toolbox vs copias locales
 #   5. doclens: VERSION del toolbox vs scripts/.doclens-version
+#   6. worktrees (ADR-0073): .worktreeinclude, huérfanos, conteo, ramas mergeadas
 set -uo pipefail
 
 REPO_ROOT="${1:-$(pwd)}"
@@ -106,6 +107,35 @@ if [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING_DIR/doclens/VERSION" ]; then
   DV_SRC=$(cat "$AI_TOOLING_DIR/doclens/VERSION")
   DV_DST=$(cat "$REPO_ROOT/scripts/.doclens-version" 2>/dev/null || echo "none")
   [ "$DV_SRC" != "$DV_DST" ] && warn "doclens desactualizado: $DV_DST -> $DV_SRC (scripts/sync-doclens.sh)"
+fi
+
+# ── 6. worktrees (ADR-0073) ───────────────────────────────────────────────────
+# Solo lectura y sin fetch: compara contra refs locales (pueden estar viejas).
+if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  [ -f "$REPO_ROOT/.worktreeinclude" ] \
+    || warn "sin .worktreeinclude — los worktrees nativos nacen sin .env/settings.local.json (ver CLAUDE.md, instalación)"
+
+  PRUNABLE=$(git -C "$REPO_ROOT" worktree prune --dry-run 2>&1)
+  [ -n "$PRUNABLE" ] && warn "worktrees huérfanos (dir borrado a mano): git worktree prune"
+
+  WT_COUNT=$(git -C "$REPO_ROOT" worktree list --porcelain | grep -c '^worktree ')
+  WT_COUNT=$((WT_COUNT - 1))   # sin el checkout principal
+  [ "$WT_COUNT" -gt 4 ] && warn "$WT_COUNT worktrees activos (>4 suele indicar trabajo estancado)"
+
+  # Mergeado = ≥1 commit propio (desde la creación de la rama, por reflog)
+  # contenido en el trunk local. Un worktree nativo recién creado no cuenta.
+  TRUNK=$(git -C "$REPO_ROOT" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
+  TRUNK=${TRUNK:-$(git -C "$REPO_ROOT" rev-parse --verify -q master >/dev/null && echo master || echo main)}
+  MERGED=""
+  while IFS= read -r br; do
+    [ -z "$br" ] && continue
+    created=$(git -C "$REPO_ROOT" reflog show --format=%H "refs/heads/$br" 2>/dev/null | tail -1)
+    [ -n "$created" ] || continue
+    own=$(git -C "$REPO_ROOT" rev-list --count "$created..$br" 2>/dev/null || echo 0)
+    [ "$own" -ge 1 ] || continue
+    git -C "$REPO_ROOT" merge-base --is-ancestor "$br" "$TRUNK" 2>/dev/null && MERGED="$MERGED $br"
+  done < <(git -C "$REPO_ROOT" worktree list --porcelain | awk 'NR==1,/^$/{next} /^branch refs\/heads\//{sub(/^branch refs\/heads\//,""); print}')
+  [ -n "$MERGED" ] && say "worktrees con rama ya mergeada a $TRUNK (candidatos a limpiar):$MERGED"
 fi
 
 # ── Resumen ───────────────────────────────────────────────────────────────────

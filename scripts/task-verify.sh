@@ -16,11 +16,18 @@ export TASK_VERIFY_RUNNING=1
 # Correr desde la raíz del repo para que los comandos relativos del
 # completion_checklist funcionen desde cualquier cwd. Raíz por git y no por
 # dirname "$0": scripts/ suele estar symlinkeado en ~/.local/bin.
+ORIG_CWD="$PWD"
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 1
 
+# ADR-0073: desde Bash no existe $CLAUDE_PROJECT_DIR — el scope se ubica por
+# session id (scope_locate) partiendo del cwd ORIGINAL, así se encuentra aunque
+# estemos en un worktree o la sesión sea de un subproyecto.
 LIB=".claude/hooks/task-scope-lib.sh"
-if [ -f "$LIB" ]; then
-  source "$LIB"
+HAS_LOCATE=0
+if [ -f "$LIB" ] && . "$LIB" && declare -F scope_locate >/dev/null; then
+  HAS_LOCATE=1
+  SCOPE_FILE=$(scope_locate "$ORIG_CWD" "${CLAUDE_CODE_SESSION_ID:-}")
+elif declare -F scope_file_for_session >/dev/null; then
   SCOPE_FILE=$(scope_file_for_session "." "${CLAUDE_CODE_SESSION_ID:-}")
 else
   SCOPE_FILE=".claude/task-scope.json"
@@ -86,8 +93,28 @@ if [ $FAIL -eq 0 ]; then
       echo "→ No code changed. No tests required."
       ;;
   esac
-  rm -f "$SCOPE_FILE"
-  echo "→ $SCOPE_FILE borrado — scope abierto para la siguiente tarea."
+  # ADR-0073: un subagente con isolation:'worktree' comparte el session id del
+  # padre — borrar aquí cerraría el scope del padre a mitad de su tarea. Solo
+  # se borra si este toplevel es el del hilo principal (registro main-top que
+  # escribe track-skill-load.sh); sin registro, solo fuera de un worktree enlazado.
+  CAN_DELETE=1
+  if [ "$HAS_LOCATE" = "1" ]; then
+    SID=$(printf '%s' "${CLAUDE_CODE_SESSION_ID:-}" | tr -cd 'a-zA-Z0-9_-')
+    MAIN_TOP_FILE="$(dirname "$SCOPE_FILE")/${SID}-main-top"
+    HERE=$(canon_path "$PWD")
+    if [ -n "$SID" ] && [ -f "$MAIN_TOP_FILE" ]; then
+      MAIN_TOP=$(canon_path "$(head -1 "$MAIN_TOP_FILE")")
+      [ "$HERE" = "$MAIN_TOP" ] || CAN_DELETE=0
+    elif is_linked_worktree "$HERE"; then
+      CAN_DELETE=0
+    fi
+  fi
+  if [ "$CAN_DELETE" = "1" ]; then
+    rm -f "$SCOPE_FILE"
+    echo "→ $SCOPE_FILE borrado — scope abierto para la siguiente tarea."
+  else
+    echo "→ $SCOPE_FILE conservado: este no es el worktree del hilo principal (subagente aislado)."
+  fi
   exit 0
 else
   echo ""

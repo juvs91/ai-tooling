@@ -3,6 +3,9 @@
 - **Estado:** Aceptado
 - **Fecha:** 2026-07-02
 - **Autor:** jeguzman
+- **Enmendado por:** `ADR-0073-worktrees-nativos-harness.md` (2026-10-29) — worktrees nativos
+  de Claude Code (`EnterWorktree`, `isolation: 'worktree'`); corrige la afirmación de que el tool
+  Agent no soporta `isolation` y el aviso de `worktree-isolation-gate.sh` (no llegaba al modelo).
 - **Nota:** renumerado de ADR-0008 a ADR-0044 el 2026-08-03 — ese número quedó duplicado con
   `ADR-0008-plan-lock-implicit-exit-signal4.md` (dominio Proxy, sin relación). Contenido sin
   cambios, solo el número y sus referencias cruzadas.

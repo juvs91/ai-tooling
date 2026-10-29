@@ -478,7 +478,32 @@ await parallel(subtasks.map(t => () =>
 ))
 ```
 
-El hook `.claude/hooks/worktree-isolation-gate.sh` (nuevo, ADR-0044) advierte si detecta `parallel(agent())` sin `isolation: 'worktree'`.
+El hook `.claude/hooks/worktree-isolation-gate.sh` (ADR-0044, corregido en ADR-0073) avisa al modelo vía `additionalContext` cuando un Workflow lanza más `agent()` en paralelo que los que llevan `isolation: 'worktree'`. El tool `Agent` también acepta `isolation: "worktree"` para un subagente suelto que escribe archivos.
+
+### Worktrees nativos de Claude Code (ADR-0073)
+
+Además de `release.sh worktree` (worktrees manuales, normalmente hermanos `../wt-x`), Claude Code crea
+worktrees **nativos** en `<repo>/.claude/worktrees/<nombre>/` (rama `worktree-<nombre>`):
+
+| Vía | Cuándo |
+|-----|--------|
+| `EnterWorktree` / `claude --worktree` | Trabajar una tarea aislada en la sesión actual sin tocar tu árbol |
+| `Agent` con `isolation: "worktree"` | Un subagente que escribe archivos en paralelo a ti |
+| `agent(…, { isolation: 'worktree' })` en Workflow | Fan-out de agentes que escriben |
+| `release.sh worktree add-branch` | Hotfix/rama de larga vida que vas a pushear y mantener días |
+
+- **Salida:** `ExitWorktree` con `action: "keep"` o `"remove"`. Haz **commit antes** de `remove`:
+  `discard_changes: true` lo bloquea `block-dangerous.sh` por diseño (descartar trabajo es decisión humana).
+- **Archivos no trackeados:** `.worktreeinclude` (raíz, sintaxis gitignore) copia `.env`, `profile-envs/`,
+  `.claude/settings.local.json`, etc. al crear el worktree — solo lo que está gitignorado. Copia única, no
+  se re-sincroniza.
+- **Settings útiles** (`.claude/settings.json`): `worktree.sparsePaths` (monorepos con sparse — incluir
+  `.claude`), `worktree.symlinkDirectories` (ej. `node_modules`), `worktree.baseRef` (`fresh` | `head`).
+- **`.claude/.gitignore`** debe contener `/worktrees/` (si no, `git add -A` mete un gitlink embebido).
+- **El harness funciona dentro del worktree:** los markers de sesión, scope y quality-state viven en el
+  checkout principal (`state_root`); `scope-gate`, `adr-gate` y `protect-secrets` evalúan el archivo contra
+  su propio worktree; `sync_skills`/`auto-sync-daily` no corren dentro de un worktree enlazado.
+- **No levantes el proxy desde un worktree** (`container_name` y puerto fijos chocan con el stack principal).
 
 ### Reglas de disciplina
 

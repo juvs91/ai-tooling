@@ -193,7 +193,7 @@ Claude Code ejecuta estos scripts automáticamente. **Contrato de input: JSON vi
 | `config-protection.sh` | PreToolUse | Edit\|Write\|MultiEdit | Bloquea editar: `pyproject.toml`, `.eslintrc*`, `.prettierrc*`, `ruff.toml`, `.pre-commit-config.yaml` |
 | `protect-secrets.sh` | PreToolUse | Edit\|Write\|MultiEdit | Bloquea escribir secrets en archivos trackeados por git |
 | `adr-gate.sh` | PreToolUse | Edit\|Write | Bloquea edits a `vendor/` y `.agents/` sin ADR staged |
-| `worktree-isolation-gate.sh` | PreToolUse | Workflow\|Agent | Advierte si `parallel(agent())` no usa `isolation: 'worktree'`; redirige Agent→Workflow para paralelismo (solo avisa) |
+| `worktree-isolation-gate.sh` | PreToolUse | Workflow | Avisa al modelo (`additionalContext`, sin `permissionDecision`) si un Workflow lanza más `agent()` en paralelo que los que llevan `isolation: 'worktree'` (solo avisa, ADR-0073) |
 | `quality-enforce.sh` | PreToolUse | Edit\|Write | Bloquea edits si hay errores pendientes en `.claude/quality-state/` |
 | `scope-gate.sh` | PreToolUse | Edit\|Write | Bloquea edits fuera del scope en `.claude/task-scope.json` |
 | `ts-quality-gate.sh` | PostToolUse | Edit\|Write | Corre `tsc` tras edits de `*.ts/*.tsx`, guarda estado para ts-enforce |
@@ -317,3 +317,7 @@ Las partes específicas del proyecto van en `completion_checklist` del `task-sco
 2. Copiar `scripts/task-verify.sh` de `ai-tooling/scripts/` al proyecto
 3. Copiar `.claude/hooks/scope-gate.sh` y `.claude/hooks/task-scope-lib.sh` de
    `ai-tooling/.claude/hooks/` al proyecto
+4. Worktrees nativos (ADR-0073), a mano — `install-hooks.sh` no los distribuye:
+   agregar `/worktrees/` a `.claude/.gitignore` y copiar `.worktreeinclude` (ajustando la lista
+   a los archivos gitignorados que el proyecto necesita en cada worktree, ej. `.env`).
+   `harness-doctor.sh` avisa si falta.

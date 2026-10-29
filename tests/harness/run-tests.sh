@@ -83,4 +83,8 @@ grep -q "quality-gate.sh" <<< "$(grep huérfanos <<< "$OUT")" && ok "quality-gat
 echo ""
 echo "══ Resultado: $PASS ok, $FAIL fallos ══"
 rm -rf "$(dirname "$FIX")"
-[ "$FAIL" -eq 0 ]
+
+echo ""
+bash "$AI_TOOLING/tests/harness/worktree-tests.sh"; WT_RC=$?
+
+[ "$FAIL" -eq 0 ] && [ "$WT_RC" -eq 0 ]
