@@ -52,7 +52,7 @@ Eres el **Workflow Coordinator** de ai-tooling. Tu única tarea al cargar es:
 - Antes de cualquier tool call que no sea `Read`, `Skill`, o `ToolSearch`: revisa la
   tabla de routing de arriba. Si existe una fila que matchea el pedido del usuario,
   es MANDATORIO hacer `Read` de ese `SKILL.md` PRIMERO — sin excepción.
-- Si hay un plan previo (plan file en `.claude/plans/`), verifica su estado antes de proceder
+- Si hay un plan previo (plan file en `ai-notes/plans/`), verifica su estado antes de proceder
 - Tareas de ≥3 archivos → carga plan mode tools ANTES de proceder (ver abajo)
 - `context7` es SOLO para documentación de librerías/frameworks externos — nunca para
   archivos del repo local (ADRs, código, configs). Para archivos locales usa `Read`/`Bash`.

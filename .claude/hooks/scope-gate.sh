@@ -78,9 +78,9 @@ case "$BASE_MODE" in
     else
       # Generic fallback when analysis_write_paths not set
       case "$RELATIVE" in
-        .claude/plans/*|findings/*|notes/*) exit 0 ;;
+        .claude/plans/*|ai-notes/plans/*|findings/*|notes/*) exit 0 ;;
       esac
-      ALLOWED_DISPLAY=".claude/plans/  findings/  notes/"
+      ALLOWED_DISPLAY=".claude/plans/  ai-notes/plans/  findings/  notes/"
     fi
 
     echo "scope-gate[analysis]: '$RELATIVE' is outside analysis scope." >&2
@@ -132,6 +132,11 @@ case "$BASE_MODE" in
     # Fall through to allowed_patterns[] check below
     ;;
 
+esac
+
+# build|full: plan files are always writable, regardless of allowed_patterns[]
+case "$RELATIVE" in
+  ai-notes/plans/*|.claude/plans/*) exit 0 ;;
 esac
 
 # build|full: respect allowed_patterns[] from task-scope.json

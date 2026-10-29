@@ -87,9 +87,10 @@ for d in ai-notes docs notes documentation wiki; do
 done
 
 # ── analysis_write_paths — passed to scope-gate.sh (analysis mode) ───────────
-# Always includes .claude/plans. Adds findings/ and analysis/ under each docs dir.
+# Always includes .claude/plans (legacy). Adds plans/, findings/ and analysis/ under each docs dir.
 WRITE_PATHS=(".claude/plans")
 for d in "${DOCS_DIRS[@]}"; do
+  WRITE_PATHS+=("${d}/plans")
   WRITE_PATHS+=("${d}/findings")
   WRITE_PATHS+=("${d}/analysis")
 done

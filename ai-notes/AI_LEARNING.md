@@ -1555,3 +1555,14 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
 - **Mutación enmascarada:** "error de listado = no existe" no se detectaba porque el fallo
   simulado de auth también rompía `az acr login`. Se agregó el modo `list` (login OK, listar
   falla). **Lección:** si una mutación no se detecta, revisar si otra falla la está tapando.
+
+### Planes fechados en `ai-notes/plans/` (2026-10-29, portado desde ai_by_design)
+- Regla nueva en CLAUDE.md § "Planes": `ai-notes/plans/AAAA-MM-DD-<tema>.md`, con `Estado:` como primera
+  línea después del título. Plan mode de CC sigue escribiendo su borrador en `~/.claude/plans/<aleatorio>.md`
+  (ADR-0028). **No** se usa `plansDirectory` porque el nombre aleatorio rompería la convención de fecha.
+  La copia fechada se hace a mano antes de `ExitPlanMode`.
+- Hueco encontrado al validar: `scope-gate.sh` en build/full con `allowed_patterns` bloqueaba escribir
+  planes. Ahora `ai-notes/plans/*` y `.claude/plans/*` se permiten siempre, salvo en validate.
+  `intent-bootstrap.sh` agrega `<docs>/plans` a `analysis_write_paths`.
+- Los tests de `ci-service.sh`/azure-sim fallan en macOS porque usan `mapfile` (no existe en bash 3.2).
+  Esta falla ya existía y es independiente de este cambio.

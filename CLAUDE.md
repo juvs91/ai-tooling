@@ -51,6 +51,19 @@ de deferred tools en `.claude/commands/workflow-coordinator.md`.
 
 ---
 
+## Planes — dónde y con qué formato (MANDATORY)
+
+- Todo plan va en `ai-notes/plans/` y el nombre del archivo empieza con la fecha de creación:
+  `AAAA-MM-DD-<tema>.md` (ej. `2026-10-29-planes-fechados-ai-notes.md`).
+- La primera línea después del título es `Estado:` (borrador, ejecutado o descartado, con fecha).
+  Al ejecutar o descartar el plan, actualiza esa línea y anótalo en `ai-notes/AI_LEARNING.md`.
+- Plan mode de Claude Code escribe su borrador en `~/.claude/plans/<nombre-aleatorio>.md` (ADR-0028).
+  No lo muevas: antes de `ExitPlanMode`, copia el mismo contenido a `ai-notes/plans/AAAA-MM-DD-<tema>.md`
+  con `Estado: borrador (fecha)`.
+- Ningún plan se ejecuta sin que el usuario diga "implementa" (o algo igual de explícito).
+
+---
+
 ## Mandatory: Read before working
 - ALWAYS read `ai-notes/AI_LEARNING.md` at the start of every session (if it exists)
 - ALWAYS read `AGENTS.md` antes de cualquier tarea no trivial — contiene la tabla de routing de skills (qué skill cargar para cada tipo de tarea)
@@ -274,7 +287,7 @@ Las partes específicas del proyecto van en `completion_checklist` del `task-sco
   automáticamente (ver abajo).
 
 ### Scope Discipline — la diferencia entre modos:
-- **analysis**: SOLO leer, contar, comparar, reportar. Write solo en `ai-notes/findings/` y `.claude/plans/`.
+- **analysis**: SOLO leer, contar, comparar, reportar. Write solo en `ai-notes/findings/` y `ai-notes/plans/`.
   **"Analizar X" ≠ "Documentar X".** No crear archivos fuera de esas rutas.
 - **build**: editar código en `allowed_patterns[]`. Correr tests al terminar.
 - **synthesize**: crear/editar documentación en `ai-notes/`, `docs/`, `*.md`. No editar código.
