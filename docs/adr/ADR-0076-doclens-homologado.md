@@ -1,0 +1,110 @@
+# ADR-0076: doclens homologado — misma estructura en ai-tooling y consumers, listo para usar
+
+- **Estado:** Aceptado — implementado 2026-10-30
+- **Fecha:** 2026-10-30
+- **Autor:** Juve + Claude
+- **Relacionado:** ADR-0072 (sync del harness), ADR-0073 (worktrees), plan
+  `ai-notes/plans/2026-10-30-homologar-doclens.md`
+
+---
+
+## Contexto
+
+doclens (procesa PDFs e imágenes antes de que el LLM los lea; el hook es `doc-guard.sh`) tenía dos
+estructuras de archivos:
+
+| | ai-tooling | consumer |
+|---|---|---|
+| motor | `doclens/doclens.py` | `scripts/doclens.py` |
+| dependencias | `doclens/requirements.txt` | `scripts/requirements-doc-tools.txt` |
+| versión | `doclens/VERSION` | `scripts/.doclens-version` |
+| venv | (a mano) | `scripts/.venv-doc-tools` |
+
+La diferencia ya causó un bug: en ai-tooling, doc-guard buscaba `scripts/doclens.py` y siempre caía al
+bloqueo manual. Además:
+- nadie creaba el venv en ai-tooling;
+- los digests `*.inspect/` ensuciaban git;
+- la sincronización solo comparaba `VERSION`, así que un adapter modificado sin subir la versión no llegaba
+  a los consumers.
+
+## Decisión
+
+1. **Una sola estructura, también en los consumers** (decisión del usuario: espejo completo):
+   ```
+   doclens/{doclens.py, requirements.txt, VERSION, README.md, sync.sh, adapters/, .gitignore}  ← versionados
+   doclens/.venv/                                                                              ← local
+   ```
+   `doclens/sync.sh` copia los archivos **versionados** de `ai-tooling/doclens` (`git ls-files`).
+   - Compara por **contenido**, no por `VERSION`.
+   - Respalda lo que pisa o borra en `.claude/.harness-backup-<ts>-doclens/`.
+   - Reemplaza archivo por archivo con `mv` desde un staging en el mismo filesystem, sin tocar `.venv/`
+     ni el lock.
+   - Si el destino es su propio repo (ai-tooling, o un consumer corriendo su copia), no copia nada: solo
+     asegura el venv. Así, `bash doclens/sync.sh` significa lo mismo en todos lados.
+2. **Migración de la estructura vieja con respaldo** (decisión del usuario).
+   - Solo aplica cuando hay rastros nuestros: `scripts/.doclens-version`, o un `scripts/doclens.py` con
+     `DOCLENS_VERSION`.
+   - Los 3 archivos van al respaldo y se quitan; el venv se **mueve** (sin red; `bin/python` sigue
+     funcionando).
+   - Un `scripts/doclens.py` ajeno no se toca.
+   - Avisa, sin editarlos, de los archivos versionados que siguen usando la ruta vieja. No cuentan el propio
+     doc-guard (que la usa a propósito como transición) ni `ai-notes/` y `docs/`.
+3. **Listo para usar, sin pasos manuales:**
+   - **Consumers:** `auto-sync-daily` (`SessionStart`, en segundo plano) registra doc-guard, deja el espejo
+     y crea el venv.
+   - **ai-tooling:** lo prepara `init.sh`. Además, **doc-guard lo crea solo** la primera vez que se lee un
+     PDF (`sync.sh --venv`), y eso también sirve de red de seguridad en los consumers.
+   - Un lock compartido (`doclens/.venv.lock`; se considera huérfano a los 10 min) evita dos instalaciones
+     simultáneas. Mientras otro proceso instala, doc-guard responde "se está preparando".
+   - Si la instalación falla, queda `doclens/.venv.failed` y no se reintenta durante 1 h (`--force`
+     reintenta).
+   - El venv se da por sano solo si importa `fitz`, `pdfplumber`, `pypdf` y `PIL`; uno roto se recrea.
+4. **El venv de doclens nunca toca el Python del proyecto.** Es propio y aislado: PyMuPDF es AGPL y no
+   debe entrar como dependencia del proyecto.
+   - Python base: `$DOCLENS_PYTHON`, luego `/usr/bin/python3`, luego `python3` del PATH (≥3.9). Se pasa
+     como ruta absoluta.
+   - Se ejecuta sin `VIRTUAL_ENV`, `CONDA_PREFIX`, `PYTHONPATH` ni `PYTHONHOME`, y con
+     `UV_PYTHON_DOWNLOADS=never` y `uv --no-config`: un `.python-version` de uv o pyenv del consumer no
+     interfiere.
+   - Usa uv si está disponible y, si no, `venv` + `python -m pip`.
+   - En doc-guard, `DOCLENS_PYTHON` permite usar un intérprete que ya tenga las dependencias.
+5. **Los digests se ignoran solos:** `<archivo>.inspect/.gitignore` = `*` (doclens 1.1.0). No hace falta
+   tocar el `.gitignore` raíz de ningún repo.
+6. **doc-guard y doctor:**
+   - doc-guard usa `doclens/` y, solo como transición, el par viejo de `scripts/`.
+   - El doctor usa `sync.sh --check` como única fuente de verdad.
+   - Los adapters de OpenCode y Kimi pasan a las rutas nuevas, también con arranque perezoso.
+
+## Alternativas descartadas
+
+- **Copiar a los consumers solo lo necesario para ejecutar:** es menos ruido, pero no es "la misma
+  estructura" (el usuario eligió el espejo completo).
+- **Instalar las dependencias en el venv del proyecto:** mezcla licencias y versiones.
+- **Mover todo el directorio en un solo `mv`:** rompería un venv en plena creación por otro proceso.
+
+## Consecuencias y límites
+
+- La migración deja cambios sin commitear en el consumer si tenía `scripts/doclens.py` versionado (lo
+  mismo que ya pasaba al subir de versión).
+- Los adapters copiados a mano con rutas viejas solo generan un aviso; no se editan archivos fuera de
+  `doclens/`.
+- El linter del consumer podría revisar `doclens/`. `doclens.py` pasa ruff con las reglas por defecto, y el
+  README indica cómo excluirlo.
+- Hace falta Python ≥3.9 (PyMuPDF). En un sistema con Python más viejo, doclens no queda disponible y
+  doc-guard da el mensaje manual.
+- Las actualizaciones llegan desde el clon local de ai-tooling (`git pull` ahí), igual que el resto del
+  harness.
+- El reemplazo es por archivo: si se interrumpe a mitad, la carpeta queda mezclada hasta la siguiente
+  corrida, que converge por contenido; el respaldo conserva lo anterior.
+- OCR (scans y texto en figuras) requiere tesseract, que no se instala solo; el smoke test lo avisa.
+
+## Verificación
+
+- `tests/harness/doclens-tests.sh` (57 casos): espejo, no-op, propagación sin subir `VERSION`, archivos
+  sobrantes, migración y venv movido, archivo ajeno intacto, modo toolbox, venv aislado de un
+  `VIRTUAL_ENV`/`CONDA_PREFIX`/`.python-version` del proyecto, venv roto, lock, fallo y `--force`,
+  arranque perezoso de doc-guard, `DOCLENS_PYTHON`, auto-sync real, motor real y ruff.
+- Mutaciones: venv sin aislar, archivo ajeno tomado como nuestro, doc-guard reportado como ruta vieja y
+  espejo verificado solo por lista: las 4 detectadas.
+- Suite completa en verde en macOS, Linux GNU, busybox y git 2.22.
+- En vivo: sin venv, un `Read` de PDF en ai-tooling creó el venv real con uv y redirigió al digest.

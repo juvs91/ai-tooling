@@ -1,0 +1,5 @@
+# Local, no versionado (ADR-0076): venv de doclens y su estado (lock / último fallo)
+.venv/
+.venv.lock/
+.venv.failed
+__pycache__/

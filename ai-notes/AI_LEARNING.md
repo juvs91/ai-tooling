@@ -1690,3 +1690,22 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   (auto-sync-daily: en ai-tooling se sincronizaría consigo mismo).
 - jq `select(... test("quality-gate"))` también matcheó `ts-quality-gate` y le pisó la descripción: en
   settings.json, matchear con `/nombre\.sh` anclado.
+
+### doclens homologado y listo para usar — ADR-0076 (2026-10-30)
+- **Misma estructura en todos lados:** `doclens/` (espejo de lo versionado en ai-tooling/doclens) + `doclens/.venv`
+  local. `doclens/sync.sh` compara por CONTENIDO (`git ls-files` + `cmp`), no por VERSION: antes, un adapter
+  cambiado sin subir versión nunca llegaba. Migra `scripts/doclens.py` (+ requirements, stamp) con respaldo y
+  MUEVE el venv viejo (sin red; `bin/python` sigue sirviendo; usar `python -m pip`, el shebang de pip se rompe).
+- **Listo para usar:** consumers vía auto-sync (SessionStart async); ai-tooling vía init.sh y, sobre todo,
+  arranque perezoso en doc-guard (`sync.sh --venv` en el primer Read de PDF). Lock compartido `.venv.lock`
+  (huérfano >10 min), `.venv.failed` evita reintentar cada Read por 1 h. Verificado en vivo con uv real.
+- **Python del consumer:** venv propio y aislado (PyMuPDF es AGPL). Base explícita
+  ($DOCLENS_PYTHON → /usr/bin/python3 → python3 del PATH, ≥3.9) y `env -u VIRTUAL_ENV -u CONDA_PREFIX
+  -u PYTHONPATH UV_PYTHON_DOWNLOADS=never uv --no-config`: un venv activado o un `.python-version` del
+  proyecto no deciden. Alpine 3.10 trae Python 3.7 → doclens no disponible ahí (PyMuPDF exige ≥3.9).
+- **Sidecars `.inspect/` con su propio `.gitignore` (`*`)** — como .ruff_cache; no hay que tocar el .gitignore
+  raíz de nadie.
+- **Tests sin red:** stub de python (responde -c / - / -m / procesa) + uv falso que registra args y entorno;
+  `python3` falso en el PATH para no depender del Python del sistema.
+- **`cut -c` en GNU cuenta bytes** (la "í" son 2) y en macOS caracteres: en tests comparar por prefijo con `case`.
+- El aviso de rutas viejas debe excluir el propio doc-guard (usa `scripts/` a propósito como transición).

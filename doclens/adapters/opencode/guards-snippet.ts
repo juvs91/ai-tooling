@@ -4,14 +4,19 @@
 // `read` directo de PDF (p. ej. si el modelo ignora el tool).
 
 import { execSync } from "node:child_process"
+import { existsSync } from "node:fs"
+import { join } from "node:path"
 
 // --- dentro de "tool.execute.before": async (input, output) => { ... } ---
 //
 //   const args = (output as any).args ?? {}
 //
 //   if (input.tool === "read" && /\.pdf$/i.test(args.filePath ?? "")) {
+//     // Estructura homologada (ADR-0076): doclens/ + doclens/.venv; sin venv, se prepara solo
+//     if (!existsSync(join(directory, "doclens/.venv/bin/python")))
+//       execSync("bash doclens/sync.sh --venv", { cwd: directory, stdio: "pipe" })
 //     const out = execSync(
-//       `scripts/.venv-doc-tools/bin/python scripts/doclens.py "${args.filePath}"`,
+//       `doclens/.venv/bin/python doclens/doclens.py "${args.filePath}"`,
 //       { cwd: directory }
 //     ).toString()
 //     const dir = out.match(/INSPECT_DIR=(.+)/)?.[1]

@@ -1,10 +1,11 @@
 import { tool } from "@opencode-ai/plugin"
 import path from "node:path"
+import { existsSync } from "node:fs"
 
 // doclens — custom tool nativo para OpenCode.
 // Instalación: copiar a .opencode/tools/doclens.ts del proyecto.
-// Envuelve scripts/doclens.py (copia sincronizada desde ai-tooling/doclens
-// via scripts/sync-doclens.sh). La red defensiva vive en el plugin de guards
+// Envuelve doclens/doclens.py (espejo de ai-tooling/doclens, misma estructura en
+// todos los repos — ADR-0076). La red defensiva vive en el plugin de guards
 // (ver guards-snippet.ts).
 export default tool({
   description:
@@ -22,8 +23,9 @@ export default tool({
       .describe("DPI de los renders de página (default 150)"),
   },
   async execute(args, context) {
-    const script = path.join(context.worktree, "scripts/doclens.py")
-    const py = path.join(context.worktree, "scripts/.venv-doc-tools/bin/python")
+    const script = path.join(context.worktree, "doclens/doclens.py")
+    const py = path.join(context.worktree, "doclens/.venv/bin/python")
+    if (!existsSync(py)) await Bun.$`bash ${path.join(context.worktree, "doclens/sync.sh")} --venv`.cwd(context.worktree).quiet()
     const dpi = args.dpi ?? 150
     const result = await Bun.$`${py} ${script} ${args.file} --dpi ${dpi}`.text()
     return result.trim()

@@ -43,8 +43,11 @@ export const Guards = async ({ directory }: { directory: string }) => {
       // doc-guard: PDF/imagen grande -> doclens, bloquear con instrucciones.
       // El backend Kimi rechaza PDFs crudos con HTTP 400 y envenena la sesión.
       if (input.tool === "read" && /\.pdf$/i.test(args.filePath ?? "")) {
+        // Estructura homologada (ADR-0076): doclens/ + doclens/.venv; sin venv, se prepara solo
+        if (!existsSync(join(directory, "doclens/.venv/bin/python")))
+          execSync("bash doclens/sync.sh --venv", { cwd: directory, stdio: "pipe" })
         const out = execSync(
-          `scripts/.venv-doc-tools/bin/python scripts/doclens.py "${args.filePath}"`,
+          `doclens/.venv/bin/python doclens/doclens.py "${args.filePath}"`,
           { cwd: directory }
         ).toString()
         const dir = out.match(/INSPECT_DIR=(.+)/)?.[1]

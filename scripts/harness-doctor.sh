@@ -17,7 +17,7 @@
 #   3. registry: hooks en .claude/hooks vs registrados en settings.json +
 #      settings.local.json -> huérfanos y duplicados cross-file
 #   4. drift (informativo): sha256 de distributables del toolbox vs copias locales
-#   5. doclens: VERSION del toolbox vs scripts/.doclens-version
+#   5. doclens: doclens/sync.sh --check del toolbox (espejo, migración pendiente — ADR-0076)
 #   6. worktrees (ADR-0073): .worktreeinclude, huérfanos, conteo, ramas mergeadas
 #   7. ADR gate git (ADR-0074): install_hooks.sh --check (falta / migración pendiente)
 set -uo pipefail
@@ -106,10 +106,13 @@ if [ -n "$AI_TOOLING_DIR" ] && [ -d "$AI_TOOLING_DIR/.claude/hooks" ]; then
 fi
 
 # ── 5. doclens ────────────────────────────────────────────────────────────────
-if [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING_DIR/doclens/VERSION" ]; then
-  DV_SRC=$(cat "$AI_TOOLING_DIR/doclens/VERSION")
-  DV_DST=$(cat "$REPO_ROOT/scripts/.doclens-version" 2>/dev/null || echo "none")
-  [ "$DV_SRC" != "$DV_DST" ] && warn "doclens desactualizado: $DV_DST -> $DV_SRC (scripts/sync-doclens.sh)"
+# Una sola fuente de verdad: el mismo --check que decide el sync
+if [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING_DIR/doclens/sync.sh" ]; then
+  DL=$(bash "$AI_TOOLING_DIR/doclens/sync.sh" "$REPO_ROOT" --check 2>&1 || true)
+  case "$DL" in
+    "doclens al día"*|"toolbox: solo venv"*) ;;
+    *) warn "doclens: $DL — bash $AI_TOOLING_DIR/doclens/sync.sh $REPO_ROOT" ;;
+  esac
 fi
 
 # ── 6. worktrees (ADR-0073) ───────────────────────────────────────────────────

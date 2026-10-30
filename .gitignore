@@ -50,6 +50,5 @@ cloud-provider-env/*
 .sfdx/
 vendor/**/.claude/
 
-# doclens (doc-guard.sh): venv local y digests generados junto a cada documento
-scripts/.venv-doc-tools/
+# doclens: sidecars de versiones < 1.1.0 (desde 1.1.0 se ignoran solos; el venv lo cubre doclens/.gitignore)
 *.inspect/

@@ -13,7 +13,7 @@
 # siguientes fallan — la sesión "muere" (ni /compact ni --resume la salvan).
 #
 # QUÉ HACE (filosofía: procesar primero, LLM después):
-# - .pdf  -> corre scripts/doclens.py, que genera <archivo>.inspect/ con
+# - .pdf  -> corre doclens/doclens.py, que genera <archivo>.inspect/ con
 #   index.md (metadata + texto + topología con coordenadas + tablas en
 #   markdown + OCR spa si el PDF es scan), pages/page-N.png (renders) y
 #   figures/ (imágenes embebidas + su texto vía OCR). Bloquea el Read
@@ -21,10 +21,11 @@
 # - imagen > 8 MB -> genera copia downscaled y redirige a ella.
 # - imagen normal -> permite (el modelo de visión la lee directo).
 #
-# Setup del processor (si falta el venv, el hook cae a modo manual):
-#   /usr/bin/python3 -m venv scripts/.venv-doc-tools
-#   scripts/.venv-doc-tools/bin/pip install -r scripts/requirements-doc-tools.txt
-#   brew install poppler tesseract tesseract-lang   # OCR multi-página (opcional)
+# Estructura (ADR-0076, igual en ai-tooling y en cada consumer): doclens/doclens.py +
+# doclens/.venv. Sin pasos manuales: si falta el venv, este hook lo prepara la primera
+# vez con `bash doclens/sync.sh --venv` (en consumers ya lo hace auto-sync al iniciar
+# sesión). OCR opcional: brew install tesseract tesseract-lang.
+# DOCLENS_PYTHON (opcional): intérprete ya preparado con las dependencias de doclens.
 
 INPUT=$(cat)
 TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
@@ -43,18 +44,46 @@ EXT=$(echo "$FILE_PATH" | grep -oiE '\.[a-z0-9]+$' | tr '[:upper:]' '[:lower:]')
 # worktrees (ADR-0073), donde el venv (gitignorado) no existe. CLAUDE_PROJECT_DIR
 # siempre apunta a la raíz principal.
 ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
-VENV_PY="$ROOT/scripts/.venv-doc-tools/bin/python"
-DOCLENS="$ROOT/scripts/doclens.py"
-# En el toolbox doclens vive en doclens/ (doclens/sync.sh no se copia a sí mismo)
-[ -f "$DOCLENS" ] || [ ! -f "$ROOT/doclens/doclens.py" ] || DOCLENS="$ROOT/doclens/doclens.py"
-REQS="scripts/requirements-doc-tools.txt"; [ "$DOCLENS" = "$ROOT/doclens/doclens.py" ] && REQS="doclens/requirements.txt"
+DOCLENS="$ROOT/doclens/doclens.py"; VENV_PY="$ROOT/doclens/.venv/bin/python"; SYNC="$ROOT/doclens/sync.sh"
+# Transición: consumer aún con la estructura vieja (sync_doclens:false o sin migrar)
+if [ ! -f "$DOCLENS" ] && [ -f "$ROOT/scripts/doclens.py" ]; then
+  DOCLENS="$ROOT/scripts/doclens.py"; VENV_PY="$ROOT/scripts/.venv-doc-tools/bin/python"; SYNC=""
+fi
+[ -n "${DOCLENS_PYTHON:-}" ] && [ -x "$DOCLENS_PYTHON" ] && VENV_PY="$DOCLENS_PYTHON"
+
+INSPECT_DIR=""
+run_doclens() {
+  local out; out=$("$VENV_PY" "$DOCLENS" "$FILE_PATH" 2>/dev/null)
+  INSPECT_DIR=$(echo "$out" | grep '^INSPECT_DIR=' | cut -d= -f2-)
+}
+bootstrap() {  # 0 venv listo · 1 no disponible · 3 otro proceso lo está preparando
+  [ -z "${DOCLENS_PYTHON:-}" ] && [ -n "$SYNC" ] && [ -f "$SYNC" ] || return 1
+  local lock="$ROOT/doclens/.venv.lock" rc=0
+  [ -d "$lock" ] && [ -z "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ] && return 3
+  [ -n "$(find "$ROOT/doclens/.venv.failed" -mmin -60 2>/dev/null)" ] && return 1
+  bash "$SYNC" "$ROOT" --venv >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] && return 3
+  [ "$rc" = 0 ] && [ -x "$VENV_PY" ]
+}
+process() {  # 0 digest en $INSPECT_DIR · 1 no disponible · 3 preparándose
+  if [ -x "$VENV_PY" ] && [ -f "$DOCLENS" ]; then
+    run_doclens; [ -n "$INSPECT_DIR" ] && return 0
+  fi
+  local b=0; bootstrap || b=$?   # venv ausente o roto: sync --venv lo crea/repara
+  [ "$b" = 0 ] || return "$b"
+  run_doclens; [ -n "$INSPECT_DIR" ]
+}
+preparing() {
+  echo "doclens se está preparando (primera vez, ~30 s: crea doclens/.venv). Reintenta el Read de $FILE_PATH en unos segundos." >&2
+  exit 2
+}
 
 # ── PDF: pre-procesar y redirigir ─────────────────────────────────────────
 if [ "$EXT" = ".pdf" ]; then
-  if [ -x "$VENV_PY" ] && [ -f "$DOCLENS" ]; then
-    OUT=$("$VENV_PY" "$DOCLENS" "$FILE_PATH" 2>/dev/null)
-    INSPECT_DIR=$(echo "$OUT" | grep '^INSPECT_DIR=' | cut -d= -f2-)
-    if [ -n "$INSPECT_DIR" ] && [ -f "$INSPECT_DIR/index.md" ]; then
+  PRC=0; process || PRC=$?
+  [ "$PRC" = 3 ] && preparing
+  if [ "$PRC" = 0 ]; then
+    if [ -f "$INSPECT_DIR/index.md" ]; then
       cat >&2 <<EOF
 PDF pre-procesado por doclens — NO leas el PDF original (el backend Kimi
 lo rechaza con 400 y la sesión muere). El documento ya está digerido en:
@@ -71,14 +100,17 @@ EOF
     fi
   fi
 
-  # Fallback manual (venv no instalado o processor falló)
+  # Fallback manual (sin red para el venv, o el processor falló)
+  if [ -n "$SYNC" ] && [ -f "$SYNC" ]; then
+    SETUP_MSG="Prepáralo (crea doclens/.venv): bash doclens/sync.sh --force"
+  else
+    SETUP_MSG="Estructura vieja en scripts/: ejecuta el sync de ai-tooling (doclens/sync.sh <repo>) para migrar a doclens/."
+  fi
   cat >&2 <<EOF
 BLOCKED: Read directo de PDF ($FILE_PATH).
 
 El backend Kimi de este repo NO acepta bloques PDF: HTTP 400 y sesión muerta.
-El processor doclens no está disponible. Instálalo:
-  /usr/bin/python3 -m venv scripts/.venv-doc-tools
-  scripts/.venv-doc-tools/bin/pip install -r $REQS
+El processor doclens no está disponible. $SETUP_MSG
 
 Ruta manual mientras tanto:
 1. Visual: sips -s format png -z 1684 1190 "$FILE_PATH" --out /tmp/pdf-page.png
@@ -92,10 +124,10 @@ fi
 case "$EXT" in
   .png|.jpg|.jpeg|.webp|.tif|.tiff)
     SIZE=$(wc -c < "$FILE_PATH" 2>/dev/null | tr -d ' '); SIZE=${SIZE:-0}   # stat -f%z es solo macOS
-    if [ "$SIZE" -gt 8388608 ] && [ -x "$VENV_PY" ]; then
-      OUT=$("$VENV_PY" "$DOCLENS" "$FILE_PATH" 2>/dev/null)
-      INSPECT_DIR=$(echo "$OUT" | grep '^INSPECT_DIR=' | cut -d= -f2-)
-      if [ -f "$INSPECT_DIR/downscaled.png" ]; then
+    if [ "$SIZE" -gt 8388608 ]; then
+      PRC=0; process || PRC=$?
+      [ "$PRC" = 3 ] && preparing
+      if [ "$PRC" = 0 ] && [ -f "$INSPECT_DIR/downscaled.png" ]; then
         echo "Imagen de $((SIZE / 1048576)) MB — demasiado grande para el API. Usa la copia downscaled: $INSPECT_DIR/downscaled.png (metadata en $INSPECT_DIR/index.md)" >&2
         exit 2
       fi

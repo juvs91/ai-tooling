@@ -198,7 +198,7 @@ Claude Code ejecuta estos scripts automáticamente. **Contrato de input: JSON vi
 | `scope-gate.sh` | PreToolUse | Edit\|Write | Bloquea edits fuera del scope en `.claude/task-scope.json` |
 | `ts-quality-gate.sh` | PostToolUse | Edit\|Write | Corre `tsc` tras edits de `*.ts/*.tsx`, guarda estado para ts-enforce |
 | `quality-gate.sh` | PostToolUse (async) | Edit\|Write\|MultiEdit | Corre `ruff` sobre el `.py` editado; los hallazgos llegan al modelo vía `additionalContext` el siguiente turno (no bloquea) |
-| `doc-guard.sh` | PreToolUse | Read | PDF → digest de doclens (`<archivo>.inspect/index.md`: texto, tablas, renders); imagen >8 MB → copia reducida. Venv: `scripts/.venv-doc-tools` + `doclens/requirements.txt` |
+| `doc-guard.sh` | PreToolUse | Read | PDF → digest de doclens (`<archivo>.inspect/index.md`: texto, tablas, renders); imagen >8 MB → copia reducida. Estructura `doclens/` + `doclens/.venv` igual aquí y en consumers; si falta el venv lo crea solo (ADR-0076) |
 | `migration-gate.sh` | PostToolUse | Edit\|Write\|MultiEdit | Avisa cuando se edita un modelo SQLAlchemy sin correr `alembic revision` |
 | `verify-implementation.sh` | PostToolUse | Edit\|Write\|MultiEdit | Detecta funciones stub (`pass`/`TODO`/`NotImplemented`) en `.py` editados |
 | `edit-drift-detector.sh` | PostToolUse | Edit\|Write\|Bash | Rastrea edits vs test runs; advierte a 8/15/25 edits sin verificación |

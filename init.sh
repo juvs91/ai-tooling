@@ -86,6 +86,10 @@ check_dependency "git" "https://git-scm.com/downloads"
 # ADR gate git (commit-msg) — por clon; .git/hooks no se versiona (ADR-0074)
 (cd "$PROJECT_DIR" && bash tools/install_hooks.sh) || log_warn "No se pudo instalar el ADR gate git — corre: bash tools/install_hooks.sh"
 
+# doclens listo para usar aquí (ADR-0076): crea doclens/.venv; doc-guard también lo
+# haría solo en el primer Read de un PDF
+bash "$PROJECT_DIR/doclens/sync.sh" "$PROJECT_DIR" || log_warn "doclens sin venv (¿sin red?) — corre: bash doclens/sync.sh --force"
+
 # 2. Instalar dependencias Python del proxy
 log_info "2. Instalando dependencias Python del proxy..."
 

@@ -17,32 +17,60 @@ con artifacts estructurados que el agente sí puede leer:
                       #   de figuras (si hay tesseract)
 ```
 
+El sidecar trae su propio `.gitignore` (`*`): analizar documentos en cualquier
+repo no ensucia git.
+
+## Estructura — igual en ai-tooling y en cada consumidor (ADR-0076)
+
+```
+doclens/
+├── doclens.py, requirements.txt, VERSION, README.md, sync.sh, adapters/, .gitignore
+│                     # versionados; en consumers = espejo exacto de ai-tooling/doclens
+└── .venv/            # local, no versionado (lo crea sync.sh)
+```
+
 ## Uso
 
 ```bash
-python doclens.py <archivo> [--dpi 150]
+doclens/.venv/bin/python doclens/doclens.py <archivo> [--dpi 150]
 # stdout incluye: INSPECT_DIR=<ruta del sidecar>
 ```
+
+En Claude Code no hace falta llamarlo: el hook `doc-guard` intercepta el `Read`
+de un PDF y redirige al sidecar.
 
 Idempotente: si el sidecar existe y es más reciente que el archivo, no
 reprocesa. Exit codes: `0` ok · `2` formato no soportado · `3` dependencia
 faltante.
 
-## Setup por proyecto consumidor
+## Listo para usar (sin pasos manuales)
 
-```bash
-python3 -m venv .venv-doclens
-.venv-doclens/bin/pip install -r requirements.txt   # pymupdf, pdfplumber, pypdf, pillow
-# opcional (OCR de scans y figuras): brew install tesseract tesseract-lang
-```
+- **Consumers:** `auto-sync-daily.sh` (SessionStart, en segundo plano) corre
+  `sync.sh` del toolbox: deja `doclens/` como espejo, migra la estructura vieja
+  (`scripts/doclens.py`, con respaldo en `.claude/.harness-backup-*-doclens/`) y
+  crea `doclens/.venv`.
+- **ai-tooling:** `init.sh` crea el venv; si falta, `doc-guard` lo prepara en el
+  primer `Read` de un PDF.
+- Manual (ambos): `bash doclens/sync.sh` (`--force` reintenta tras un fallo,
+  `--check` solo reporta).
+- El venv es **propio y aislado**: nunca usa ni modifica el venv del proyecto
+  (`.venv`, poetry, conda) — PyMuPDF es AGPL y no debe entrar como dependencia
+  del proyecto. Python base: `$DOCLENS_PYTHON`, si no `/usr/bin/python3`, si no
+  `python3` del PATH (≥3.9), sin heredar `VIRTUAL_ENV`/`CONDA_PREFIX`; con `uv`
+  si está disponible.
+- `DOCLENS_PYTHON` también sirve para que `doc-guard` use un intérprete que ya
+  tenga las dependencias, sin crear `doclens/.venv`.
+- OCR opcional (scans y texto en figuras): `brew install tesseract tesseract-lang`.
 
 ## Versionado y sync
 
 - `VERSION` = versión del motor. `SIDECAR_FORMAT_VERSION` (constante en
   `doclens.py`) = versión del contrato del sidecar; los adapters pueden
   detectar sidecars viejos.
-- Los proyectos **no editan su copia local**: se sincroniza desde este toolbox
-  con `scripts/sync-doclens.sh` (en cada proyecto consumidor).
+- Los proyectos **no editan su copia local**: el sync compara por contenido y
+  la reemplaza (respaldando lo que pisa). Los cambios se hacen aquí.
+- Si el linter del consumer (ruff, mypy, pre-commit) revisa `doclens/`,
+  exclúyelo en su configuración (p. ej. `extend-exclude = ["doclens"]` en ruff).
 
 ## Adapters por agente (`adapters/`)
 
@@ -55,6 +83,6 @@ python3 -m venv .venv-doclens
 
 ## Proyectos consumidores
 
-- **school-system** (`/Volumes/case-sensitive/school-system`) — origen del
-  mecanismo; consume vía copia versionada (`scripts/doclens.py` +
-  `scripts/sync-doclens.sh`).
+- **school-system** — origen del mecanismo. Usaba la estructura vieja
+  (`scripts/doclens.py`); el sync la migra a `doclens/` y avisa si algún archivo
+  (p. ej. un adapter de OpenCode copiado a mano) sigue usando la ruta vieja.

@@ -15,11 +15,12 @@ mensajes siguientes fallan).
 1. Antes de leer cualquier PDF o imagen de documento (> 8 MB), correr:
 
    ```bash
-   scripts/.venv-doc-tools/bin/python scripts/doclens.py <archivo>
+   doclens/.venv/bin/python doclens/doclens.py <archivo>
    ```
 
-   (si el proyecto no tiene `scripts/doclens.py`: `scripts/sync-doclens.sh`
-   primero — sincroniza desde `ai-tooling/doclens`).
+   (si falta `doclens/.venv`: `bash doclens/sync.sh` primero — crea el venv.
+   Si el proyecto aún tiene la estructura vieja `scripts/doclens.py`, el sync de
+   ai-tooling la migra a `doclens/`).
 
 2. Leer el sidecar, nunca el original:
    - `<archivo>.inspect/index.md` — metadata, texto/OCR, tablas en markdown,

@@ -203,5 +203,7 @@ echo ""
 bash "$AI_TOOLING/tests/harness/bypass-gate-tests.sh"; BG_RC=$?
 echo ""
 bash "$AI_TOOLING/tests/harness/githook-tests.sh"; GH_RC=$?
+echo ""
+bash "$AI_TOOLING/tests/harness/doclens-tests.sh"; DL_RC=$?
 
-[ "$FAIL" -eq 0 ] && [ "$WT_RC" -eq 0 ] && [ "$BG_RC" -eq 0 ] && [ "$GH_RC" -eq 0 ]
+[ "$FAIL" -eq 0 ] && [ "$WT_RC" -eq 0 ] && [ "$BG_RC" -eq 0 ] && [ "$GH_RC" -eq 0 ] && [ "$DL_RC" -eq 0 ]

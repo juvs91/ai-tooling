@@ -18,8 +18,9 @@
 #      .claude/.last_hook_sync. OJO: regenera settings.local.json — si el
 #      proyecto registra sus propios hooks en settings.json, usa
 #      "sync_hooks": false para evitar duplicados.
-#   3. doclens — llama a doclens/sync.sh del toolbox (copia versionada hacia
-#      scripts/doclens.py). Es no-op cuando las versiones coinciden — no
+#   3. doclens — llama a doclens/sync.sh del toolbox: espejo de doclens/ (misma
+#      estructura que en ai-tooling, ADR-0076), migra la estructura vieja de
+#      scripts/ y prepara doclens/.venv. Es no-op cuando ya está al día — no
 #      necesita throttle propio, igual que sync_skills.sh.
 #
 # Ubicación de ai-tooling (sin rutas absolutas en el marker):
@@ -142,12 +143,13 @@ elif [ -n "$AI_TOOLING_DIR" ] && [ "$SYNC_HOOKS" = "true" ]; then
 fi
 
 # ── 3. doclens ─────────────────────────────────────────────────────────────────
-# sync.sh ya es no-op cuando las versiones coinciden (compara VERSION del
-# toolbox vs scripts/.doclens-version del consumer) — sin throttle externo,
+# sync.sh ya es no-op cuando el espejo coincide por contenido con doclens/ del
+# toolbox (ADR-0076) — sin throttle externo,
 # misma filosofía que sync_skills.sh: el hook invoca, el script decide.
 if [ "$SYNC_DOCLENS" = "true" ] && [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING_DIR/doclens/sync.sh" ]; then
   if OUT=$(bash "$AI_TOOLING_DIR/doclens/sync.sh" "$REPO_ROOT" 2>&1); then
-    [ -n "$OUT" ] && log "doclens: OK — $(printf '%s' "$OUT" | grep -E 'sincronizado|al día|ya está' | tail -n 1)"
+    # Todo lo relevante (sincronizado, migración, respaldo, avisos, venv) va al log
+    printf '%s\n' "$OUT" | grep -E '^doclens' | grep -v 'smoke OK' | while IFS= read -r l; do log "$l"; done
   else
     log "doclens: ERROR — $(printf '%s' "$OUT" | tail -n 3 | tr '\n' ' ')"
   fi

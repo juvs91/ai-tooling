@@ -21,10 +21,10 @@ Idempotente: si el sidecar existe y es más reciente que el archivo, no
 reprocesa (imprime la ruta y sale).
 
 Origen: ai-tooling/doclens (toolbox compartido). Los proyectos consumen una
-copia sincronizada via scripts/sync-doclens.sh — no editar la copia local.
+espejo de doclens/ (misma estructura, ADR-0076) vía doclens/sync.sh — no editar la copia local.
 """
 
-DOCLENS_VERSION = "1.0.0"
+DOCLENS_VERSION = "1.1.0"
 SIDECAR_FORMAT_VERSION = 1
 
 import shutil
@@ -46,12 +46,20 @@ def detect_kind(path: Path) -> str:
     head = path.read_bytes()[:8]
     if head.startswith(b"%PDF"):
         return "pdf"
-    if head.startswith(b"\xff\xd8\xff") or head.startswith(b"\x89PNG"):
+    if head.startswith((b"\xff\xd8\xff", b"\x89PNG")):
         return "image"
     # fallback por extensión
     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}:
         return "image"
     return "unknown"
+
+
+def ignore_sidecar(outdir: Path) -> None:
+    """El sidecar se ignora a sí mismo (como .ruff_cache): analizar documentos en
+    cualquier repo no ensucia git ni obliga a tocar su .gitignore raíz."""
+    gitignore = outdir / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("# generado por doclens: sidecar local, no versionar\n*\n")
 
 
 def ocr_available() -> bool:
@@ -62,7 +70,7 @@ def ocr_image(img_path: Path, lang: str = "spa") -> str:
     try:
         out = subprocess.run(
             ["tesseract", str(img_path), "stdout", "-l", lang],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=60, check=False,
         )
         return out.stdout.strip()
     except Exception as e:  # noqa: BLE001
@@ -231,14 +239,16 @@ def main() -> int:
         return 1
 
     outdir = path.parent / f"{path.name}.inspect"
-    if outdir.exists() and (outdir / "index.md").exists():
-        if (outdir / "index.md").stat().st_mtime > path.stat().st_mtime:
-            print(f"INSPECT_DIR={outdir}")  # cache hit
-            return 0
+    index = outdir / "index.md"
+    if index.exists() and index.stat().st_mtime > path.stat().st_mtime:
+        ignore_sidecar(outdir)  # sidecars de versiones previas a 1.1.0
+        print(f"INSPECT_DIR={outdir}")  # cache hit
+        return 0
 
     kind = detect_kind(path)
     log(f"{path.name}: tipo real = {kind}")
     outdir.mkdir(parents=True, exist_ok=True)
+    ignore_sidecar(outdir)
 
     if kind == "pdf":
         process_pdf(path, outdir, dpi)
