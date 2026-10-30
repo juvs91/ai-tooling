@@ -178,6 +178,23 @@ OUT=$(bash "$AI_TOOLING/scripts/harness-doctor.sh" "$M" 2>&1)
 grep -qE 'mergeada.*[[:space:]]s([[:space:]]|$)' <<< "$OUT" && ok "rama con commit propio ya mergeada sí es candidata" || bad "rama mergeada no detectada"
 rm -f "$M/.ai-tooling"
 
+echo "══ W14: doc-guard — venv desde la raíz del proyecto, tamaño portable ══"
+# venv falso (gitignorado en la vida real → solo existe en M, nunca en W): simula doclens
+mkdir -p "$M/scripts/.venv-doc-tools/bin"; touch "$M/scripts/doclens.py"
+printf '#!/bin/sh\nd="$2.inspect"; mkdir -p "$d"; : > "$d/index.md"; : > "$d/downscaled.png"; echo "INSPECT_DIR=$d"\n' > "$M/scripts/.venv-doc-tools/bin/python"
+chmod +x "$M/scripts/.venv-doc-tools/bin/python"
+: > "$T/doc.pdf"; : > "$T/small.png"; dd if=/dev/zero of="$T/big.png" bs=1048576 count=9 2>/dev/null
+dg() {  # dg <cwd> <file> → "rc|stderr"
+  local e rc; e=$(echo "{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$2\"}}" | (cd "$1" && CLAUDE_PROJECT_DIR="$M" bash "$H/doc-guard.sh" 2>&1 >/dev/null)); rc=$?
+  echo "$rc|$e"
+}
+R=$(dg "$M/src" "$T/doc.pdf"); case "$R" in "2|"*pre-procesado*) ok "PDF tras cd a subdir → pre-procesado (no fallback manual)" ;; *) bad "PDF desde subdir: ${R%%$'\n'*}" ;; esac
+R=$(dg "$W" "$T/doc.pdf");     case "$R" in "2|"*pre-procesado*) ok "PDF desde worktree → usa el venv de la raíz" ;; *) bad "PDF desde worktree: ${R%%$'\n'*}" ;; esac
+R=$(dg "$M" "$T/big.png");     case "$R" in "2|"*downscaled*) ok "imagen de 9 MB → downscaled (tamaño portable)" ;; *) bad "imagen grande no interceptada: ${R%%$'\n'*}" ;; esac
+R=$(dg "$M" "$T/small.png");   eq "imagen chica → permitida" "${R%%|*}" 0
+R=$(dg "$M" "$T/doc.pdf.inspect/index.md"); eq "artefactos .inspect → permitidos" "${R%%|*}" 0
+rm -rf "$M/scripts/.venv-doc-tools" "$M/scripts/doclens.py"
+
 echo ""
 echo "══ Worktrees: $PASS ok, $FAIL fallos ══"
 rm -rf "$T"

@@ -35,7 +35,7 @@ Eres el **Workflow Coordinator** de ai-tooling. Tu única tarea al cargar es:
 | verificar implementación, pre-PR, quality gate | `verification-loop` | `.agents/skills/software/quality/verification-loop/SKILL.md` |
 | documentación, MkDocs, README, docstrings | `technical-writer` | `.agents/skills/software/quality/technical-writer/SKILL.md` |
 | FastAPI, Python, Pydantic, endpoint, router | `python-senior-backend` | `.agents/skills/backend/python-senior-backend/SKILL.md` |
-| pytest, fixtures, mock, async test, conftest | `python-testing` | `.agents/skills/backend/python-testing/SKILL.md` |
+| pytest, fixtures, mock, async test, conftest | `python-testing` | `.agents/skills/software/backend/python-testing/SKILL.md` |
 | React, Next.js, TypeScript, componente, hook | `senior-frontend` | `.agents/skills/software/frontend/senior-frontend/SKILL.md` |
 | base de datos, SQL, schema, AlloyDB, Alembic | `database-expert` | `.agents/skills/infrastructure/database-expert/SKILL.md` |
 | CI/CD, pipeline, Docker, deploy, Cloud Run | `gitops-expert` | `.agents/skills/infrastructure/gitops-expert/SKILL.md` |

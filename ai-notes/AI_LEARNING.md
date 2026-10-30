@@ -1643,3 +1643,9 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   colapsan al cwd (20 fallos "corridos" en githook-tests). Usar siempre `XXXXXX` y abortar si mktemp falla.
 - **shellcheck** detectó un test débil: T9 calculaba el mtime y nunca lo comparaba (cksum no detecta una
   reescritura idéntica). Ahora usa `find -newer` (portable); verificado inyectando la reescritura.
+- **Revisión tras pull (b53b6ba/351d152, otra sesión):** el borrado de skills duplicados dejó una ruta rota en
+  `.claude/commands/workflow-coordinator.md` (`backend/python-testing` → `software/backend/python-testing`).
+  Verificar rutas del routing tras borrar skills: comprobar existencia exacta, no `grep -F` (sub-cadenas
+  de `software/...` dan falsos positivos). `doc-guard.sh` nuevo traía los dos patrones ya corregidos en
+  el resto: rutas relativas al cwd (fallaban tras `cd` y en worktrees → usar `$CLAUDE_PROJECT_DIR`) y
+  `stat -f%z` (solo macOS; en Linux la imagen grande pasaba) → `wc -c`. Tests W14.

@@ -39,12 +39,17 @@ case "$FILE_PATH" in
 esac
 
 EXT=$(echo "$FILE_PATH" | grep -oiE '\.[a-z0-9]+$' | tr '[:upper:]' '[:lower:]')
-VENV_PY="scripts/.venv-doc-tools/bin/python"
+# Raíz del proyecto, no el cwd: el cwd del hook sigue al `cd` del Bash tool y a los
+# worktrees (ADR-0073), donde el venv (gitignorado) no existe. CLAUDE_PROJECT_DIR
+# siempre apunta a la raíz principal.
+ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+VENV_PY="$ROOT/scripts/.venv-doc-tools/bin/python"
+DOCLENS="$ROOT/scripts/doclens.py"
 
 # ── PDF: pre-procesar y redirigir ─────────────────────────────────────────
 if [ "$EXT" = ".pdf" ]; then
-  if [ -x "$VENV_PY" ] && [ -f "scripts/doclens.py" ]; then
-    OUT=$("$VENV_PY" scripts/doclens.py "$FILE_PATH" 2>/dev/null)
+  if [ -x "$VENV_PY" ] && [ -f "$DOCLENS" ]; then
+    OUT=$("$VENV_PY" "$DOCLENS" "$FILE_PATH" 2>/dev/null)
     INSPECT_DIR=$(echo "$OUT" | grep '^INSPECT_DIR=' | cut -d= -f2-)
     if [ -n "$INSPECT_DIR" ] && [ -f "$INSPECT_DIR/index.md" ]; then
       cat >&2 <<EOF
@@ -83,9 +88,9 @@ fi
 # ── Imágenes: solo interceptar si son demasiado grandes ───────────────────
 case "$EXT" in
   .png|.jpg|.jpeg|.webp|.tif|.tiff)
-    SIZE=$(stat -f%z "$FILE_PATH" 2>/dev/null || echo 0)
+    SIZE=$(wc -c < "$FILE_PATH" 2>/dev/null | tr -d ' '); SIZE=${SIZE:-0}   # stat -f%z es solo macOS
     if [ "$SIZE" -gt 8388608 ] && [ -x "$VENV_PY" ]; then
-      OUT=$("$VENV_PY" scripts/doclens.py "$FILE_PATH" 2>/dev/null)
+      OUT=$("$VENV_PY" "$DOCLENS" "$FILE_PATH" 2>/dev/null)
       INSPECT_DIR=$(echo "$OUT" | grep '^INSPECT_DIR=' | cut -d= -f2-)
       if [ -f "$INSPECT_DIR/downscaled.png" ]; then
         echo "Imagen de $((SIZE / 1048576)) MB — demasiado grande para el API. Usa la copia downscaled: $INSPECT_DIR/downscaled.png (metadata en $INSPECT_DIR/index.md)" >&2
