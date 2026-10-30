@@ -1,0 +1,399 @@
+<title>HLWSS Observer</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+:root {
+  --bg: #f2f4f6;
+  --surface: #ffffff;
+  --ink: #1a2430;
+  --muted: #5a6b7d;
+  --faint: #8fa0b0;
+  --line: #dde4ea;
+  --accent: #0e7c86;      /* OS / LRU (teal) */
+  --accent-ink: #0a5a62;
+  --pol: #c77d1d;         /* políticas hlwss (ámbar) */
+  --neg: #b3372f;         /* thrash / penalización */
+  --chip-bg: #e8edf1;
+  --shadow: 0 1px 2px rgba(26,36,48,.06);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141a20;
+    --surface: #1c242d;
+    --ink: #e8eef4;
+    --muted: #9fb0c0;
+    --faint: #6b7c8c;
+    --line: #2c3844;
+    --accent: #2fb3bf;
+    --accent-ink: #6fd3dc;
+    --pol: #e0a44a;
+    --neg: #e06a5f;
+    --chip-bg: #26313c;
+    --shadow: 0 1px 2px rgba(0,0,0,.4);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141a20; --surface: #1c242d; --ink: #e8eef4; --muted: #9fb0c0;
+  --faint: #6b7c8c; --line: #2c3844; --accent: #2fb3bf; --accent-ink: #6fd3dc;
+  --pol: #e0a44a; --neg: #e06a5f; --chip-bg: #26313c;
+  --shadow: 0 1px 2px rgba(0,0,0,.4); color-scheme: dark;
+}
+
+body { background: var(--bg); color: var(--ink);
+  font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+
+.wrap { max-width: 880px; margin: 0 auto; padding-block: 40px 64px; }
+
+h1, h2, h3 { text-wrap: balance; }
+h1 { font-size: 2rem; font-weight: 700; letter-spacing: -.02em; margin: 0 0 6px; }
+.sub { color: var(--muted); font-size: 1.05rem; max-width: 46ch; margin: 0 0 28px; }
+
+.eyebrow { font-family: 'IBM Plex Mono', monospace; font-size: .72rem; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--accent-ink); margin: 0 0 8px; }
+
+.verdict { background: var(--surface); border-left: 3px solid var(--accent);
+  border-radius: 0 10px 10px 0; box-shadow: var(--shadow);
+  padding: 18px 22px; margin: 26px 0 34px; font-size: 1.06rem; line-height: 1.55; }
+.verdict strong { color: var(--accent-ink); }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px; margin: 0 0 40px; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; box-shadow: var(--shadow); }
+.tile .n { font-family: 'IBM Plex Mono', monospace; font-size: 1.5rem; font-weight: 600;
+  font-variant-numeric: tabular-nums; }
+.tile .l { font-size: .78rem; color: var(--muted); margin-top: 3px; line-height: 1.35; }
+.tile.neg .n { color: var(--neg); }
+.tile.pol .n { color: var(--pol); }
+.tile.acc .n { color: var(--accent-ink); }
+
+section.fase { margin: 0 0 44px; }
+.fase-head { display: flex; align-items: baseline; gap: 12px; margin: 0 0 6px; }
+.fase-num { font-family: 'IBM Plex Mono', monospace; font-weight: 600; font-size: .82rem;
+  color: var(--faint); white-space: nowrap; }
+h2 { font-size: 1.32rem; font-weight: 700; letter-spacing: -.01em; margin: 0; }
+.lede { color: var(--muted); font-size: .95rem; max-width: 62ch; margin: 0 0 18px; line-height: 1.55; }
+.lede strong { color: var(--ink); }
+
+.chart-card { background: var(--surface); border: 1px solid var(--line);
+  border-radius: 12px; padding: 18px 18px 10px; box-shadow: var(--shadow); margin: 0 0 14px; }
+.chart-title { font-family: 'IBM Plex Mono', monospace; font-size: .76rem; font-weight: 600;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+.chart-box { position: relative; height: 300px; }
+.chart-box.tall { height: 340px; }
+.chart-box.short { height: 240px; }
+.footnote { font-size: .8rem; color: var(--faint); margin: 2px 0 0; line-height: 1.5; }
+
+ul.findings { margin: 12px 0 0; padding-left: 20px; }
+ul.findings li { margin: 0 0 8px; line-height: 1.55; font-size: .95rem; }
+ul.findings li::marker { color: var(--accent); }
+ul.findings strong { font-variant-numeric: tabular-nums; }
+
+.hier { display: grid; gap: 8px; margin: 14px 0 0; }
+.hier-row { display: flex; align-items: center; gap: 12px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; box-shadow: var(--shadow); }
+.hier-rank { font-family: 'IBM Plex Mono', monospace; font-weight: 600; font-size: 1.05rem;
+  width: 2.2ch; text-align: center; flex: none; }
+.hier-row.good .hier-rank { color: var(--accent-ink); }
+.hier-row.mid .hier-rank { color: var(--pol); }
+.hier-row.bad .hier-rank { color: var(--neg); }
+.hier-body { flex: 1; min-width: 0; }
+.hier-name { font-weight: 600; font-size: .95rem; }
+.hier-desc { font-size: .82rem; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+
+table.data { width: 100%; border-collapse: collapse; font-size: .86rem;
+  font-variant-numeric: tabular-nums; margin: 0 0 14px; }
+.table-scroll { overflow-x: auto; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: var(--shadow); }
+table.data th, table.data td { padding: 8px 14px; text-align: right; white-space: nowrap; }
+table.data th { font-family: 'IBM Plex Mono', monospace; font-size: .7rem; font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--line); }
+table.data td:first-child, table.data th:first-child { text-align: left; }
+table.data tr + tr td { border-top: 1px solid var(--line); }
+
+footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--line);
+  color: var(--faint); font-size: .82rem; line-height: 1.6; }
+code { font-family: 'IBM Plex Mono', monospace; font-size: .85em; background: var(--chip-bg);
+  padding: 1px 5px; border-radius: 4px; }
+
+@media (max-width: 480px) {
+  .wrap { padding-block: 28px 48px; }
+  h1 { font-size: 1.6rem; }
+  .chart-box { height: 260px; }
+}
+</style>
+
+<div class="wrap">
+
+<p class="eyebrow">ai-tooling · juvs91/ai-tooling · ADR-0060–0071</p>
+<h1>HLWSS Observer — Qué aprendimos corriendo LLMs contra la memoria</h1>
+<p class="sub">¿Puede un LLM decidir qué pesos dejar en RAM mejor que el sistema operativo? Cuatro fases, 68 corridas en hardware real (Apple M2, 16GB), y una respuesta con frontera medida.</p>
+
+<div class="verdict"><strong>Veredicto:</strong> una política de residencia model-aware no le gana al LRU del OS en ningún régimen medible. Donde no hay presión de memoria es un no-op; donde la hay, gana siempre pero poco (−7% → −1.3%, diluyéndose con el churn). El prefetch agresivo es contraproducente (2× peor). El lever que sí importa para correr modelos grandes en poca RAM es <strong>cuantizar</strong>.</div>
+
+<div class="tiles">
+  <div class="tile acc"><div class="n">68</div><div class="l">corridas de experimento en hardware real</div></div>
+  <div class="tile"><div class="n">3</div><div class="l">arquitecturas: MoE (OLMoE, Qwen1.5-MoE) y denso (gemma3n)</div></div>
+  <div class="tile neg"><div class="n">2×</div><div class="l">peor con prefetch WILLNEED — en las 3 arquitecturas</div></div>
+  <div class="tile neg"><div class="n">48×</div><div class="l">bytes al cruzar W sobre el presupuesto (transición de fase)</div></div>
+  <div class="tile pol"><div class="n">7253MB</div><div class="l">W_sat de OLMoE en greedy — la mitad del WS a-priori (14.57GB)</div></div>
+  <div class="tile acc"><div class="n">±5%</div><div class="l">piso de ruido pareado — control medido con políticas equivalentes</div></div>
+</div>
+
+<section class="fase">
+  <div class="fase-head"><span class="fase-num">MÉTODO</span></div>
+  <h2>Cómo se midió</h2>
+  <p class="lede">Inferencia real en CPU sobre pesos <code>mmap</code> (PROT_READ), con un buffer de presión que fija el budget de RAM. Bytes transferidos = <strong>Δru_majflt × 16KB</strong> (page faults reales). Residencia por bloque vía <code>mincore</code>. Políticas: <strong>os-lru</strong> (el OS decide), <strong>hlwss-pin</strong> (pin caliente + <code>WILLNEED</code>) y <strong>hlwss-evict</strong> (solo evicción <code>DONTNEED</code>, sin prefetch). Pares intercalados para comparar bajo las mismas condiciones de máquina.</p>
+</section>
+
+<section class="fase">
+  <div class="fase-head"><span class="fase-num">FASE 1</span></div>
+  <h2>El simulador mentía: el ranking se invierte en hardware</h2>
+  <p class="lede">El simulador prometía una victoria de <strong>−15.7% a 8GB</strong>. En hardware, pin+prefetch perdió <strong>2× en todo el rango</strong>. La forma del valle se reproduce (los bytes bajan con el budget), pero la dirección del efecto es la opuesta.</p>
+  <div class="chart-card">
+    <p class="chart-title">GB transferidos por budget — OLMoE-1B-7B, 64 tokens</p>
+    <div class="chart-box tall"><canvas id="c1"></canvas></div>
+    <p class="footnote">Sim LRU ≈ FIFO sin readahead: cobra cada touch frío. El LRU real converge al hot set en ~8 tokens y deja de fallar. Sim hlwss 22.0GB @6GB era además infeasible (WS &gt; budget).</p>
+  </div>
+  <div class="chart-card">
+    <p class="chart-title">El mecanismo: la tormenta WILLNEED del prefill</p>
+    <div class="chart-box short"><canvas id="c2"></canvas></div>
+    <p class="footnote">El prefill ejecuta top-k × 34 posiciones × 16 capas: la política advise WILLNEED sobre cada experto y el OS trae cientos de bloques especulativamente. Con routing plano, muchos nunca se re-tocan: pin transfirió ~1.1× el modelo entero sin importar el budget. Además pin mantuvo EMBED al 100% residente (0.7GB) donde LRU mantiene 1 página (la fila del token actual).</p>
+  </div>
+  <ul class="findings">
+    <li><strong>WILLNEED no protege del desalojo: transfiere YA.</strong> El simulador modelaba la política como orden de evicción; el hardware la ejecutó como prefetch obligatorio.</li>
+    <li><strong>El LRU del kernel es near-óptimo sobre el núcleo estable</strong> (~1–2GB tocados cada token: attention, router, embed, lm_head). Sobre eso nadie gana.</li>
+    <li>Cross-check denso: gemma3n bajo presión transfirió <strong>288–310GB</strong> (thrash real, ~0.1 tok/s), independiente del budget — el acantilado denso también se reproduce.</li>
+    <li>Estiramiento Qwen1.5-MoE: pin <strong>325.8GB</strong> vs LRU <strong>152.5GB</strong> a 12GB — la inversión se repite en la 2ª arquitectura MoE.</li>
+  </ul>
+</section>
+
+<section class="fase">
+  <div class="fase-head"><span class="fase-num">FASE 2</span></div>
+  <h2>Quitar el prefetch recupera exactamente el 2×</h2>
+  <p class="lede">Misma política pero <strong>sin WILLNEED</strong> (hlwss-evict): solo frecuencias + evicción DONTNEED de fríos. En el único budget donde el cap de evicción ata (6GB &lt; WS tocado), evict gana <strong>−7%</strong>; en 8–12GB emite cero <code>madvise</code> y es bit-a-bit el LRU. Las diferencias ahí midieron el piso de ruido pareado: <strong>±5%</strong>.</p>
+  <div class="chart-card">
+    <p class="chart-title">OLMoE b=6 — el único punto con spill real en 64 tokens</p>
+    <div class="chart-box short"><canvas id="c3"></canvas></div>
+    <p class="footnote">LRU = media de dos corridas (8.05 / 8.17). gemma3n b=6 confirma: evict 286.2 ≈ LRU 288.6 vs pin 419.3GB.</p>
+  </div>
+  <ul class="findings">
+    <li><strong>Aislamiento causal limpio:</strong> el 100% de la penalización 2× era el WILLNEED; la componente "inteligente" de la política es gratuita (donde no ayuda, no estorba).</li>
+    <li><strong>Descubrimiento estructural:</strong> el WS único tocado a 64 tokens es <strong>7253MB</strong> — la mitad del WS a-priori que cobran el sim y el flag FIT. El sim cobraba por el modelo entero; el hardware solo paga lo tocado.</li>
+  </ul>
+</section>
+
+<section class="fase">
+  <div class="fase-head"><span class="fase-num">FASE 3</span></div>
+  <h2>Más tokens no crean spill: el working set satura</h2>
+  <p class="lede">Si el valle no apareció a 64 tokens, ¿aparecería a 512? No: <strong>resident_bytes = exactamente 7253MB en t=64, 128, 256 y 512</strong> — entre el token 64 y el 512 no se toca ni un bloque nuevo. El routing en greedy decode reutiliza intensamente la misma ruta de expertos (~660 de 1024 nunca aparecen). Los pageins quedan planos en todo el horizonte.</p>
+  <div class="chart-card">
+    <p class="chart-title">GB transferidos vs horizonte — b=8, pares lru/evict</p>
+    <div class="chart-box short"><canvas id="c4"></canvas></div>
+    <p class="footnote">Diferencias dentro del piso de ruido ±5%: en b≥8 el cap de evicción nunca ata, evict ≡ lru, y ambos churnean 0 porque el WS tocado (7.25GB) ya cabe en el budget.</p>
+  </div>
+  <ul class="findings">
+    <li>La localidad que "salva" al greedy es del <strong>modo</strong>, no del modelo: el prefill (34 posiciones × top-8 × 16 capas ≈ 4352 draws) fija la cobertura, y el decode greedy buclea sobre ella.</li>
+    <li>Consecuencia: la frontera de utilidad de cualquier política queda en <strong>budget &lt; W_sat ≈ 7.25GB</strong> para este modelo/prompt/modo — sin importar los tokens.</li>
+  </ul>
+</section>
+
+<section class="fase">
+  <div class="fase-head"><span class="fase-num">FASE 4</span></div>
+  <h2>W_sat: la propiedad que decide si una política puede ganar</h2>
+  <p class="lede">W_sat (working set único tocado) es estable, medible y depende del modo: greedy lo mantiene bajo, sampling lo dispara por encima del presupuesto. Al cruzar W = RAM el sistema no se degrada: <strong>colapsa</strong>.</p>
+  <div class="chart-card">
+    <p class="chart-title">W_sat por condición (resident_bytes final) vs budget 8GB</p>
+    <div class="chart-box"><canvas id="c5"></canvas></div>
+    <p class="footnote">Sampling T=1 supera el cap de 7629MB: cada experto nuevo cruza el presupuesto y dispara evicciones de churn (9177 en 512 tokens). Prompt diverso (p1) apenas mueve W en greedy (−6%): el prefill manda.</p>
+  </div>
+  <div class="chart-card">
+    <p class="chart-title">La transición de fase: +5% de W sobre el presupuesto = 48× bytes</p>
+    <div class="chart-box short"><canvas id="c6"></canvas></div>
+    <p class="footnote">Mismo modelo, mismo budget, mismo prompt. Única diferencia: greedy (argmax) vs sampling T=1. 8GB → 382.7GB transferidos. El costo de memoria es discontinuo en W=RAM — lo que el working-set model de Denning predice desde 1968.</p>
+  </div>
+  <div class="table-scroll"><table class="data">
+    <tr><th>Pareado con spill</th><th>os-lru GB</th><th>hlwss-evict GB</th><th>Δ</th></tr>
+    <tr><td>b=6, caché tibia</td><td>8.11</td><td>7.48</td><td>−7.8%</td></tr>
+    <tr><td>b=6, caché fría (flush)</td><td>8.49</td><td>8.12</td><td>−4.4%</td></tr>
+    <tr><td>b=8, sampling 128t (thrash)</td><td>80.0</td><td>78.9</td><td>−1.3%</td></tr>
+  </table></div>
+  <ul class="findings">
+    <li>Evict gana <strong>3 de 3 pares</strong> pero siempre poco, diluyéndose a medida que el churn domina: en thrash puro el orden de desalojo deja de importar (todo se toca poco y todo se rechaza).</li>
+    <li>La ventaja de la política vive en <strong>refaults</strong>, no en misses de compulsión: en frío ambas pagan los mismos pageins obligatorios y el margen se reduce (−7% → −4.4%).</li>
+    <li>Qwen1.5-MoE (27GB de archivo): W(128t) = <strong>5981MB</strong> — la localidad fuerte del router es estructural, no casual.</li>
+  </ul>
+</section>
+
+<section class="fase">
+  <div class="fase-head"><span class="fase-num">SÍNTESIS</span></div>
+  <h2>La jerarquía de levers, medida en hardware</h2>
+  <div class="hier">
+    <div class="hier-row good"><span class="hier-rank">1</span><div class="hier-body"><div class="hier-name">Cuantizar</div><div class="hier-desc">2× lineal en bytes, sin condiciones. Es la respuesta práctica a "modelos grandes en poca RAM". El thrash de gemma3n (288GB transferidos) no lo arregla ninguna política — lo elimina la cuantización.</div></div></div>
+    <div class="hier-row mid"><span class="hier-rank">2</span><div class="hier-body"><div class="hier-name">Política de residencia model-aware</div><div class="hier-desc">Ganancia ≤7%, condicionada a W_sat &gt; RAM, contra un baseline (LRU del kernel) que es near-óptimo en el núcleo y empata en la cola. No justifica complejidad en sistemas de propósito general.</div></div></div>
+    <div class="hier-row bad"><span class="hier-rank">3</span><div class="hier-body"><div class="hier-name">Prefetch agresivo (WILLNEED por touch)</div><div class="hier-desc">Penalización 2× universal, tres arquitecturas. Convertir orden de evicción en transferencia obligatoria es el error a evitar. Cualquier prefetch futuro debe ser acotado y bajo demanda real.</div></div></div>
+  </div>
+  <ul class="findings" style="margin-top:18px">
+    <li><strong>Marco intelectual:</strong> la inferencia LLM es un streamer con núcleo caliente minúsculo y una cola de pesos cuya localidad es una propiedad medible del routing. Una política solo puede ganar sobre la cola y solo cuando la cola excede la RAM — su valor está acotado por la estructura del modelo, no por la inteligencia de la política. Es el working-set model de Denning aplicado a pesos neuronales, con la localidad aprendida por el router como variable nueva.</li>
+    <li><strong>W_sat como entregable:</strong> protocolo de 1 corrida (budget &gt; W esperado, leer resident_bytes final) que predice a priori si una política puede ganar en un dispositivo dado. OLMoE greedy: 7253MB. Qwen1.5-MoE: 5981MB @128t.</li>
+  </ul>
+</section>
+
+<section class="fase">
+  <div class="fase-head"><span class="fase-num">APRENDIZAJES</span></div>
+  <h2>Lo que el hardware enseñó (y el simulador no sabía)</h2>
+  <ul class="findings">
+    <li><strong>El sim cobraba WS a-priori; el hardware paga lo tocado.</strong> Divergencia estructural #1: inventó spill donde no había (valle fantasma en [8,11]GB a 64 tokens).</li>
+    <li><strong>El LRU del sim era FIFO sin readahead ni caché tibia</strong> — 2.5× peor que el kernel real. Divergencia #2: fabricó victorias de política que eran artefacto.</li>
+    <li><strong><code>madvise(WILLNEED)</code> ≠ protección:</strong> es prefetch con costo de transferencia propio. La semántica exacta de las syscalls importa más que el modelo conceptual.</li>
+    <li><strong>ru_maxrss en macOS viene en bytes, no KB</strong> (bug inicial de 1000× en RSS). <code>vm.swapusage</code> tokeniza "used = 16384.00M" con espacios — el parser simple devolvía siempre 0.</li>
+    <li><strong>El page cache es por-vnode, no por-mmap:</strong> <code>mincore</code> mide por archivo; residencia real ≠ residencia percibida por proceso.</li>
+    <li><strong>Caché tibia mata la reproducibilidad absoluta:</strong> pageins entre corridas idénticas varían hasta CV=0.96. Los rankings pareados intercalados sí son estables — ese es el diseño experimental correcto, y medir el ruido con políticas equivalentes (±5%) da el umbral para declarar efecto.</li>
+    <li><strong>La localidad del routing es del modo de decodificación:</strong> greedy buclea (W satura bajo), sampling explora (W cruza el budget). Un dispositivo real con texto diverso vive en el régimen de thrash — y ahí tampoco la política rescata (empate pareado).</li>
+    <li><strong>Metodología:</strong> falsar primero en simulación barato, cerrar en hardware; predicciones falsables por fase (la #1 refutada con datos, la transición de fase confirmada); mecanismo antes que magnitud (la pregunta "¿por qué 2× en <em>todas</em> las arquitecturas?" apuntó al prefetch antes que a los modelos).</li>
+  </ul>
+</section>
+
+<footer>
+  <strong>Fuentes:</strong> <code>ai-notes/findings/fase1-engine-real.md</code> · <code>fase2-evict-pura.md</code> · <code>fase3-horizonte-largo.md</code> · <code>fase4-wsat.md</code> · <code>tesis-intelectual-working-set.md</code> — trazas crudas en <code>vendor/hlwss/traces-engine/</code> (68 corridas). Decisiones en <code>docs/adr/ADR-0060..0071</code>. Repo: github.com/juvs91/ai-tooling (PR #1, mergeado a master el 2026-10-27).
+</footer>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+(function () {
+  var css = getComputedStyle(document.documentElement);
+  function tok(name) { return css.getPropertyValue(name).trim(); }
+  var INK = tok('--ink'), MUTED = tok('--muted'), LINE = tok('--line'), FAINT = tok('--faint');
+  var C_OS = tok('--accent'), C_POL = tok('--pol'), C_NEG = tok('--neg');
+  var MONO = "'IBM Plex Mono', monospace";
+
+  Chart.defaults.color = MUTED;
+  Chart.defaults.borderColor = LINE;
+  Chart.defaults.font.family = "'IBM Plex Sans', sans-serif";
+  Chart.defaults.font.size = 11.5;
+  Chart.defaults.plugins.legend.labels.boxWidth = 12;
+  Chart.defaults.plugins.legend.labels.boxHeight = 12;
+  Chart.defaults.plugins.tooltip.titleFont.family = MONO;
+  Chart.defaults.plugins.tooltip.bodyFont.family = MONO;
+
+  function mk(id, cfg) { new Chart(document.getElementById(id), cfg); }
+
+  // C1 — Fase 1: sim vs hardware por budget
+  mk('c1', {
+    type: 'bar',
+    data: {
+      labels: ['6GB', '8GB', '9GB', '10GB', '11GB', '12GB'],
+      datasets: [
+        { label: 'Simulador: LRU', data: [33.8, 22.2, 19.2, 15.3, 13.3, 11.9],
+          backgroundColor: 'rgba(140,155,170,.45)', borderRadius: 4 },
+        { label: 'Hardware: os-lru', data: [8.77, 8.34, 8.10, 9.07, 7.84, 7.68],
+          backgroundColor: C_OS, borderRadius: 4 },
+        { label: 'Hardware: hlwss-pin', data: [16.22, 16.41, 17.29, 16.34, 16.32, 16.64],
+          backgroundColor: C_POL, borderRadius: 4 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { title: { display: true, text: 'GB transferidos', font: { family: MONO, size: 10 } } } }
+    }
+  });
+
+  // C2 — mecanismo prefill
+  mk('c2', {
+    type: 'bar',
+    data: {
+      labels: ['Prefill', 'Decode (64 tokens)'],
+      datasets: [
+        { label: 'os-lru', data: [7.4, 0.95], backgroundColor: C_OS, borderRadius: 4 },
+        { label: 'hlwss-pin', data: [14.9, 1.46], backgroundColor: C_POL, borderRadius: 4 }
+      ]
+    },
+    options: {
+      indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+      scales: { x: { title: { display: true, text: 'GB por fase (pageins)', font: { family: MONO, size: 10 } } } }
+    }
+  });
+
+  // C3 — Fase 2 b=6
+  mk('c3', {
+    type: 'bar',
+    data: {
+      labels: ['os-lru', 'hlwss-evict', 'hlwss-pin'],
+      datasets: [{
+        data: [8.11, 7.48, 15.11],
+        backgroundColor: [C_OS, C_POL, C_NEG], borderRadius: 4
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { label: function (c) { return c.parsed.y.toFixed(2) + ' GB'; } } } },
+      scales: { y: { title: { display: true, text: 'GB — OLMoE b=6, 64 tokens', font: { family: MONO, size: 10 } } } }
+    }
+  });
+
+  // C4 — Fase 3 horizonte
+  mk('c4', {
+    type: 'line',
+    data: {
+      labels: ['64', '128', '256', '512'],
+      datasets: [
+        { label: 'os-lru', data: [8.89, 8.37, 7.63, 8.25],
+          borderColor: C_OS, backgroundColor: C_OS, tension: .25 },
+        { label: 'hlwss-evict', data: [8.44, 8.16, 7.87, 8.89],
+          borderColor: C_POL, backgroundColor: C_POL, tension: .25 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { title: { display: true, text: 'tokens generados', font: { family: MONO, size: 10 } } },
+        y: { min: 6, title: { display: true, text: 'GB transferidos', font: { family: MONO, size: 10 } } }
+      }
+    }
+  });
+
+  // C5 — W_sat por condición
+  mk('c5', {
+    type: 'bar',
+    data: {
+      labels: ['OLMoE greedy p0', 'OLMoE greedy p1', 'OLMoE sampling T=1', 'Qwen1.5-MoE greedy'],
+      datasets: [
+        { label: 'W medido (resident_bytes final)', data: [7253, 6797, 7620, 5981],
+          backgroundColor: [C_POL, C_POL, C_NEG, C_OS], borderRadius: 4 },
+        { label: 'Cap del budget 8GB', data: [7629, 7629, 7629, 11444],
+          type: 'line', borderColor: FAINT, borderDash: [6, 5], pointRadius: 0, borderWidth: 1.5 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { title: { display: true, text: 'MB únicos tocados', font: { family: MONO, size: 10 } } } }
+    }
+  });
+
+  // C6 — transición de fase (log)
+  mk('c6', {
+    type: 'bar',
+    data: {
+      labels: ['greedy (argmax)', 'sampling T=1'],
+      datasets: [{
+        data: [8.1, 382.7],
+        backgroundColor: [C_OS, C_NEG], borderRadius: 4
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { label: function (c) { return c.parsed.y.toFixed(1) + ' GB (48×)'; } } } },
+      scales: {
+        y: { type: 'logarithmic', title: { display: true, text: 'GB transferidos (escala log)', font: { family: MONO, size: 10 } } }
+      }
+    }
+  });
+})();
+</script>
