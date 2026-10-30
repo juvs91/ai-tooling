@@ -1671,3 +1671,22 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   uno, sincronizar el otro (`cmp`).
 - El hook block-dangerous de la sesión inspecciona el texto del comando, aunque el patrón vaya a correr
   dentro de Docker: armar el patrón en runtime (`D="git reset --ha"; D="${D}rd"`).
+
+### ruff y doclens activos en ai-tooling (2026-10-30)
+- **quality-gate.sh nunca le mostró nada al modelo** (ni aquí ni en consumers): imprimía texto plano con
+  exit 0 en PostToolUse, y eso solo va al debug log (docs: "Claude never sees stderr from a hook that exits 0";
+  stdout solo cuenta en UserPromptSubmit/SessionStart). En un hook `async`, Claude Code entrega
+  `additionalContext`/`systemMessage` del JSON en el siguiente turno. Fix: `jq -nc` con
+  `hookSpecificOutput.additionalContext`, salida truncada a 15 y aviso de "pueden ser preexistentes"
+  (hay deuda: 60 hallazgos en tools/scripts/doclens/.claude, 685 en vendor/claude-code-proxy). Verificado en
+  vivo: el aviso llegó al turno siguiente. ruff: PATH o `uvx --offline ruff` (un hook async no tiene timeout:
+  nunca descargar desde él). `brew install ruff`.
+- **doc-guard en el toolbox:** doclens vive en `doclens/doclens.py` (doclens/sync.sh no se copia a sí mismo),
+  no en `scripts/` → el hook caía siempre al bloqueo manual. Fallback a `doclens/` + requirements correcto.
+  Setup: `uv venv --python /usr/bin/python3 scripts/.venv-doc-tools && uv pip install --python
+  scripts/.venv-doc-tools/bin/python -r doclens/requirements.txt` (funciona tras el proxy corporativo).
+  `.gitignore`: `scripts/.venv-doc-tools/` y `*.inspect/`. Verificado en vivo con un Read de PDF.
+- `# consumer-only: true` en la cabecera de un hook → el doctor no lo marca huérfano en el toolbox
+  (auto-sync-daily: en ai-tooling se sincronizaría consigo mismo).
+- jq `select(... test("quality-gate"))` también matcheó `ts-quality-gate` y le pisó la descripción: en
+  settings.json, matchear con `/nombre\.sh` anclado.

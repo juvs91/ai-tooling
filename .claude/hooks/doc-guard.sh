@@ -45,6 +45,9 @@ EXT=$(echo "$FILE_PATH" | grep -oiE '\.[a-z0-9]+$' | tr '[:upper:]' '[:lower:]')
 ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
 VENV_PY="$ROOT/scripts/.venv-doc-tools/bin/python"
 DOCLENS="$ROOT/scripts/doclens.py"
+# En el toolbox doclens vive en doclens/ (doclens/sync.sh no se copia a sí mismo)
+[ -f "$DOCLENS" ] || [ ! -f "$ROOT/doclens/doclens.py" ] || DOCLENS="$ROOT/doclens/doclens.py"
+REQS="scripts/requirements-doc-tools.txt"; [ "$DOCLENS" = "$ROOT/doclens/doclens.py" ] && REQS="doclens/requirements.txt"
 
 # ── PDF: pre-procesar y redirigir ─────────────────────────────────────────
 if [ "$EXT" = ".pdf" ]; then
@@ -75,7 +78,7 @@ BLOCKED: Read directo de PDF ($FILE_PATH).
 El backend Kimi de este repo NO acepta bloques PDF: HTTP 400 y sesión muerta.
 El processor doclens no está disponible. Instálalo:
   /usr/bin/python3 -m venv scripts/.venv-doc-tools
-  scripts/.venv-doc-tools/bin/pip install -r scripts/requirements-doc-tools.txt
+  scripts/.venv-doc-tools/bin/pip install -r $REQS
 
 Ruta manual mientras tanto:
 1. Visual: sips -s format png -z 1684 1190 "$FILE_PATH" --out /tmp/pdf-page.png

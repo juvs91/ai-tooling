@@ -217,6 +217,17 @@
           }
         ],
         "description": "Scope gate: bloquea edits fuera del scope definido en .claude/task-scope.json"
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/doc-guard.sh\"",
+            "timeout": 120
+          }
+        ],
+        "description": "doc-guard: PDF → digest de doclens (texto, tablas, renders); imagen >8 MB → copia reducida"
       }
     ],
     "PostToolUse": [
@@ -274,6 +285,18 @@
           }
         ],
         "description": "Drift detector: rastrea edits vs test runs, advierte a 8/15/25 edits sin verificación"
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/quality-gate.sh\"",
+            "timeout": 15,
+            "async": true
+          }
+        ],
+        "description": "quality-gate (async): ruff sobre el .py editado; hallazgos vía additionalContext"
       }
     ],
     "UserPromptSubmit": [

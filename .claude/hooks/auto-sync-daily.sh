@@ -5,6 +5,7 @@
 # matcher: ""
 # timeout: 30
 # async: true
+# consumer-only: true   (en el toolbox se sincronizaría consigo mismo; el doctor no lo marca huérfano)
 #
 # Tres sub-sistemas, cada uno con su propio throttle y opt-out via marker
 # (.ai-tooling: "sync_skills": false / "sync_hooks": false / "sync_doclens": false):

@@ -49,3 +49,7 @@ cloud-provider-env/*
 # Salesforce
 .sfdx/
 vendor/**/.claude/
+
+# doclens (doc-guard.sh): venv local y digests generados junto a cada documento
+scripts/.venv-doc-tools/
+*.inspect/

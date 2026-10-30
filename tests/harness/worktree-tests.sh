@@ -193,7 +193,26 @@ R=$(dg "$W" "$T/doc.pdf");     case "$R" in "2|"*pre-procesado*) ok "PDF desde w
 R=$(dg "$M" "$T/big.png");     case "$R" in "2|"*downscaled*) ok "imagen de 9 MB → downscaled (tamaño portable)" ;; *) bad "imagen grande no interceptada: ${R%%$'\n'*}" ;; esac
 R=$(dg "$M" "$T/small.png");   eq "imagen chica → permitida" "${R%%|*}" 0
 R=$(dg "$M" "$T/doc.pdf.inspect/index.md"); eq "artefactos .inspect → permitidos" "${R%%|*}" 0
-rm -rf "$M/scripts/.venv-doc-tools" "$M/scripts/doclens.py"
+rm -f "$M/scripts/doclens.py"
+
+echo "══ W15: doc-guard en el toolbox (doclens/) y quality-gate visible al modelo ══"
+# toolbox: doclens.py vive en doclens/ (doclens/sync.sh no se copia a sí mismo)
+mkdir -p "$M/doclens"; : > "$M/doclens/doclens.py"
+R=$(dg "$M" "$T/doc.pdf"); case "$R" in "2|"*pre-procesado*) ok "toolbox: usa doclens/doclens.py" ;; *) bad "toolbox sin scripts/doclens.py: ${R%%$'\n'*}" ;; esac
+rm -rf "$M/scripts/.venv-doc-tools"
+R=$(dg "$M" "$T/doc.pdf"); case "$R" in "2|"*doclens/requirements.txt*) ok "toolbox sin venv: indica doclens/requirements.txt" ;; *) bad "requirements equivocado: ${R%%$'\n'*}" ;; esac
+rm -rf "$M/doclens"
+# quality-gate: ruff falso primero en PATH; jq aislado para el caso "sin ruff ni uvx"
+FB="$T/fakebin"; JB="$T/jqbin"; mkdir -p "$FB" "$JB"; ln -s "$(command -v jq)" "$JB/jq"
+printf '#!/bin/sh\n[ "$1" = check ] || exit 0\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do echo "$5:$i:1: F401 unused"; done\n' > "$FB/ruff"; chmod +x "$FB/ruff"
+: > "$T/m.py"; : > "$T/m.txt"
+qg() { echo "{\"tool_input\":{\"file_path\":\"$2\"}}" | PATH="$1" "$BASH" "$H/quality-gate.sh" 2>/dev/null; }
+OUT=$(qg "$FB:$JB:/usr/bin:/bin" "$T/m.py")
+jq -e '.hookSpecificOutput.hookEventName == "PostToolUse" and (.hookSpecificOutput.additionalContext | test("17 hallazgo.*mostrando 15"))' <<< "$OUT" >/dev/null 2>&1 \
+  && ok "hallazgos → JSON additionalContext (no texto plano), truncado a 15" || bad "salida no es additionalContext: ${OUT%%$'\n'*}"
+eq "archivo no .py → sin salida" "$(qg "$FB:$JB:/usr/bin:/bin" "$T/m.txt")" ""
+eq "sin ruff ni uvx → sin salida" "$(qg "$JB:/usr/bin:/bin" "$T/m.py")" ""
+eq "archivo inexistente → sin salida" "$(qg "$FB:$JB:/usr/bin:/bin" "$T/no.py")" ""
 
 echo ""
 echo "══ Worktrees: $PASS ok, $FAIL fallos ══"

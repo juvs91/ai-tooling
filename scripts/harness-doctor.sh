@@ -67,6 +67,8 @@ if [ -d "$REPO_ROOT/.claude/hooks" ]; then
   for f in "$REPO_ROOT/.claude/hooks"/*.sh; do
     b=$(basename "$f")
     echo "$REG" | grep -q "/$b" && continue
+    # Hooks solo para consumers (ej. auto-sync-daily): no registrarlos en el toolbox es lo correcto
+    grep -q "^# consumer-only: true" "$f" 2>/dev/null && continue
     # No es huérfano si otro hook lo referencia (librería sourceada vía variable,
     # ej. LIB="$CWD/.claude/hooks/task-scope-lib.sh" + source "$LIB")
     _ref=false
