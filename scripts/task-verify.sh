@@ -115,6 +115,24 @@ if [ $FAIL -eq 0 ]; then
   else
     echo "→ $SCOPE_FILE conservado: este no es el worktree del hilo principal (subagente aislado)."
   fi
+
+  # ADR-0074: aviso (informativo) si el ADR gate git falta o requiere migración.
+  # Toolbox resuelto inline (no se puede fuentear el doctor); solo instaladores
+  # que declaren `# supports: --check` — uno viejo instalaría en vez de chequear.
+  TB="${AI_TOOLING_HOME:-}"
+  if [ -z "$TB" ] && [ -f .ai-tooling ] && command -v jq >/dev/null 2>&1; then
+    TB=$(jq -r '.local_path // empty' .ai-tooling 2>/dev/null)
+    TB="${TB/#\~/$HOME}"; TB="${TB//\$HOME/$HOME}"
+  fi
+  [ -n "$TB" ] && [ ! -d "$TB" ] && TB=""
+  GH_INSTALLER=""
+  for cand in "${TB:+$TB/tools/install_hooks.sh}" "$PWD/tools/install_hooks.sh"; do
+    [ -n "$cand" ] && [ -f "$cand" ] && grep -qxF '# supports: --check' "$cand" && { GH_INSTALLER="$cand"; break; }
+  done
+  if [ -n "$GH_INSTALLER" ]; then
+    GH_OUT=$(bash "$GH_INSTALLER" --check 2>&1); GH_RC=$?
+    case "$GH_RC" in 11|12) echo "⚠️  ADR gate git: ${GH_OUT#* }" ;; esac
+  fi
   exit 0
 else
   echo ""

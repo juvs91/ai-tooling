@@ -152,6 +152,34 @@ if [ "$SYNC_DOCLENS" = "true" ] && [ -n "$AI_TOOLING_DIR" ] && [ -f "$AI_TOOLING
   fi
 fi
 
+# ── 3b. Hook git del ADR gate (ADR-0074) — solo MIGRACIÓN ─────────────────────
+# Clasifica con el instalador del TOOLBOX (`--check`, nunca la copia del consumer,
+# que puede ser vieja) y solo actúa en 11 = instalación previa a migrar. Un clon
+# sin gate (12) solo se loguea: instalarlo de golpe encendería un bloqueo nuevo.
+# Antes del doctor, para que éste no reporte un estado ya resuelto.
+SYNC_GIT_HOOKS=$(_flag sync_git_hooks)
+GH_INSTALLER="$AI_TOOLING_DIR/tools/install_hooks.sh"
+if [ "$SYNC_GIT_HOOKS" = "true" ] && [ -n "$AI_TOOLING_DIR" ] && [ -f "$GH_INSTALLER" ] \
+   && grep -qxF '# supports: --check' "$GH_INSTALLER" && [ -f "$REPO_ROOT/tools/check_adr_gate.py" ]; then
+  GH_OUT=$(cd "$REPO_ROOT" && bash "$GH_INSTALLER" --check 2>&1); GH_RC=$?
+  case "$GH_RC" in
+    11)
+      GH_BK="$REPO_ROOT/.claude/.harness-backup-$(date -u +%Y%m%dT%H%M%SZ)-githooks"
+      GH_DIR=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path hooks 2>/dev/null)
+      mkdir -p "$GH_BK"
+      for h in pre-commit commit-msg; do [ -f "$GH_DIR/$h" ] && cp -p "$GH_DIR/$h" "$GH_BK/$h.bak"; done
+      if OUT=$(cd "$REPO_ROOT" && bash "$GH_INSTALLER" 2>&1); then
+        log "git-hooks: migrado (${GH_OUT#* }) — respaldo en $GH_BK"
+      else
+        log "git-hooks: ERROR al migrar — $(printf '%s' "$OUT" | tail -n 2 | tr '\n' ' ')"
+      fi
+      ;;
+    12) log "git-hooks: ${GH_OUT#* }" ;;
+    10|13) ;;
+    *) log "git-hooks: check con error (rc=$GH_RC) — $(printf '%s' "$GH_OUT" | tail -n 1)" ;;
+  esac
+fi
+
 # ── 4. Doctor (ADR-0072 M1) ────────────────────────────────────────────────────
 # Híbrido: toolbox-first (siempre la versión más nueva) con fallback a la copia
 # distribuida en el consumer. Read-only; sus líneas van al sync.log.

@@ -25,7 +25,8 @@
 #
 # Backup: antes de sobrescribir, directorio .claude/.harness-backup-<ts>/ con
 # los archivos afectados (como .bak) — SOLO los untracked: lo trackeado ya
-# tiene rollback via git. Rollback = copiar los .bak de vuelta.
+# tiene rollback via git. Rollback = copiar los .bak de vuelta y borrar lo
+# listado en CREATED.txt.
 #
 # Discovery dinámico: copia archivos con "# distributable: true" en sus headers.
 # Idempotente: seguro de ejecutar múltiples veces.
@@ -63,6 +64,7 @@ if [ -f "$MANIFEST" ]; then
 else
   MANIFEST_WORK=$(mktemp)
   echo '{"files":{}}' > "$MANIFEST_WORK"
+  trap 'rm -f "$MANIFEST_WORK"' EXIT
 fi
 
 sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
@@ -134,12 +136,23 @@ echo ""
 # ── Generar HOOKS_JSON (registro) con dedupe contra settings.json ────────────
 EVENTS_DIR=$(mktemp -d)
 DEDUPED=""
+OWNED_NAMES=()       # hooks que el harness puede registrar (event + timeout), incl. deduplicados
+REGISTERED_NAMES=()  # los que efectivamente van a settings.local.json
 
 for f in "$HOOKS_SOURCE"/*.sh; do
     [ -f "$f" ] || continue
     grep -q "^# distributable: true" "$f" 2>/dev/null || continue
 
     name=$(basename "$f")
+    event=$(grep "^# event:" "$f" | head -1 | awk '{print $3}')
+    matcher=$(grep "^# matcher:" "$f" | head -1 | sed -e 's/^# matcher:[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/')
+    timeout_val=$(grep "^# timeout:" "$f" | head -1 | awk '{print $3}')
+    is_async=false
+    grep -q "^# async: true" "$f" && is_async=true
+
+    # Librerías (sin event/timeout, ej. task-scope-lib.sh) no se registran ni son "propias"
+    { [ -z "$event" ] || [ -z "$timeout_val" ]; } && continue
+    OWNED_NAMES+=("$name")
 
     # Dedupe: si settings.json (tracked, del proyecto) ya registra este script,
     # no duplicar en settings.local.json
@@ -147,14 +160,7 @@ for f in "$HOOKS_SOURCE"/*.sh; do
         DEDUPED="$DEDUPED $name"
         continue
     fi
-
-    event=$(grep "^# event:" "$f" | head -1 | awk '{print $3}')
-    matcher=$(grep "^# matcher:" "$f" | head -1 | sed -e 's/^# matcher:[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/')
-    timeout_val=$(grep "^# timeout:" "$f" | head -1 | awk '{print $3}')
-    is_async=false
-    grep -q "^# async: true" "$f" && is_async=true
-
-    [ -z "$event" ] || [ -z "$timeout_val" ] && continue
+    REGISTERED_NAMES+=("$name")
 
     cmd_path='"$CLAUDE_PROJECT_DIR"/.claude/hooks/'"$name"
 
@@ -181,12 +187,85 @@ for event_file in "$EVENTS_DIR"/*.json; do
 done
 rm -rf "$EVENTS_DIR"
 
+# ── Merge con settings.local.json (ADR-0074) ──────────────────────────────────
+# Antes: `.hooks = $hooks` reemplazaba TODO y borraba los hooks propios del
+# consumer. Ahora se quitan solo los hooks del harness — hook por hook, no el
+# grupo entero (un hook ajeno puede compartir grupo) — y se agregan los nuevos.
+# Propios del harness = registrables actuales ∪ manifest.registered (corrida
+# previa) ∪ hooks que el manifest dice que el harness copió. Match por segmento
+# de path (.claude/hooks/<nombre> absoluto, relativo o entre comillas).
+OWNED_JSON=$(
+  { printf '%s\n' "${OWNED_NAMES[@]+"${OWNED_NAMES[@]}"}"
+    jq -r '(.registered // [])[]' "$MANIFEST_WORK" 2>/dev/null
+    jq -r '.files | keys[] | select(startswith(".claude/hooks/")) | ltrimstr(".claude/hooks/")' "$MANIFEST_WORK" 2>/dev/null
+  } | grep -v '^$' | sort -u | jq -R . | jq -s .
+)
+if [ -f "$SETTINGS_FILE" ] && ! jq empty "$SETTINGS_FILE" 2>/dev/null; then
+    echo "✗ ABORTA: $SETTINGS_FILE no es JSON válido — no se escribió nada. Corrígelo y reintenta." >&2
+    exit 1
+fi
+OLD_SETTINGS='{}'
+[ -f "$SETTINGS_FILE" ] && OLD_SETTINGS=$(cat "$SETTINGS_FILE")
+JQ_OWNED=$(cat <<'JQ'
+def owned($names): . as $c | any($names[]; . as $b | $c | test("(^|[\\s/\"'])\\.claude/hooks/" + ($b | gsub("\\."; "\\.")) + "([\\s\"';&|)]|$)"));
+JQ
+)
+NEW_SETTINGS=$(jq --argjson owned "$OWNED_JSON" --argjson new "$HOOKS_JSON" "$JQ_OWNED"'
+  . as $root
+  | (.hooks // {}) as $old
+  | ($old | with_entries(.value |= (map(.hooks |= map(select(((.command // "") | owned($owned)) | not)))
+                                    | map(select(.hooks | length > 0))))) as $kept
+  | (reduce ($new | keys[]) as $k ($kept; .[$k] = ((.[$k] // []) + $new[$k])))
+  | with_entries(select(.value | length > 0)) as $merged
+  | $root | .hooks = $merged' <<< "$OLD_SETTINGS")
+PRESERVED=$(jq --argjson owned "$OWNED_JSON" "$JQ_OWNED"'[(.hooks // {})[][].hooks[] | select(((.command // "") | owned($owned)) | not)] | length' <<< "$OLD_SETTINGS")
+REMOVED=$(jq --argjson owned "$OWNED_JSON" "$JQ_OWNED"'[(.hooks // {})[][].hooks[] | select((.command // "") | owned($owned))] | length' <<< "$OLD_SETTINGS")
+SETTINGS_CHANGED=true
+if [ -f "$SETTINGS_FILE" ] && [ "$(jq -S . <<< "$NEW_SETTINGS")" = "$(jq -S . "$SETTINGS_FILE")" ]; then
+    SETTINGS_CHANGED=false
+fi
+
 echo "Registro settings.local.json:"
 for event_name in $(jq -r 'keys[]' <<< "$HOOKS_JSON"); do
     n=$(jq -r --arg e "$event_name" '.[$e] | length' <<< "$HOOKS_JSON")
     echo "  $event_name: $n hook(s)"
 done
 if [ -n "$DEDUPED" ]; then echo "  dedupe (ya en settings.json, no se duplican):$DEDUPED"; fi
+echo "  preservados (hooks propios del consumer): $PRESERVED · reemplazados del harness: $REMOVED"
+$SETTINGS_CHANGED || echo "  sin cambios"
+echo ""
+
+# ── Config de worktrees nativos (ADR-0074) ────────────────────────────────────
+# Crea solo lo que falta, nunca sobrescribe, y respeta una eliminación hecha por
+# el usuario (queda "declinado" en el manifest; --force lo recrea). No corre
+# dentro de un worktree enlazado (escribiría en la rama de ese worktree).
+WTI="$TARGET/.worktreeinclude"
+WTI_TEMPLATE="$AI_TOOLING_DIR/templates/worktreeinclude.template"
+GITIGNORE_CLAUDE="$TARGET/.claude/.gitignore"
+WTI_ACTION="noop"; GI_ACTION="noop"
+_gd=$(git -C "$TARGET" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)
+_gc=$(git -C "$TARGET" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+echo "Worktrees nativos:"
+if [ -n "$_gd" ] && [ "$_gd" != "$_gc" ]; then
+    echo "  SALTAR     — el destino es un worktree enlazado"
+else
+    if [ -f "$WTI" ]; then
+        echo "  al día     .worktreeinclude (del proyecto, no se toca)"
+    elif [ -n "$(m_entry ".worktreeinclude")" ] && ! $FORCE; then
+        echo "  SALTAR     .worktreeinclude — eliminado por el usuario (declinado; --force para recrear)"
+    elif [ -f "$WTI_TEMPLATE" ]; then
+        echo "  INSTALAR   .worktreeinclude (plantilla genérica: .env, .env.local, settings.local.json)"
+        WTI_ACTION="create"
+    fi
+    if [ -f "$GITIGNORE_CLAUDE" ] && grep -qxE '[[:space:]]*/?worktrees/?[[:space:]]*' "$GITIGNORE_CLAUDE"; then
+        echo "  al día     .claude/.gitignore ignora worktrees/"
+    elif [ "$(jq -r '.provisioned.gitignore_worktrees // false' "$MANIFEST_WORK")" = "true" ] && ! $FORCE; then
+        echo "  SALTAR     .claude/.gitignore — /worktrees/ quitado por el usuario (declinado; --force para re-agregar)"
+    else
+        echo "  AGREGAR    /worktrees/ a .claude/.gitignore"
+        GI_ACTION="append"
+    fi
+fi
 echo ""
 
 # ── Ejecutar ──────────────────────────────────────────────────────────────────
@@ -224,15 +303,16 @@ for entry in "${PLAN[@]}"; do
         skip-local|adopt) if $FORCE; then backup_file "$dst"; fi ;;
     esac
 done
-# settings.local.json: respaldar SOLO si esta corrida va a cambiar su bloque
-# hooks (comparación canónica con jq -S). Si no cambia, no hay nada que proteger.
-if [ -f "$SETTINGS_FILE" ]; then
-    CUR_HOOKS=$(jq -S '.hooks // {}' "$SETTINGS_FILE" 2>/dev/null || echo '{}')
-    NEW_HOOKS=$(jq -S '.' <<< "$HOOKS_JSON")
-    if [ "$CUR_HOOKS" != "$NEW_HOOKS" ]; then backup_file "$SETTINGS_FILE"; fi
+# settings.local.json: respaldar SOLO si el merge (calculado arriba) lo cambia.
+$SETTINGS_CHANGED && backup_file "$SETTINGS_FILE"
+[ "$GI_ACTION" = "append" ] && backup_file "$GITIGNORE_CLAUDE"
+if [ "$WTI_ACTION" = "create" ]; then
+    # Archivo nuevo: no hay .bak posible — su rollback es borrarlo
+    mkdir -p "$BACKUP_DIR"; echo ".worktreeinclude" >> "$BACKUP_DIR/CREATED.txt"
+    BACKED=$((BACKED + 1))
 fi
 if [ "$BACKED" -gt 0 ]; then
-    echo "✓ backup ($BACKED untracked): $BACKUP_DIR/ (rollback = copiar los .bak de vuelta)"
+    echo "✓ backup ($BACKED untracked/creados): $BACKUP_DIR/ (rollback = copiar los .bak y borrar lo listado en CREATED.txt)"
 fi
 
 # Aplicar copias (cp+mv atómico: un hook puede invocarse a sí mismo — ADR-0047)
@@ -263,14 +343,28 @@ for entry in "${PLAN[@]}"; do
     esac
 done
 
-# Actualizar settings.local.json (preserva todo lo demás)
-TMP_FILE="${SETTINGS_FILE}.tmp.$$"
-if [ -f "$SETTINGS_FILE" ]; then
-    jq --argjson hooks "$HOOKS_JSON" '.hooks = $hooks' "$SETTINGS_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$SETTINGS_FILE"
-    echo "✓ settings.local.json actualizado (resto preservado)"
-else
-    jq -n --argjson hooks "$HOOKS_JSON" '{"hooks": $hooks}' > "$SETTINGS_FILE"
-    echo "✓ settings.local.json creado"
+# settings.local.json: merge calculado arriba; solo se escribe si cambió
+if $SETTINGS_CHANGED; then
+    TMP_FILE="${SETTINGS_FILE}.tmp.$$"
+    printf '%s\n' "$NEW_SETTINGS" | jq . > "$TMP_FILE" && mv "$TMP_FILE" "$SETTINGS_FILE"
+    echo "✓ settings.local.json actualizado (hooks propios preservados: $PRESERVED)"
+fi
+REG_JSON=$(printf '%s\n' "${REGISTERED_NAMES[@]+"${REGISTERED_NAMES[@]}"}" | grep -v '^$' | jq -R . | jq -s .)
+tmp=$(mktemp); jq --argjson r "$REG_JSON" '.registered = $r' "$MANIFEST_WORK" > "$tmp" && mv "$tmp" "$MANIFEST_WORK"
+
+# Config de worktrees
+if [ "$WTI_ACTION" = "create" ]; then
+    cp "$WTI_TEMPLATE" "$WTI"
+    m_set ".worktreeinclude" "$(sha "$WTI")" "harness"
+    echo "  ✓ .worktreeinclude creado"
+fi
+if [ "$GI_ACTION" = "append" ]; then
+    # Salto de línea final garantizado y append O_APPEND (convive con el append
+    # concurrente de sessions/ de skill-autoload/plan-mode-gate)
+    if [ -s "$GITIGNORE_CLAUDE" ] && [ -n "$(tail -c1 "$GITIGNORE_CLAUDE")" ]; then printf '\n' >> "$GITIGNORE_CLAUDE"; fi
+    printf '/worktrees/\n' >> "$GITIGNORE_CLAUDE"
+    tmp=$(mktemp); jq '.provisioned.gitignore_worktrees = true' "$MANIFEST_WORK" > "$tmp" && mv "$tmp" "$MANIFEST_WORK"
+    echo "  ✓ /worktrees/ agregado a .claude/.gitignore"
 fi
 
 # Persistir manifest (si era temporal, copiarlo al consumer)

@@ -135,14 +135,17 @@ Claude Code ya hace `git worktree remove --force` al limpiar. En su lugar: confi
 
 ### Fuera de alcance (hallazgos registrados)
 
-- `install-hooks.sh` (`.hooks = $hooks`) borra hooks propios del consumer en `settings.local.json`.
-- `protect-skill-gate-bypass.sh` da falso positivo con cualquier `>` (ej. `2>/dev/null`) si el
+> **Actualización 2026-10-29:** los puntos marcados ✅ se resolvieron en
+> `ADR-0074-harness-merge-y-hooks-git.md`.
+
+- ✅ `install-hooks.sh` (`.hooks = $hooks`) borra hooks propios del consumer en `settings.local.json`.
+- ✅ `protect-skill-gate-bypass.sh` da falso positivo con cualquier `>` (ej. `2>/dev/null`) si el
   comando menciona el archivo protegido.
 - Deriva de CLAUDE.md (versión de `block-no-verify`, hooks UserPromptSubmit no listados) y del
   índice de ADRs (0062–0071 faltan, 0060 duplicado).
 - `session-audit.sh` (slug), symlinks globales de `init.sh`/`ralph-install.sh`, `cd` sugerido por
   `migration-gate`, `.venv-*` del proxy sin ignorar.
-- `gitops-init.sh` no actualiza `tools/install_hooks.sh` en consumers existentes.
+- ✅ (vía auto-sync con el instalador del toolbox) `gitops-init.sh` no actualiza `tools/install_hooks.sh` en consumers existentes.
 
 ## Referencias
 

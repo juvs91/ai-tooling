@@ -226,7 +226,7 @@ echo '{"tool_name":"Edit","tool_input":{"file_path":"/path/pyproject.toml","old_
 | `check-mcp-status.sh` | Check health of all MCP services |
 | `cloudsql-mcp.sh` | Wrapper for CloudSQL MCP (switches WPC_ENV) |
 | `task-verify.sh` | Verifica completitud de tarea vs el `task-scope.json` de la sesión actual; exit 0 = completa |
-| `install-hooks.sh` | Distribuye hooks/scripts con `# distributable: true` a otro proyecto. **Correr tras actualizar hooks en ai-tooling.** |
+| `install-hooks.sh` | Distribuye hooks/scripts con `# distributable: true` a otro proyecto (merge: preserva los hooks propios del consumer en `settings.local.json`; provee config de worktrees). **Correr tras actualizar hooks en ai-tooling.** |
 
 ## Agent Skills
 
@@ -317,7 +317,8 @@ Las partes específicas del proyecto van en `completion_checklist` del `task-sco
 2. Copiar `scripts/task-verify.sh` de `ai-tooling/scripts/` al proyecto
 3. Copiar `.claude/hooks/scope-gate.sh` y `.claude/hooks/task-scope-lib.sh` de
    `ai-tooling/.claude/hooks/` al proyecto
-4. Worktrees nativos (ADR-0073), a mano — `install-hooks.sh` no los distribuye:
-   agregar `/worktrees/` a `.claude/.gitignore` y copiar `.worktreeinclude` (ajustando la lista
-   a los archivos gitignorados que el proyecto necesita en cada worktree, ej. `.env`).
-   `harness-doctor.sh` avisa si falta.
+4. Worktrees nativos (ADR-0073/0074): `install-hooks.sh --apply` crea `.worktreeinclude` (plantilla
+   genérica — ajústala a los archivos gitignorados que el proyecto necesita en cada worktree) y agrega
+   `/worktrees/` a `.claude/.gitignore`. Nunca sobrescribe; si los quitas, no los vuelve a crear.
+5. ADR gate git (por clon, `.git/hooks` no se versiona): `bash tools/install_hooks.sh`.
+   `--check` dice el estado; auto-sync solo migra instalaciones viejas, el doctor avisa si falta.

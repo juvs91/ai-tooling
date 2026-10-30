@@ -19,6 +19,7 @@
 #   4. drift (informativo): sha256 de distributables del toolbox vs copias locales
 #   5. doclens: VERSION del toolbox vs scripts/.doclens-version
 #   6. worktrees (ADR-0073): .worktreeinclude, huérfanos, conteo, ramas mergeadas
+#   7. ADR gate git (ADR-0074): install_hooks.sh --check (falta / migración pendiente)
 set -uo pipefail
 
 REPO_ROOT="${1:-$(pwd)}"
@@ -112,8 +113,13 @@ fi
 # ── 6. worktrees (ADR-0073) ───────────────────────────────────────────────────
 # Solo lectura y sin fetch: compara contra refs locales (pueden estar viejas).
 if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  [ -f "$REPO_ROOT/.worktreeinclude" ] \
-    || warn "sin .worktreeinclude — los worktrees nativos nacen sin .env/settings.local.json (ver CLAUDE.md, instalación)"
+  # Si el usuario lo borró a propósito (manifest lo registra como provisto), no insistir (ADR-0074)
+  WTI_DECLINED=false
+  $HAS_JQ && [ -f "$REPO_ROOT/.claude/.harness-manifest.json" ] \
+    && [ -n "$(jq -r '.files[".worktreeinclude"] // empty' "$REPO_ROOT/.claude/.harness-manifest.json" 2>/dev/null)" ] \
+    && WTI_DECLINED=true
+  [ -f "$REPO_ROOT/.worktreeinclude" ] || $WTI_DECLINED \
+    || warn "sin .worktreeinclude — los worktrees nativos nacen sin .env/settings.local.json (install-hooks.sh --apply lo crea)"
 
   PRUNABLE=$(git -C "$REPO_ROOT" worktree prune --dry-run 2>&1)
   [ -n "$PRUNABLE" ] && warn "worktrees huérfanos (dir borrado a mano): git worktree prune"
@@ -136,6 +142,23 @@ if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     git -C "$REPO_ROOT" merge-base --is-ancestor "$br" "$TRUNK" 2>/dev/null && MERGED="$MERGED $br"
   done < <(git -C "$REPO_ROOT" worktree list --porcelain | awk 'NR==1,/^$/{next} /^branch refs\/heads\//{sub(/^branch refs\/heads\//,""); print}')
   [ -n "$MERGED" ] && say "worktrees con rama ya mergeada a $TRUNK (candidatos a limpiar):$MERGED"
+fi
+
+# ── 7. ADR gate git (ADR-0074) ────────────────────────────────────────────────
+# Mismo --check que auto-sync. Solo un instalador que declare `# supports: --check`
+# (uno viejo ignoraría el flag e INSTALARÍA — el doctor nunca escribe).
+GH_INSTALLER=""
+for cand in "${AI_TOOLING_DIR:+$AI_TOOLING_DIR/tools/install_hooks.sh}" "$REPO_ROOT/tools/install_hooks.sh"; do
+  [ -n "$cand" ] && [ -f "$cand" ] && grep -qxF '# supports: --check' "$cand" && { GH_INSTALLER="$cand"; break; }
+done
+if [ -n "$GH_INSTALLER" ]; then
+  GH_OUT=$(cd "$REPO_ROOT" && bash "$GH_INSTALLER" --check 2>&1); GH_RC=$?
+  case "$GH_RC" in
+    11|12) warn "ADR gate git: ${GH_OUT#* }" ;;
+    13)    say "ADR gate git: no aplica (${GH_OUT#* })" ;;
+    10)    ;;
+    *)     warn "ADR gate git: check con error (rc=$GH_RC)" ;;
+  esac
 fi
 
 # ── Resumen ───────────────────────────────────────────────────────────────────

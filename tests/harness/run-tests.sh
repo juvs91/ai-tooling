@@ -106,11 +106,83 @@ if [ -n "$BK" ]; then
   [ -f "$BK/settings.local.json.bak" ] && ok "settings.local.json (untracked, con cambios) sí se respalda" || bad "settings.local.json untracked sin respaldo"
 fi
 
+IH="$AI_TOOLING/scripts/install-hooks.sh"
+cnt() { jq --arg p "$2" '[(.hooks // {})[][].hooks[].command | select(test($p))] | length' "$1"; }
+
+echo "══ T8: merge — hooks propios del consumer sobreviven (ADR-0074) ══"
+new_fixture
+cat > "$FIX/.claude/settings.local.json" <<'EOF'
+{"permissions":{"allow":["Bash(ls)"]},
+ "hooks":{"PreToolUse":[
+   {"matcher":"","hooks":[
+     {"type":"command","command":"\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-dangerous.sh","timeout":5},
+     {"type":"command","command":"bash .claude/hooks/my-hook.sh","timeout":5}]},
+   {"matcher":"Edit|Write","hooks":[{"type":"command","command":"bash .claude/hooks/scope-gate.sh","timeout":5}]}]}}
+EOF
+bash "$IH" "$FIX" --apply >/dev/null 2>&1
+bash "$IH" "$FIX" --apply >/dev/null 2>&1
+S="$FIX/.claude/settings.local.json"
+[ "$(cnt "$S" 'my-hook\.sh')" = 1 ] && ok "hook propio en grupo mixto se conserva (1 vez)" || bad "hook propio perdido o duplicado ($(cnt "$S" 'my-hook\.sh'))"
+[ "$(cnt "$S" 'block-dangerous\.sh')" = 1 ] && ok "hook del harness registrado una sola vez" || bad "block-dangerous registrado $(cnt "$S" 'block-dangerous\.sh') veces"
+[ "$(cnt "$S" 'scope-gate\.sh')" = 1 ] && ok "forma relativa del harness reemplazada (sin doble ejecución)" || bad "scope-gate registrado $(cnt "$S" 'scope-gate\.sh') veces"
+[ "$(jq -r '.permissions.allow[0]' "$S")" = "Bash(ls)" ] && ok "resto de settings.local.json preservado" || bad "permissions perdidas"
+[ "$(jq -r '.registered | length > 0' "$FIX/.claude/.harness-manifest.json")" = true ] && ok "manifest.registered persistido" || bad "manifest.registered ausente"
+
+echo "══ T9: sin cambios → no reescribe ni crea backup ══"
+B0=$(ls -d "$FIX"/.claude/.harness-backup-* 2>/dev/null | wc -l | tr -d ' ')
+M0=$(ls -l "$S" | awk '{print $6,$7,$8}'); CK0=$(cksum < "$S")
+sleep 1
+OUT=$(bash "$IH" "$FIX" --apply 2>&1)
+B1=$(ls -d "$FIX"/.claude/.harness-backup-* 2>/dev/null | wc -l | tr -d ' ')
+[ "$CK0" = "$(cksum < "$S")" ] && ok "settings.local.json intacto" || bad "settings.local.json reescrito sin cambios"
+[ "$B0" = "$B1" ] && ok "sin backup nuevo" || bad "backup creado sin cambios ($B0 → $B1)"
+grep -q "sin cambios" <<< "$OUT" && ok "reporta 'sin cambios'" || bad "no reporta 'sin cambios'"
+
+echo "══ T10: settings.local.json inválido → aborta antes de copiar ══"
+new_fixture
+echo '{roto' > "$FIX/.claude/settings.local.json"
+bash "$IH" "$FIX" --apply >/dev/null 2>&1; RC=$?
+[ "$RC" != 0 ] && ok "exit ≠ 0" || bad "no abortó"
+assert_file_absent "$FIX/.claude/hooks/block-dangerous.sh" "0 hooks copiados"
+
+echo "══ T11: dry-run reporta preservados y no escribe ══"
+new_fixture
+echo '{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"bash mine.sh"}]}]}}' > "$FIX/.claude/settings.local.json"
+CK0=$(cksum < "$FIX/.claude/settings.local.json")
+OUT=$(bash "$IH" "$FIX" 2>&1)
+grep -q "preservados (hooks propios del consumer): 1" <<< "$OUT" && ok "dry-run reporta 1 preservado" || bad "dry-run no reporta preservados"
+[ "$CK0" = "$(cksum < "$FIX/.claude/settings.local.json")" ] && ok "dry-run no toca settings" || bad "dry-run escribió settings"
+assert_file_absent "$FIX/.worktreeinclude" "dry-run no crea .worktreeinclude"
+
+echo "══ T12: .worktreeinclude — crea, no pisa, respeta declinado ══"
+new_fixture
+bash "$IH" "$FIX" --apply >/dev/null 2>&1
+assert_file_exists "$FIX/.worktreeinclude" "se crea si falta"
+echo "propio" > "$FIX/.worktreeinclude"; bash "$IH" "$FIX" --apply >/dev/null 2>&1
+grep -qx propio "$FIX/.worktreeinclude" && ok "uno propio no se toca" || bad "pisó el .worktreeinclude propio"
+rm -f "$FIX/.worktreeinclude"; bash "$IH" "$FIX" --apply >/dev/null 2>&1
+assert_file_absent "$FIX/.worktreeinclude" "borrado por el usuario no se recrea (declinado)"
+bash "$IH" "$FIX" --apply --force >/dev/null 2>&1
+assert_file_exists "$FIX/.worktreeinclude" "--force lo recrea"
+
+echo "══ T13: /worktrees/ en .claude/.gitignore — limpio e idempotente ══"
+new_fixture
+printf 'sessions/' > "$FIX/.claude/.gitignore"   # sin salto de línea final
+bash "$IH" "$FIX" --apply >/dev/null 2>&1; bash "$IH" "$FIX" --apply >/dev/null 2>&1
+grep -qx 'sessions/' "$FIX/.claude/.gitignore" && ok "última línea previa intacta" || bad "se pegó a la línea anterior"
+[ "$(grep -cx '/worktrees/' "$FIX/.claude/.gitignore")" = 1 ] && ok "/worktrees/ una sola vez" || bad "/worktrees/ duplicado o ausente"
+sed -i.x '/^\/worktrees\/$/d' "$FIX/.claude/.gitignore"; bash "$IH" "$FIX" --apply >/dev/null 2>&1
+! grep -qx '/worktrees/' "$FIX/.claude/.gitignore" && ok "quitado por el usuario no se re-agrega" || bad "re-agregó /worktrees/"
+
 echo ""
 echo "══ Resultado: $PASS ok, $FAIL fallos ══"
 rm -rf "$(dirname "$FIX")"
 
 echo ""
 bash "$AI_TOOLING/tests/harness/worktree-tests.sh"; WT_RC=$?
+echo ""
+bash "$AI_TOOLING/tests/harness/bypass-gate-tests.sh"; BG_RC=$?
+echo ""
+bash "$AI_TOOLING/tests/harness/githook-tests.sh"; GH_RC=$?
 
-[ "$FAIL" -eq 0 ] && [ "$WT_RC" -eq 0 ]
+[ "$FAIL" -eq 0 ] && [ "$WT_RC" -eq 0 ] && [ "$BG_RC" -eq 0 ] && [ "$GH_RC" -eq 0 ]

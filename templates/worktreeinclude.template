@@ -1,0 +1,9 @@
+# .worktreeinclude — archivos gitignorados que Claude Code copia a cada worktree
+# nativo (EnterWorktree, --worktree, isolation: 'worktree'). Sintaxis .gitignore;
+# solo se copia lo que matchea Y está gitignorado. Plantilla de ai-tooling
+# (ADR-0073/0074): ajústala a lo que tu proyecto necesita en cada worktree.
+# Nombrar directorios explícitamente: `**/` no entra a dirs 100% ignorados.
+.env
+.env.local
+# Copia única al crear el worktree (no se re-sincroniza)
+.claude/settings.local.json

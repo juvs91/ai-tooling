@@ -41,3 +41,4 @@
 | [ADR-0061](ADR-0061-azure-pipelines-logica-fuera-del-yaml-y-simulador.md) | Azure Pipelines — lógica fuera del YAML y simulador local | Proposed | 2026-10-15 | GitOps |
 | [ADR-0072](ADR-0072-harness-sync-hardening.md) | Hardening del harness de sync — doctor, manifest, dry-run, dedupe y backups | Accepted | 2026-10-28 | Harness |
 | [ADR-0073](ADR-0073-worktrees-nativos-harness.md) | Worktrees nativos de Claude Code en el harness — raíz de sesión canónica, repo del archivo, guards | Accepted | 2026-10-29 | Harness |
+| [ADR-0074](ADR-0074-harness-merge-y-hooks-git.md) | Merge de hooks del consumer, worktrees en consumers y ADR gate git (--check, solo migración) | Accepted | 2026-10-29 | Harness |

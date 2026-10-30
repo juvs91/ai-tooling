@@ -83,6 +83,9 @@ check_dependency "python3" "https://www.python.org/downloads/"
 check_dependency "pip" "curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && python3 get-pip.py"
 check_dependency "git" "https://git-scm.com/downloads"
 
+# ADR gate git (commit-msg) — por clon; .git/hooks no se versiona (ADR-0074)
+(cd "$PROJECT_DIR" && bash tools/install_hooks.sh) || log_warn "No se pudo instalar el ADR gate git — corre: bash tools/install_hooks.sh"
+
 # 2. Instalar dependencias Python del proxy
 log_info "2. Instalando dependencias Python del proxy..."
 

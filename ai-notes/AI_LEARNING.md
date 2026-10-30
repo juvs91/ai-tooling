@@ -1590,3 +1590,24 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
 - **Operativo:** no hacer `cd` persistente en Bash durante una sesión con estos hooks viejos — usar rutas
   absolutas o subshells `( cd … )`. `protect-skill-gate-bypass.sh` da falso positivo con cualquier `>` si el
   comando nombra el archivo protegido (registrado como fuera de alcance).
+
+### Pendientes de ADR-0073 cerrados — ADR-0074 (2026-10-29)
+- **install-hooks merge:** `.hooks = $hooks` borraba hooks del consumer. Ahora merge hook-por-hook
+  (no por grupo) con propiedad por segmento de path + `manifest.registered`. **Bug atrapado por test:** en jq,
+  tras `... as $x |` el `.` ya no es la raíz — usar `. as $root | ... | $root | .hooks = $x` (se perdía
+  `permissions`).
+- **Provisión que respeta al usuario:** crear solo si falta y registrar en el manifest; si el usuario lo
+  borra, "declinado" (no se recrea en el sync diario). Mismo patrón para una línea en `.gitignore`.
+- **ADR gate git:** `--check` con códigos 10-13 (no 0-3: chocan con `set -e`=1 y bash/argparse=2), una sola
+  clasificación compartida por check e instalación, y los llamadores solo usan instaladores que declaren
+  `# supports: --check` — una versión vieja ignora el flag e INSTALA. auto-sync solo migra (11); un clon sin
+  gate (12) solo se avisa (decisión del usuario: no encender bloqueos nuevos en silencio).
+- **Framework pre-commit:** los consumers de gitops-init usan `id: adr-gate` del framework; nuestro bloque
+  agregado tras su `exec` es código muerto. Detectar "framework gestiona el gate" (no "framework instalado":
+  puede ser solo lint).
+- **Bypass gate:** un parser "solo destino" en bash pierde más de lo que gana (xargs, variables, find -exec).
+  Mejor: regla amplia + exenciones probadamente seguras + verbos en posición de comando. `sed -E` de macOS
+  no soporta `\s`; ordenar alternativas de la más larga a la más corta (`>>` antes que `>|`).
+- **Tests:** funciones que crean fixtures dentro de `$(…)` no pueden usar contadores globales (subshell) —
+  usar `mktemp -d`. Al listar el entorno con `env | grep`, filtrar por nombre exacto: un patrón amplio
+  imprimió un token de socket local en la sesión anterior.
