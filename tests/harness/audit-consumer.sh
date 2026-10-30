@@ -73,12 +73,15 @@ fi
 
 echo "══ A7: harness completo en consumer — doble corrida, sin side effects ══"
 if [ -f "$CONSUMER/.claude/hooks/auto-sync-daily.sh" ] && git -C "$CONSUMER" rev-parse >/dev/null 2>&1; then
-  GIT_BEFORE=$(git -C "$CONSUMER" status --porcelain | shasum -a 256)
+  # Los archivos de ESTADO del propio harness sí pueden cambiar legítimamente
+  # (.last_sync cuando toca sync de skills, sync.log siempre) — se excluyen.
+  GIT_FILTER=(. ':(exclude).agents/.last_sync' ':(exclude).claude/sync.log' ':(exclude).claude/.harness-manifest.json')
+  GIT_BEFORE=$(git -C "$CONSUMER" status --porcelain -- "${GIT_FILTER[@]}" 2>/dev/null | shasum -a 256)
   echo "{\"cwd\":\"$CONSUMER\"}" | CLAUDE_PROJECT_DIR="$CONSUMER" bash "$CONSUMER/.claude/hooks/auto-sync-daily.sh" >/dev/null 2>&1; E1=$?
   echo "{\"cwd\":\"$CONSUMER\"}" | CLAUDE_PROJECT_DIR="$CONSUMER" bash "$CONSUMER/.claude/hooks/auto-sync-daily.sh" >/dev/null 2>&1; E2=$?
-  GIT_AFTER=$(git -C "$CONSUMER" status --porcelain | shasum -a 256)
+  GIT_AFTER=$(git -C "$CONSUMER" status --porcelain -- "${GIT_FILTER[@]}" 2>/dev/null | shasum -a 256)
   [ "$E1" = "0" ] && [ "$E2" = "0" ] && ok "doble corrida exit 0" || bad "exit codes: $E1/$E2"
-  [ "$GIT_BEFORE" = "$GIT_AFTER" ] && ok "working tree intacto tras 2 corridas" || bad "el harness tocó el working tree"
+  [ "$GIT_BEFORE" = "$GIT_AFTER" ] && ok "working tree intacto tras 2 corridas (salvo estado del harness)" || bad "el harness tocó el working tree"
 else
   ok "consumer sin auto-sync-daily o sin git (skip)"
 fi

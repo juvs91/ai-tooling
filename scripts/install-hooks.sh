@@ -24,8 +24,8 @@
 # basename del script) NO se duplican en settings.local.json.
 #
 # Backup: antes de sobrescribir, directorio .claude/.harness-backup-<ts>/ con
-# cada archivo afectado (como .bak) + settings.local.json previo.
-# Rollback = copiar los .bak de vuelta.
+# los archivos afectados (como .bak) — SOLO los untracked: lo trackeado ya
+# tiene rollback via git. Rollback = copiar los .bak de vuelta.
 #
 # Discovery dinámico: copia archivos con "# distributable: true" en sus headers.
 # Idempotente: seguro de ejecutar múltiples veces.
@@ -195,26 +195,44 @@ if [ "$MODE" = "dry-run" ]; then
     exit 0
 fi
 
-# Backup de lo que se va a sobrescribir + settings.local.json previo.
-# Directorio plano (no tarball): se inspecciona con ls y el rollback es cp.
+# Backup SOLO de archivos untracked que efectivamente se van a sobrescribir.
+# Lo trackeado ya tiene rollback via git (git checkout/diff) — respaldarlo es
+# redundante. El backup es el único salvavidas de lo que git no cubre:
+# settings.local.json (untracked por convención) y consumers sin .claude
+# trackeado. Directorio plano: rollback = copiar los .bak de vuelta.
+is_tracked() { git -C "$TARGET" ls-files --error-unmatch "$1" >/dev/null 2>&1; }
+
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP_DIR="$TARGET/.claude/.harness-backup-$TS"
-NEEDS_BACKUP=false
+BACKED=0
+backup_file() { # backup_file <dst>
+    local dst="$1" rel
+    [ -f "$dst" ] || return 0
+    rel="${dst#$TARGET/}"
+    if is_tracked "$rel"; then
+        return 0  # git ya lo cubre
+    fi
+    mkdir -p "$BACKUP_DIR"
+    cp "$dst" "$BACKUP_DIR/$(basename "$dst").bak"
+    BACKED=$((BACKED + 1))
+}
+
 for entry in "${PLAN[@]}"; do
     IFS='|' read -r src dst rel action <<< "$entry"
-    case "$action" in update|install) NEEDS_BACKUP=true ;; esac
-    if [ "$action" = "skip-local" ] || [ "$action" = "adopt" ]; then
-        if $FORCE; then NEEDS_BACKUP=true; fi
-    fi
+    case "$action" in
+        update) backup_file "$dst" ;;
+        skip-local|adopt) if $FORCE; then backup_file "$dst"; fi ;;
+    esac
 done
-if $NEEDS_BACKUP; then
-    mkdir -p "$BACKUP_DIR"
-    for entry in "${PLAN[@]}"; do
-        IFS='|' read -r src dst rel action <<< "$entry"
-        if [ -f "$dst" ]; then cp "$dst" "$BACKUP_DIR/$(basename "$dst").bak" 2>/dev/null || true; fi
-    done
-    if [ -f "$SETTINGS_FILE" ]; then cp "$SETTINGS_FILE" "$BACKUP_DIR/settings.local.json.bak"; fi
-    echo "✓ backup: $BACKUP_DIR/ (rollback = copiar de vuelta los .bak)"
+# settings.local.json: respaldar SOLO si esta corrida va a cambiar su bloque
+# hooks (comparación canónica con jq -S). Si no cambia, no hay nada que proteger.
+if [ -f "$SETTINGS_FILE" ]; then
+    CUR_HOOKS=$(jq -S '.hooks // {}' "$SETTINGS_FILE" 2>/dev/null || echo '{}')
+    NEW_HOOKS=$(jq -S '.' <<< "$HOOKS_JSON")
+    if [ "$CUR_HOOKS" != "$NEW_HOOKS" ]; then backup_file "$SETTINGS_FILE"; fi
+fi
+if [ "$BACKED" -gt 0 ]; then
+    echo "✓ backup ($BACKED untracked): $BACKUP_DIR/ (rollback = copiar los .bak de vuelta)"
 fi
 
 # Aplicar copias (cp+mv atómico: un hook puede invocarse a sí mismo — ADR-0047)

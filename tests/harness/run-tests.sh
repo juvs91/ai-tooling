@@ -80,6 +80,32 @@ OUT=$(bash "$AI_TOOLING/scripts/harness-doctor.sh" "$FIX" 2>&1)
 grep -q "a-lib.sh" <<< "$(grep huérfanos <<< "$OUT")" && bad "a-lib.sh marcada huérfana (es librería)" || ok "a-lib.sh (librería) no es huérfana"
 grep -q "quality-gate.sh" <<< "$(grep huérfanos <<< "$OUT")" && ok "quality-gate.sh sí es huérfana (ts-quality-gate no la referencia)" || bad "quality-gate.sh falsamente excluida por substring"
 
+echo "══ T7: backup solo de untracked — git ya cubre lo trackeado ══"
+new_fixture
+bash "$AI_TOOLING/scripts/install-hooks.sh" "$FIX" --apply >/dev/null 2>&1
+(
+  cd "$FIX"
+  git init -q
+  git add .claude/hooks scripts
+  git -c user.name=t -c user.email=t@t commit -qm init
+)
+echo "# custom local" >> "$FIX/.claude/hooks/block-dangerous.sh"
+# Forzar que settings.local.json CAMBIE en esta corrida (si no cambia, no se
+# respalda — ese es el comportamiento correcto desde el fix de idempotencia)
+python3 - <<EOF
+import json
+p = "$FIX/.claude/settings.local.json"
+s = json.load(open(p)); s["hooks"] = {}
+json.dump(s, open(p, "w"))
+EOF
+bash "$AI_TOOLING/scripts/install-hooks.sh" "$FIX" --apply --force >/dev/null 2>&1
+BK=$(ls -dt "$FIX/.claude/".harness-backup-*/ 2>/dev/null | head -1)
+[ -n "$BK" ] || bad "no se generó backup dir"
+if [ -n "$BK" ]; then
+  [ -f "$BK/block-dangerous.sh.bak" ] && bad "hook trackeado respaldado (redundante con git)" || ok "hook trackeado NO se respalda (git lo cubre)"
+  [ -f "$BK/settings.local.json.bak" ] && ok "settings.local.json (untracked, con cambios) sí se respalda" || bad "settings.local.json untracked sin respaldo"
+fi
+
 echo ""
 echo "══ Resultado: $PASS ok, $FAIL fallos ══"
 rm -rf "$(dirname "$FIX")"

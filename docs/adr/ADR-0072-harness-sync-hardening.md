@@ -14,7 +14,12 @@
 > - Fase 2: `install-hooks.sh` reescrito con manifest `.harness-manifest.json`,
 >   dry-run por default, dedupe por basename contra `settings.json` y backup
 >   en **directorio plano** `.harness-backup-<ts>/` (rollback = copiar los
->   `.bak` de vuelta; se descartó tarball por sobre-ingeniería). `auto-sync-daily.sh` lo invoca con `--apply`. Tests
+>   `.bak` de vuelta; se descartó tarball por sobre-ingeniería) y **solo de
+>   archivos untracked** — lo trackeado ya tiene rollback vía git, respaldarlo
+>   era redundante — **y solo cuando el contenido va a cambiar** (comparación
+>   canónica `jq -S` del bloque hooks; una corrida idempotente no genera
+>   backups vacíos). Refinamientos del 2026-10-29, T7 de la suite + A2 de la
+>   auditoría. `auto-sync-daily.sh` lo invoca con `--apply`. Tests
 >   `tests/harness/run-tests.sh`: **16/16 verdes** (T1 dry-run no escribe,
 >   T2 apply instala, T3 modificación local protegida + force + backup,
 >   T4 dedupe, T5 regresión jq opt-out, T6 doctor librerías/substring).
