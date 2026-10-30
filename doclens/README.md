@@ -39,9 +39,11 @@ doclens/.venv/bin/python doclens/doclens.py <archivo> [--dpi 150]
 En Claude Code no hace falta llamarlo: el hook `doc-guard` intercepta el `Read`
 de un PDF y redirige al sidecar.
 
-Idempotente: si el sidecar existe y es más reciente que el archivo, no
-reprocesa. Exit codes: `0` ok · `2` formato no soportado · `3` dependencia
-faltante.
+Idempotente: si el sidecar corresponde al **mismo contenido** (sha256 guardado
+en `.source`), no reprocesa; no usa fechas, así que un PDF reemplazado con fecha
+vieja (`cp -p`, unzip, rsync) se reprocesa. Al reprocesar se limpian `pages/` y
+`figures/`. Exit codes: `0` ok · `1` no existe · `2` formato no soportado ·
+`3` dependencia faltante · `4` PDF con contraseña de apertura.
 
 ## Listo para usar (sin pasos manuales)
 

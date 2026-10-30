@@ -159,6 +159,44 @@ Probado en vivo, sin stubs:
   siguió funcionando y el PDF se procesó;
 - un consumer nuevo quedó listo en ~6 s.
 
+## Cuarta validación: uso real de punta a punta (2026-10-30)
+
+Un revisor independiente probó con el motor real los escenarios de un día normal:
+- muchos PDFs, repetidos, modificados, con acentos y espacios, enormes, cifrados, vacíos o en realidad
+  imágenes;
+- 5 sesiones a la vez sobre el mismo PDF;
+- `git pull` del toolbox y cambio de rama en el consumer;
+- venv borrado o corrupto.
+
+En ningún caso el hook salió con un código distinto de 0/2 ni tardó más que el plazo. Encontró 7 problemas,
+todos corregidos y cubiertos en D24. Los tests fallan con ebf032d (12 fallos):
+
+1. **El caché se decidía por fecha** (problema heredado del motor original). Un PDF reemplazado con fecha
+   vieja (`cp -p`, unzip, rsync, Finder) servía el digest del documento ANTERIOR sin aviso. Ahora el caché
+   compara por **contenido**: sha256 en `.source`, tanto en `doclens.py` como en el camino rápido del hook.
+   `.source` se escribe al final y el índice de forma atómica.
+2. **Imagen con extensión `.pdf`:** el modelo quedaba sin salida, porque el índice decía "léela directo" y
+   el hook la bloqueaba. Ahora se genera `as-image.png` y el hook apunta a ella.
+3. **Procesos largos:**
+   - El proceso en curso se reconoce por su comando (`doclens-bg` en `ps -ww`), no por la edad del
+     pidfile, así que ya no se lanza un duplicado a los 30 min.
+   - El mensaje dice cuánto lleva, y pasada 1 h responde "probablemente colgado" con la ruta manual, en
+     lugar de un "reintenta" sin fin.
+   - Corregidos dos bugs que salieron al escribir estos tests:
+     - el código de salida 4 de doclens (contraseña) se confundía con "sigue corriendo", y ahora el
+       "sigue corriendo" interno es 124;
+     - `detach`, al ser función, dejaba un bash intermedio como `$!`; ahora usa `exec`.
+4. **Al reprocesar se limpian `pages/` y `figures/`:** quedaban páginas viejas del documento anterior.
+5. **No se respalda lo que git ya guarda sin cambios:** los respaldos ya no se acumulan al cambiar de rama,
+   y el sync avisa que `doclens/` quedó sin commitear. El bloqueo de `git switch` mientras haya cambios del
+   sync sin commitear es inherente a versionar el espejo: hay que commitearlo.
+6. **Mensajes:**
+   - un PDF con contraseña de apertura da un mensaje claro (código 4);
+   - la metadata de cifrado sale de `metadata.encryption`;
+   - si falla la creación del venv, el hook muestra la causa;
+   - la ruta manual ya no usa un `/tmp` fijo y aclara que depende de las herramientas instaladas.
+7. **Una imagen grande que doclens no puede abrir** ahora se bloquea con su motivo, en vez de pasar.
+
 ## Verificación
 
 - `tests/harness/doclens-tests.sh` (57 casos): espejo, no-op, propagación sin subir `VERSION`, archivos

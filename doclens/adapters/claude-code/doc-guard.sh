@@ -83,22 +83,26 @@ if ! { mkdir -p "$STATE" 2>/dev/null && [ -w "$STATE" ] && [ -O "$STATE" ]; }; t
 fi
 find "$STATE" -type f -mmin +1440 -delete 2>/dev/null   # estado de más de 1 día
 DOC_KEY=$(printf '%s' "$FILE_PATH" | cksum | cut -d' ' -f1)
-INSPECT_DIR=""; LAST_ERR=""
+INSPECT_DIR=""; LAST_ERR=""; VENV_ERR=""; AGE=0
 
-# Proceso en su propio grupo: sobrevive a que el hook termine o lo maten
+# Proceso en su propio grupo: sobrevive a que el hook termine o lo maten. Se llama solo
+# como `detach … &`: el exec reemplaza ese subshell, así $! es el PID del proceso real
+# (sin exec, $! sería un bash intermedio y no se reconocería como nuestro en ps).
 detach() {
-  if command -v setsid >/dev/null 2>&1; then setsid "$@"
-  elif command -v perl >/dev/null 2>&1; then perl -e 'setpgrp(0,0); exec @ARGV' "$@"
-  else nohup "$@"; fi
+  if command -v setsid >/dev/null 2>&1; then exec setsid "$@"
+  elif command -v perl >/dev/null 2>&1; then exec perl -e 'setpgrp(0,0); exec @ARGV' "$@"
+  else exec nohup "$@"; fi
 }
-bounded() {  # bounded <out> <pidfile> cmd… → exit del cmd, o 4 si sigue corriendo al vencer DEADLINE
+bounded() {  # bounded <out> <pidfile> cmd… → exit del cmd, o 124 si sigue corriendo al vencer DEADLINE
+  # (124 como timeout(1): no choca con los códigos del cmd — doclens usa 1..4)
   local out="$1" pidf="$2" pid; shift 2
   local n=0 rc=0
   # El envoltorio borra el pidfile al terminar (también si sigue en segundo plano)
-  detach sh -c 'pf=$1; shift; "$@"; rc=$?; rm -f "$pf"; exit $rc' doclens-bg "$pidf" "$@" > "$out" 2>&1 < /dev/null &
-  pid=$!; echo "$pid" > "$pidf"
+  # ": doclens-bg" al inicio: marca visible en ps aunque recorte la línea de comando
+  detach sh -c ': doclens-bg; pf=$1; shift; "$@"; rc=$?; rm -f "$pf"; exit $rc' doclens-bg "$pidf" "$@" > "$out" 2>&1 < /dev/null &
+  pid=$!; echo "$pid $(date +%s)" > "$pidf"   # PID + inicio (para decir cuánto lleva)
   while kill -0 "$pid" 2>/dev/null; do
-    [ "$SECONDS" -ge "$DEADLINE" ] && return 4
+    [ "$SECONDS" -ge "$DEADLINE" ] && return 124
     if [ "$n" -lt 20 ]; then sleep 0.05 2>/dev/null || sleep 1; else sleep 0.2 2>/dev/null || sleep 1; fi
     n=$((n + 1))
   done
@@ -106,17 +110,26 @@ bounded() {  # bounded <out> <pidfile> cmd… → exit del cmd, o 4 si sigue cor
   rm -f "$pidf"
   return "$rc"
 }
-# Proceso vivo con este documento: PID vivo y pidfile reciente (un PID reutilizado por el
-# sistema tras un reinicio o un kill no deja el documento bloqueado para siempre)
+# Proceso vivo con este documento: el PID existe Y es nuestro envoltorio (doclens-bg). Un PID
+# reutilizado por el sistema no cuenta, y un proceso legítimo largo no se duplica.
+proc_args() { ps -ww -o args= -p "$1" 2>/dev/null || ps -o pid,args 2>/dev/null | awk -v p="$1" '$1 == p { $1 = ""; print }'; }
 alive() {
-  local p; p=$(cat "$1" 2>/dev/null) && [ -n "$p" ] || return 1
-  [ -n "$(find "$1" -mmin -30 2>/dev/null)" ] && kill -0 "$p" 2>/dev/null
+  local line p t; line=$(cat "$1" 2>/dev/null) || return 1
+  p=${line%% *}; t=${line#* }
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null || return 1
+  if command -v ps >/dev/null 2>&1; then
+    case "$(proc_args "$p")" in *doclens-bg*) ;; *) return 1 ;; esac
+  fi
+  case "$t" in ''|*[!0-9]*) AGE=0 ;; *) AGE=$(( $(date +%s) - t )) ;; esac
 }
 run_doclens() {  # 0 digest en $INSPECT_DIR · 4 sigue procesando · otro: doclens falló
   local out="$STATE/$DOC_KEY.out" pidf="$STATE/$DOC_KEY.pid" rc=0
-  alive "$pidf" && return 4          # ya hay un proceso con este documento: no lanzar otro
+  if alive "$pidf"; then              # ya hay un proceso con este documento: no lanzar otro
+    [ "$AGE" -ge 3600 ] && return 6   # > 1 h: probablemente colgado
+    return 4
+  fi
   bounded "$out" "$pidf" "$PY" "$DOCLENS" "$FILE_PATH" || rc=$?
-  [ "$rc" = 4 ] && return 4
+  [ "$rc" = 124 ] && { AGE=0; return 4; }
   INSPECT_DIR=$(grep '^INSPECT_DIR=' "$out" 2>/dev/null | cut -d= -f2-)
   LAST_ERR=$(grep -v '^INSPECT_DIR=' "$out" 2>/dev/null | tail -n 1)
   rm -f "$out"
@@ -134,19 +147,20 @@ bootstrap() {  # 0 venv listo · 1 no disponible · 4 preparándose
   [ -n "$(find "$ROOT/doclens/.venv.failed" -mmin -60 2>/dev/null)" ] && return 1
   local rc=0
   bounded "$STATE/venv.out" "$STATE/venv.pid" env -u DOCLENS_PYTHON bash "$SYNC" "$ROOT" --venv || rc=$?
+  VENV_ERR=$(grep 'ERROR' "$STATE/venv.out" 2>/dev/null | tail -n 1)
   rm -f "$STATE/venv.out"
   case "$rc" in
     0) [ -x "$VENV_PY" ] ;;
-    3|4) return 4 ;;
+    3|124) return 4 ;;
     *) return 1 ;;
   esac
 }
-process() {  # 0 digest · 1 doclens no disponible · 4 en curso · 5 doclens falló con ESTE archivo
+process() {  # 0 digest · 1 no disponible · 4 en curso · 5 falló con ESTE archivo · 6 colgado (> 1 h)
   local r=0
   if [ -n "$OVERRIDE" ] && [ -f "$DOCLENS" ]; then
     PY="$OVERRIDE"; run_doclens || r=$?
     [ "$r" = 0 ] && return 0
-    [ "$r" = 4 ] && return 4
+    case "$r" in 4|6) return "$r" ;; esac
     "$OVERRIDE" -c 'import fitz' >/dev/null 2>&1 && return 5
     OVERRIDE_BROKEN=true            # DOCLENS_PYTHON sin dependencias: seguir con doclens/.venv
     PY="$VENV_PY"; r=0
@@ -154,7 +168,7 @@ process() {  # 0 digest · 1 doclens no disponible · 4 en curso · 5 doclens fa
   if [ -x "$VENV_PY" ] && [ -f "$DOCLENS" ]; then
     run_doclens || r=$?
     [ "$r" = 0 ] && return 0
-    [ "$r" = 4 ] && return 4
+    case "$r" in 4|6) return "$r" ;; esac
     # Falló: si el intérprete está sano, el problema es el archivo (no reinstalar)
     "$VENV_PY" -c 'import fitz' >/dev/null 2>&1 && return 5
   fi
@@ -163,25 +177,37 @@ process() {  # 0 digest · 1 doclens no disponible · 4 en curso · 5 doclens fa
   [ "$r" = 0 ] || return "$r"
   r=0; run_doclens || r=$?
   [ "$r" = 0 ] && return 0
-  [ "$r" = 4 ] && return 4
+  case "$r" in 4|6) return "$r" ;; esac
   return 5
 }
 in_progress() {
-  echo "doclens está preparando o procesando $FILE_PATH (la primera vez crea doclens/.venv; un documento grande tarda). Sigue en segundo plano: reintenta el Read en un momento." >&2
+  local lleva=""; [ "$AGE" -gt 0 ] && lleva=" (lleva $((AGE / 60)) min $((AGE % 60)) s)"
+  echo "doclens está preparando o procesando $FILE_PATH$lleva (la primera vez crea doclens/.venv; un documento grande o escaneado tarda). Sigue en segundo plano: reintenta el Read en ~30 s." >&2
   exit 2
+}
+hash_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1; fi
 }
 
 # ── PDF: pre-procesar y redirigir ─────────────────────────────────────────
 if [ "$EXT" = ".pdf" ]; then
   PRC=0
-  # Camino rápido: digest más nuevo que el PDF (mismo criterio de caché que doclens.py)
-  if [ -f "$FILE_PATH.inspect/index.md" ] && [ "$FILE_PATH.inspect/index.md" -nt "$FILE_PATH" ]; then
-    INSPECT_DIR="$FILE_PATH.inspect"
+  # Camino rápido: digest del MISMO contenido (sha256 en .source, igual que doclens.py).
+  # Nunca por fechas: un PDF reemplazado con fecha vieja debe reprocesarse.
+  SIDE="$FILE_PATH.inspect"; H=""
+  [ -f "$SIDE/index.md" ] && [ -f "$SIDE/.source" ] && H=$(hash_of "$FILE_PATH")
+  if [ -n "$H" ] && [ "$H" = "$(head -n 1 "$SIDE/.source" 2>/dev/null)" ]; then
+    INSPECT_DIR="$SIDE"
     [ -f "$INSPECT_DIR/.gitignore" ] || printf '# generado por doclens: sidecar local, no versionar\n*\n' > "$INSPECT_DIR/.gitignore" 2>/dev/null
   else
     process || PRC=$?
   fi
   [ "$PRC" = 4 ] && in_progress
+  if [ "$PRC" = 0 ] && [ -f "$INSPECT_DIR/as-image.png" ]; then
+    echo "Este archivo .pdf es en realidad una imagen: lee $INSPECT_DIR/as-image.png (metadata en $INSPECT_DIR/index.md). No leas $FILE_PATH directo." >&2
+    exit 2
+  fi
   if [ "$PRC" = 0 ] && [ -f "$INSPECT_DIR/index.md" ]; then
     cat >&2 <<EOF
 PDF pre-procesado por doclens — NO leas el PDF original (el backend Kimi
@@ -199,12 +225,18 @@ EOF
   fi
 
   # Fallback manual: el motivo exacto, para no mandar a reinstalar lo que está sano
-  if [ "$PRC" = 5 ]; then
-    WHY="doclens no pudo procesar este archivo: $LAST_ERR. ¿PDF dañado o protegido con contraseña?"
+  if [ "$PRC" = 6 ]; then
+    WHY="doclens lleva más de $((AGE / 60)) min con este archivo y probablemente está colgado: usa la ruta manual, o termina ese proceso (ps | grep doclens-bg) y reintenta."
+  elif [ "$PRC" = 5 ]; then
+    case "$LAST_ERR" in
+      *contraseña*) WHY="doclens: $LAST_ERR. Pide la contraseña al usuario o una versión sin protección." ;;
+      *) WHY="doclens no pudo procesar este archivo: $LAST_ERR. ¿PDF dañado?" ;;
+    esac
   elif $OVERRIDE_BROKEN; then
     WHY="DOCLENS_PYTHON=$DOCLENS_PYTHON no tiene las dependencias de doclens y doclens/.venv no está disponible: bash doclens/sync.sh --force (o instala las dependencias en ese intérprete)."
   elif [ -n "$SYNC" ] && [ -f "$SYNC" ]; then
-    WHY="El processor doclens no está disponible. Prepáralo (crea doclens/.venv): bash doclens/sync.sh --force"
+    WHY="El processor doclens no está disponible${VENV_ERR:+ ($VENV_ERR)}. Prepáralo (crea doclens/.venv): bash doclens/sync.sh --force"
+    [ -z "$VENV_ERR" ] && [ -f "$ROOT/doclens/.venv.failed" ] && WHY="$WHY (el último intento falló el $(cat "$ROOT/doclens/.venv.failed" 2>/dev/null); reintento automático en 1 h)"
   elif [ -f "$DOCLENS" ]; then
     WHY="El processor doclens no está disponible (estructura vieja en scripts/): ejecuta el sync de ai-tooling (doclens/sync.sh <repo>) para migrar a doclens/."
   else
@@ -216,10 +248,10 @@ BLOCKED: Read directo de PDF ($FILE_PATH).
 El backend Kimi de este repo NO acepta bloques PDF: HTTP 400 y sesión muerta.
 $WHY
 
-Ruta manual mientras tanto:
-1. Visual: sips -s format png -z 1684 1190 "$FILE_PATH" --out /tmp/pdf-page.png
-   y lee el PNG (multi-página: pdftoppm -png "$FILE_PATH" /tmp/pdf-page)
-2. Texto: pdftotext "$FILE_PATH" -
+Ruta manual mientras tanto (con las herramientas que haya instaladas):
+1. Visual (macOS): sips -s format png "$FILE_PATH" --out "${TMPDIR:-/tmp}/doclens-manual-$DOC_KEY.png"
+   y lee el PNG (multi-página, con poppler: pdftoppm -png "$FILE_PATH" "${TMPDIR:-/tmp}/doclens-manual-$DOC_KEY")
+2. Texto (con poppler): pdftotext "$FILE_PATH" -
 EOF
   exit 2
 fi
@@ -229,7 +261,11 @@ case "$EXT" in
   .png|.jpg|.jpeg|.webp|.tif|.tiff)
     if [ "$SIZE" -gt 8388608 ]; then
       PRC=0; process || PRC=$?
-      [ "$PRC" = 4 ] && in_progress
+      case "$PRC" in 4|6) in_progress ;; esac
+      if [ "$PRC" = 5 ]; then
+        echo "Imagen de $((SIZE / 1048576)) MB que doclens no pudo abrir ($LAST_ERR): probablemente está dañada; no la leas directo." >&2
+        exit 2
+      fi
       if [ "$PRC" = 0 ] && [ -f "$INSPECT_DIR/downscaled.png" ]; then
         echo "Imagen de $((SIZE / 1048576)) MB — demasiado grande para el API. Usa la copia downscaled: $INSPECT_DIR/downscaled.png (metadata en $INSPECT_DIR/index.md)" >&2
         exit 2

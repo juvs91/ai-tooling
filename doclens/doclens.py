@@ -17,14 +17,15 @@ rechaza con HTTP 400 y envenena la sesión).
 Uso:
     python doclens.py <archivo> [--dpi 150]
 
-Idempotente: si el sidecar existe y es más reciente que el archivo, no
-reprocesa (imprime la ruta y sale).
+Idempotente: si el sidecar corresponde al MISMO contenido (sha256 en .source),
+no reprocesa (imprime la ruta y sale). No usa fechas: un PDF reemplazado con
+fecha vieja se reprocesa.
 
 Origen: ai-tooling/doclens (toolbox compartido). Los proyectos consumen una
 espejo de doclens/ (misma estructura, ADR-0076) vía doclens/sync.sh — no editar la copia local.
 """
 
-DOCLENS_VERSION = "1.1.0"
+DOCLENS_VERSION = "1.2.0"
 SIDECAR_FORMAT_VERSION = 1
 
 import hashlib
@@ -67,6 +68,39 @@ def sidecar_dir(path: Path) -> Path:
     return Path(tempfile.gettempdir()) / "doclens" / key / f"{path.name}.inspect"
 
 
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
+
+
+class PasswordProtectedError(Exception):
+    """PDF con contraseña de apertura: no se puede leer sin ella."""
+
+
+def fingerprint(path: Path) -> str:
+    """sha256 del contenido. El caché NO usa fechas: un PDF reemplazado con fecha vieja
+    (cp -p, unzip, rsync -a, Finder) debe reprocesarse."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def reset_sidecar(outdir: Path) -> None:
+    """Quita lo generado por un procesamiento anterior (páginas o figuras que ya no
+    existen en el documento nuevo no deben quedar como si fueran actuales)."""
+    for name in ("pages", "figures"):
+        shutil.rmtree(outdir / name, ignore_errors=True)
+    for name in ("index.md", "downscaled.png", "as-image.png", ".source"):
+        (outdir / name).unlink(missing_ok=True)
+
+
+def write_index(outdir: Path, md: list[str]) -> None:
+    """Escritura atómica: quien lea index.md nunca ve uno a medio escribir."""
+    tmp = outdir / ".index.md.tmp"
+    tmp.write_text("\n".join(md))
+    os.replace(tmp, outdir / "index.md")
+
+
 def ignore_sidecar(outdir: Path) -> None:
     """El sidecar se ignora a sí mismo (como .ruff_cache): analizar documentos en
     cualquier repo no ensucia git ni obliga a tocar su .gitignore raíz."""
@@ -95,6 +129,9 @@ def process_pdf(path: Path, outdir: Path, dpi: int) -> None:
     import fitz  # PyMuPDF
 
     doc = fitz.open(path)
+    if doc.needs_pass:
+        doc.close()
+        raise PasswordProtectedError(path.name)
     pages_dir = outdir / "pages"
     figs_dir = outdir / "figures"
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -105,8 +142,8 @@ def process_pdf(path: Path, outdir: Path, dpi: int) -> None:
     md.append(f"- archivo: `{path}`")
     md.append(f"- tamaño: {path.stat().st_size / 1024:.1f} KB")
     md.append(f"- páginas: {doc.page_count}")
-    md.append(f"- encriptado: {doc.is_encrypted}")
-    md.append(f"- metadata PDF: {doc.metadata.get('producer') or 'n/a'}\n")
+    md.append(f"- encriptado: {(doc.metadata or {}).get('encryption') or 'no'}")
+    md.append(f"- metadata PDF: {(doc.metadata or {}).get('producer') or 'n/a'}\n")
     md.append("## Contenido por página\n")
 
     zoom = dpi / 72
@@ -208,7 +245,7 @@ def process_pdf(path: Path, outdir: Path, dpi: int) -> None:
     md.append("Para figuras sueltas lee los archivos en `figures/`.")
     md.append("**NO leas el PDF original.**")
 
-    (outdir / "index.md").write_text("\n".join(md))
+    write_index(outdir, md)
     doc.close()
 
 
@@ -225,7 +262,15 @@ def process_image(path: Path, outdir: Path) -> None:
     md.append(f"- dimensiones: {im.size[0]}x{im.size[1]} px, modo {im.mode}")
     md.append(f"- tamaño: {size_mb:.2f} MB\n")
 
-    if size_mb > 8 or max(im.size) > 4096:
+    if path.suffix.lower() not in IMAGE_SUFFIXES:
+        # p. ej. un PNG con extensión .pdf: el agente no puede "leerla directo" (el hook
+        # bloquea por extensión) → copia con la extensión correcta
+        copy = outdir / "as-image.png"
+        im2 = im.convert("RGB")
+        im2.thumbnail((2048, 2048))
+        im2.save(copy)
+        md.append(f"⚠️ el archivo es una imagen {im.format} con extensión `{path.suffix}`: lee `{copy.name}`.\n")
+    elif size_mb > 8 or max(im.size) > 4096:
         small = outdir / "downscaled.png"
         im2 = im.convert("RGB")
         im2.thumbnail((2048, 2048))
@@ -235,7 +280,7 @@ def process_image(path: Path, outdir: Path) -> None:
         md.append("La imagen es apta para lectura directa por el modelo de visión.")
         md.append("Para análisis visual léela directo; este sidecar solo aporta metadata.\n")
 
-    (outdir / "index.md").write_text("\n".join(md))
+    write_index(outdir, md)
 
 
 def main() -> int:
@@ -253,23 +298,32 @@ def main() -> int:
 
     outdir = sidecar_dir(path)
     index = outdir / "index.md"
-    if index.exists() and index.stat().st_mtime > path.stat().st_mtime:
+    source = outdir / ".source"
+    digest = fingerprint(path)
+    if index.exists() and source.exists() and source.read_text().strip() == digest:
         ignore_sidecar(outdir)  # sidecars de versiones previas a 1.1.0
-        print(f"INSPECT_DIR={outdir}")  # cache hit
+        print(f"INSPECT_DIR={outdir}")  # cache hit: mismo contenido
         return 0
 
     kind = detect_kind(path)
     log(f"{path.name}: tipo real = {kind}")
     outdir.mkdir(parents=True, exist_ok=True)
     ignore_sidecar(outdir)
+    reset_sidecar(outdir)
 
-    if kind == "pdf":
-        process_pdf(path, outdir, dpi)
-    elif kind == "image":
-        process_image(path, outdir)
-    else:
-        log("tipo no soportado")
-        return 1
+    try:
+        if kind == "pdf":
+            process_pdf(path, outdir, dpi)
+        elif kind == "image":
+            process_image(path, outdir)
+        else:
+            log("tipo no soportado")
+            return 2
+    except PasswordProtectedError:
+        log("PDF protegido con contraseña de apertura: no se puede leer sin ella")
+        return 4
+    # .source al final: si el proceso se interrumpe, el próximo Read reprocesa
+    source.write_text(digest + "\n")
 
     print(f"INSPECT_DIR={outdir}")
     return 0

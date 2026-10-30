@@ -26,7 +26,8 @@ case "$1" in
   -)  cat >/dev/null; echo "doclens: smoke OK — stub"; exit 0 ;;
   -m) exit 0 ;;
 esac
-d="$2.inspect"; mkdir -p "$d"; : > "$d/index.md"; : > "$d/downscaled.png"; echo "INSPECT_DIR=$d"
+d="$2.inspect"; mkdir -p "$d"; : > "$d/index.md"; : > "$d/downscaled.png"
+{ sha256sum "$2" 2>/dev/null || shasum -a 256 "$2"; } | cut -d' ' -f1 > "$d/.source"; echo "INSPECT_DIR=$d"
 EOF
 mkdir -p "$T/fakeuv"
 cat > "$T/fakeuv/uv" <<'EOF'
@@ -324,9 +325,11 @@ KEY=$(printf '%s' "$T/d23.pdf" | cksum | cut -d' ' -f1); echo $$ > "$SD/$KEY.pid
 R=$(dg "$C16" "$T/d23.pdf" TMPDIR="$TD"); case "$R" in "2|"*pre-procesado*) ok "pidfile viejo con PID reutilizado (vivo) → no bloquea el documento" ;; *) bad "PID reutilizado: ${R%%$'\n'*}" ;; esac
 rm -f "$SD"/*; chmod 500 "$SD"   # vacía: un .out previo sí se podría sobrescribir
 R=$(dg "$C16" "$T/d23.pdf" TMPDIR="$TD"); chmod 700 "$SD"; case "$R" in "2|"*pre-procesado*) ok "carpeta de estado sin escritura → usa un temporal propio" ;; *) bad "estado no escribible: ${R%%$'\n'*}" ;; esac
-REF2="$T/d23ref"; sleep 1; : > "$REF2"; sleep 1; touch "$T/d23.pdf"
+REF2="$T/d23ref"; sleep 1; : > "$REF2"; sleep 1; echo cambio >> "$T/d23.pdf"; touch -t 202001010000 "$T/d23.pdf"
 dg "$C16" "$T/d23.pdf" >/dev/null
-[ -n "$(find "$T/d23.pdf.inspect/index.md" -newer "$REF2")" ] && ok "PDF modificado → se reprocesa (el caché no sirve un digest viejo)" || bad "sirvió un digest viejo"
+[ -n "$(find "$T/d23.pdf.inspect/index.md" -newer "$REF2")" ] && ok "contenido nuevo con fecha VIEJA → se reprocesa (caché por contenido)" || bad "sirvió un digest viejo"
+REF3="$T/d23ref3"; sleep 1; : > "$REF3"; sleep 1; touch "$T/d23.pdf"; dg "$C16" "$T/d23.pdf" >/dev/null
+[ -z "$(find "$T/d23.pdf.inspect/index.md" -newer "$REF3")" ] && ok "solo cambia la fecha (mismo contenido) → no reprocesa" || bad "reprocesó sin cambio de contenido"
 : > "$UVLOG"; mv "$C16/doclens/.venv" "$C16/doclens/.venv-off"
 R=$(dg "$C16" "$T/d23.pdf"); mv "$C16/doclens/.venv-off" "$C16/doclens/.venv"
 case "$R" in "2|"*pre-procesado*) ok "digest vigente → respuesta directa, sin lanzar procesos ni venv" ;; *) bad "camino rápido: ${R%%$'\n'*}" ;; esac
@@ -348,6 +351,43 @@ case "$OUT" in "update disponible"*) ok "sync.sh \"\" --check → solo reporta" 
 [ ! -e "$C18/doclens" ] && ok "y no copia nada" || bad "copió con --check"
 OUT=$(env DOCLENS_PYTHON=python3-no-existe PATH="$UVPATH" bash "$SYNC" "$C16" 2>&1); RC=$?
 eq "DOCLENS_PYTHON inexistente → no falla (usa el venv)" "$RC" 0
+
+echo "══ D24: validación final — proceso largo, respaldos, motor real ══"
+C19=$(consumer); stubvenv "$C19/doclens/.venv"; bash "$SYNC" "$C19" >/dev/null 2>&1; : > "$T/d24.pdf"
+TD3="$T/tmpd3"; mkdir -p "$TD3/doclens-hook-$(id -u)"; KEY=$(printf '%s' "$T/d24.pdf" | cksum | cut -d' ' -f1)
+sh -c ': doclens-bg; sleep 30; :' doclens-bg & BG=$!   # compuesto: sh no hace exec directo a sleep
+echo "$BG $(( $(date +%s) - 4000 ))" > "$TD3/doclens-hook-$(id -u)/$KEY.pid"
+R=$(dg "$C19" "$T/d24.pdf" TMPDIR="$TD3"); case "$R" in "2|"*"probablemente está colgado"*) ok "proceso nuestro > 1 h → 'colgado' + ruta manual (sin bucle de reintentos)" ;; *) bad "colgado: ${R%%$'\n'*}" ;; esac
+echo "$BG $(( $(date +%s) - 95 ))" > "$TD3/doclens-hook-$(id -u)/$KEY.pid"
+R=$(dg "$C19" "$T/d24.pdf" TMPDIR="$TD3"); case "$R" in "2|"*"lleva 1 min 3"*) ok "en curso → dice cuánto lleva" ;; *) bad "en curso: ${R%%$'\n'*}" ;; esac
+kill "$BG" 2>/dev/null; wait "$BG" 2>/dev/null
+CB2=$(consumer); bash "$SYNC" "$CB2" >/dev/null 2>&1; (cd "$CB2" && g add -A && g commit -qm doclens) >/dev/null
+echo "// v2" >> "$TB/doclens/adapters/opencode/doclens-tool.ts"; (cd "$TB" && g commit -qam v2) >/dev/null
+OUT=$(bash "$SYNC" "$CB2" 2>&1)
+[ -z "$(ls -d "$CB2"/.claude/.harness-backup-*-doclens 2>/dev/null)" ] && ok "lo commiteado sin cambios no se respalda (git lo recupera)" || bad "respaldó contenido commiteado"
+has "indica commitear doclens/" "$OUT" "cambios sin commitear"
+echo local >> "$CB2/doclens/README.md"; echo "// v3" >> "$TB/doclens/adapters/opencode/doclens-tool.ts"; (cd "$TB" && g commit -qam v3) >/dev/null
+bash "$SYNC" "$CB2" >/dev/null 2>&1
+ls "$CB2"/.claude/.harness-backup-*-doclens/doclens/README.md >/dev/null 2>&1 && ok "un cambio local sí se respalda" || bad "perdió un cambio local sin respaldo"
+RP="$AI_TOOLING/doclens/.venv/bin/python"
+if [ -x "$RP" ] && "$RP" -c 'import fitz' 2>/dev/null; then
+  C20=$(consumer); bash "$SYNC" "$C20" --check >/dev/null; env DOCLENS_PYTHON="$RP" bash "$SYNC" "$C20" >/dev/null 2>&1
+  mkpdf() { "$RP" -c "import fitz,sys; d=fitz.open(); [d.new_page().insert_text((72,72),sys.argv[2]) for _ in range(int(sys.argv[3]))]; d.save(sys.argv[1])" "$1" "$2" "$3"; }
+  mkpdf "$T/v.pdf" "VERSION DOS" 3; dg "$C20" "$T/v.pdf" DOCLENS_PYTHON="$RP" >/dev/null
+  mkpdf "$T/v-new.pdf" "VERSION TRES" 1; touch -t 202001010000 "$T/v-new.pdf"; mv "$T/v-new.pdf" "$T/v.pdf"
+  dg "$C20" "$T/v.pdf" DOCLENS_PYTHON="$RP" >/dev/null
+  [ "$(grep -c 'VERSION TRES' "$T/v.pdf.inspect/index.md")" -ge 1 ] && ok "motor real: PDF reemplazado con fecha vieja → digest nuevo" || bad "motor real sirvió el digest viejo"
+  [ ! -e "$T/v.pdf.inspect/pages/page-2.png" ] && ok "motor real: páginas que ya no existen se borran" || bad "quedaron pages/ viejas"
+  "$RP" -c "from PIL import Image; Image.new('RGB',(40,40),'red').save('$T/img.pdf', format='PNG')"
+  R=$(dg "$C20" "$T/img.pdf" DOCLENS_PYTHON="$RP"); case "$R" in "2|"*"es en realidad una imagen"*as-image.png*) ok "imagen con extensión .pdf → apunta a as-image.png" ;; *) bad "imagen .pdf: ${R%%$'\n'*}" ;; esac
+  [ -f "$T/img.pdf.inspect/as-image.png" ] && ok "as-image.png existe" || bad "sin as-image.png"
+  "$RP" -c "import fitz; d=fitz.open(); d.new_page().insert_text((72,72),'x'); d.save('$T/pw.pdf', encryption=fitz.PDF_ENCRYPT_AES_256, user_pw='u', owner_pw='o')"
+  R=$(dg "$C20" "$T/pw.pdf" DOCLENS_PYTHON="$RP"); case "$R" in "2|"*"contraseña de apertura"*) ok "PDF con contraseña → mensaje claro" ;; *) bad "contraseña: ${R%%$'\n'*}" ;; esac
+  dd if=/dev/urandom of="$T/roto.png" bs=1048576 count=9 2>/dev/null
+  R=$(dg "$C20" "$T/roto.png" DOCLENS_PYTHON="$RP"); case "$R" in "2|"*"no pudo abrir"*) ok "imagen grande corrupta → se bloquea con motivo" ;; *) bad "imagen corrupta: ${R%%|*}" ;; esac
+else
+  echo "  - omitido: sin doclens/.venv real (motor real)"
+fi
 
 echo ""
 echo "══ doclens: $PASS ok, $FAIL fallos ══"

@@ -194,9 +194,15 @@ fi
 if ! $SELF && [ "$FLAG" != "--venv" ] && { has_legacy || [ "$FLAG" = "--force" ] || ! in_sync; }; then
   BK="$REPO_ROOT/.claude/.harness-backup-$(date -u +%Y%m%dT%H%M%SZ)-doclens"
   FROM_V=$(dst_version); if has_legacy; then FROM_V="$(cat "$LEG_STAMP" 2>/dev/null || echo none) (scripts/)"; fi
-  # Respaldo de lo que se va a pisar o borrar (contenido local de doclens/, salvo el venv)
+  # Respaldo de lo que se va a pisar o borrar (salvo el venv). Lo que git ya guarda tal cual
+  # (versionado y sin cambios) no se respalda: se recupera con git, y así cambiar de rama no
+  # acumula respaldos idénticos a lo commiteado.
   if [ -d "$DST" ] && ! in_sync; then
-    list_dst | while IFS= read -r f; do mkdir -p "$BK/doclens/$(dirname "$f")"; cp -p "$DST/$f" "$BK/doclens/$f"; done
+    list_dst | while IFS= read -r f; do
+      if git -C "$REPO_ROOT" ls-files --error-unmatch -- "doclens/$f" >/dev/null 2>&1 \
+         && git -C "$REPO_ROOT" diff --quiet HEAD -- "doclens/$f" 2>/dev/null; then continue; fi
+      mkdir -p "$BK/doclens/$(dirname "$f")"; cp -p "$DST/$f" "$BK/doclens/$f"
+    done
   fi
   # Copias nuevas en un staging del mismo filesystem; luego mv archivo por archivo
   # (rename atómico). No se mueve el directorio: .venv y el lock quedan en su sitio.
@@ -227,6 +233,9 @@ if ! $SELF && [ "$FLAG" != "--venv" ] && { has_legacy || [ "$FLAG" = "--force" ]
   fi
   if [ -d "$BK" ]; then echo "doclens: respaldo en ${BK#"$REPO_ROOT"/}"; fi
   echo "doclens sincronizado: $FROM_V -> $(dst_version)"
+  if [ -n "$(git -C "$REPO_ROOT" status --porcelain -- doclens 2>/dev/null)" ]; then
+    echo "doclens: doclens/ quedó con cambios sin commitear; commitéalos antes de cambiar de rama"
+  fi
   # Archivos del consumer que siguen apuntando a la estructura vieja (no se editan: solo aviso)
   REFS=$(cd "$REPO_ROOT" && git ls-files 2>/dev/null | grep -vE '^(doclens/|\.claude/\.harness-backup-|\.claude/hooks/doc-guard\.sh$|ai-notes/|docs/)' \
     | while IFS= read -r f; do if [ -f "$f" ]; then grep -lE 'scripts/doclens\.py|\.venv-doc-tools' "$f" 2>/dev/null || true; fi; done || true)

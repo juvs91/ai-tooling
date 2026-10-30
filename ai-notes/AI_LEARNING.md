@@ -1730,3 +1730,13 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   código lento) → siempre correr el test contra el código viejo antes de darlo por bueno.
 - Camino rápido de caché en el propio hook (digest `-nt` PDF) → 86 ms sin lanzar procesos; medir latencia con
   el mismo arnés para las 3 versiones antes de afirmar "más lento/más rápido".
+- **4ª validación (uso real de punta a punta, motor real):** el ángulo "escenarios de un día normal" encontró el
+  bug más dañino de todos y era HEREDADO: caché por mtime → un PDF reemplazado con fecha vieja servía el digest
+  del documento anterior sin aviso. Caché de derivados = por contenido (sha256), nunca por fecha.
+- Escribir los tests de los fixes destapó 2 bugs nuevos: (a) un código de salida interno ("sigue corriendo"=4)
+  chocaba con un código real del comando envuelto (doclens 4 = contraseña) → usar 124 como timeout(1);
+  (b) `f() { setsid "$@"; }; f … &` → `$!` es un bash intermedio, no el proceso → `exec` dentro de la función.
+  Y `ps -o args=` recorta en macOS → `-ww` y poner la marca al inicio de la línea de comando.
+- Un `sh -c 'sleep 30'` hace exec directo a sleep (pierde $0/marca): en fixtures usar comandos compuestos.
+- block-no-verify detecta `git commit … -n` aunque esté en el TEXTO de un heredoc/patch (p. ej. "git commit)" seguido
+  de `[ -n`) → escribir esos parches a un archivo y ejecutarlo.
