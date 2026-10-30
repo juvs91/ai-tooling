@@ -67,7 +67,16 @@ else
   trap 'rm -f "$MANIFEST_WORK"' EXIT
 fi
 
-sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+# sha256sum (coreutils, todo Linux y macOS 14+) o shasum (perl; macOS viejo). Mismo
+# hash con ambos → manifests portables. Sin ninguno, abortar: hashes vacíos harían que
+# toda modificación local pareciera "al día" y se sobrescribiera (fail-open).
+if command -v sha256sum >/dev/null 2>&1; then
+    sha() { sha256sum "$1" | cut -d' ' -f1; }
+elif command -v shasum >/dev/null 2>&1; then
+    sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+else
+    echo "ERROR: se requiere sha256sum o shasum" >&2; exit 1
+fi
 
 m_entry() { jq -r --arg k "$1" '.files[$k] // empty' "$MANIFEST_WORK"; }
 m_set() { # m_set <relpath> <sha> <origin>

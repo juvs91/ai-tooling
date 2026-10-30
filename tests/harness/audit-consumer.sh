@@ -27,9 +27,9 @@ echo "══ A2: idempotencia — doble --apply en fixture ══"
 FIX=$(mktemp -d)/consumer; mkdir -p "$FIX/.claude/hooks"
 echo "{\"local_path\": \"$TOOLBOX\", \"sync_skills\": false, \"sync_doclens\": false}" > "$FIX/.ai-tooling"
 bash "$TOOLBOX/scripts/install-hooks.sh" "$FIX" --apply >/dev/null 2>&1
-SNAP1=$(find "$FIX" -type f ! -path "*/.harness-backup-*" | sort | xargs shasum -a 256 2>/dev/null | shasum -a 256)
+SNAP1=$(find "$FIX" -type f ! -path "*/.harness-backup-*" -exec cksum {} + | sort)
 OUT2=$(bash "$TOOLBOX/scripts/install-hooks.sh" "$FIX" --apply 2>&1)
-SNAP2=$(find "$FIX" -type f ! -path "*/.harness-backup-*" | sort | xargs shasum -a 256 2>/dev/null | shasum -a 256)
+SNAP2=$(find "$FIX" -type f ! -path "*/.harness-backup-*" -exec cksum {} + | sort)
 [ "$SNAP1" = "$SNAP2" ] && ok "segundo apply: estado idéntico" || bad "segundo apply mutó estado"
 grep -q "ACTUALIZAR\|INSTALAR" <<< "$OUT2" && bad "segundo apply aún copia cosas" || ok "segundo apply: todo al día"
 BK_COUNT=$(ls -d "$FIX/.claude/".harness-backup-*/ 2>/dev/null | wc -l | tr -d ' ')
@@ -76,10 +76,10 @@ if [ -f "$CONSUMER/.claude/hooks/auto-sync-daily.sh" ] && git -C "$CONSUMER" rev
   # Los archivos de ESTADO del propio harness sí pueden cambiar legítimamente
   # (.last_sync cuando toca sync de skills, sync.log siempre) — se excluyen.
   GIT_FILTER=(. ':(exclude).agents/.last_sync' ':(exclude).claude/sync.log' ':(exclude).claude/.harness-manifest.json')
-  GIT_BEFORE=$(git -C "$CONSUMER" status --porcelain -- "${GIT_FILTER[@]}" 2>/dev/null | shasum -a 256)
+  GIT_BEFORE=$(git -C "$CONSUMER" status --porcelain -- "${GIT_FILTER[@]}" 2>/dev/null | cksum)
   echo "{\"cwd\":\"$CONSUMER\"}" | CLAUDE_PROJECT_DIR="$CONSUMER" bash "$CONSUMER/.claude/hooks/auto-sync-daily.sh" >/dev/null 2>&1; E1=$?
   echo "{\"cwd\":\"$CONSUMER\"}" | CLAUDE_PROJECT_DIR="$CONSUMER" bash "$CONSUMER/.claude/hooks/auto-sync-daily.sh" >/dev/null 2>&1; E2=$?
-  GIT_AFTER=$(git -C "$CONSUMER" status --porcelain -- "${GIT_FILTER[@]}" 2>/dev/null | shasum -a 256)
+  GIT_AFTER=$(git -C "$CONSUMER" status --porcelain -- "${GIT_FILTER[@]}" 2>/dev/null | cksum)
   [ "$E1" = "0" ] && [ "$E2" = "0" ] && ok "doble corrida exit 0" || bad "exit codes: $E1/$E2"
   [ "$GIT_BEFORE" = "$GIT_AFTER" ] && ok "working tree intacto tras 2 corridas (salvo estado del harness)" || bad "el harness tocó el working tree"
 else

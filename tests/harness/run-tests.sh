@@ -130,11 +130,11 @@ S="$FIX/.claude/settings.local.json"
 
 echo "══ T9: sin cambios → no reescribe ni crea backup ══"
 B0=$(ls -d "$FIX"/.claude/.harness-backup-* 2>/dev/null | wc -l | tr -d ' ')
-M0=$(ls -l "$S" | awk '{print $6,$7,$8}'); CK0=$(cksum < "$S")
-sleep 1
+CK0=$(cksum < "$S"); REF="$(dirname "$FIX")/t9-ref"; sleep 1; : > "$REF"; sleep 1
 OUT=$(bash "$IH" "$FIX" --apply 2>&1)
 B1=$(ls -d "$FIX"/.claude/.harness-backup-* 2>/dev/null | wc -l | tr -d ' ')
-[ "$CK0" = "$(cksum < "$S")" ] && ok "settings.local.json intacto" || bad "settings.local.json reescrito sin cambios"
+# cksum no detecta una reescritura con el mismo contenido; -newer sí
+[ "$CK0" = "$(cksum < "$S")" ] && [ -z "$(find "$S" -newer "$REF")" ] && ok "settings.local.json intacto (contenido y mtime)" || bad "settings.local.json reescrito sin cambios"
 [ "$B0" = "$B1" ] && ok "sin backup nuevo" || bad "backup creado sin cambios ($B0 → $B1)"
 grep -q "sin cambios" <<< "$OUT" && ok "reporta 'sin cambios'" || bad "no reporta 'sin cambios'"
 

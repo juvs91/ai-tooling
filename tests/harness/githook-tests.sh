@@ -25,7 +25,8 @@ FW='#!/usr/bin/env bash
 exec true'
 
 repo() {  # repo nuevo con checker; imprime su path (mktemp: corre dentro de $(…))
-  local d; d=$(mktemp -d "$T/r.XXXX")
+  # 6 X: el mktemp de busybox rechaza menos (d vacío → todos los repos serían el cwd)
+  local d; d=$(mktemp -d "$T/r.XXXXXX") || { echo "mktemp falló" >&2; exit 1; }
   mkdir -p "$d/tools" && (cd "$d" && g init -q && cp "$AI_TOOLING/tools/check_adr_gate.py" tools/ && g add -A && g commit -qm i)
   echo "$d"
 }

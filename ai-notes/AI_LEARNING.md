@@ -1626,3 +1626,20 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
 - **Consumers reales:** gitops-init con framework pre-commit real → `--check` 13 y el framework sigue
   bloqueando; consumer legacy → auto-sync migra, conserva hook propio, `[skip-adr]` viejo ya no bypasea.
 - `gitops-init.sh` sin `GITOPS_STACKS`/`GITOPS_PROJECT_MAP` pide input interactivo — en scripts, pasarlos.
+
+### Portabilidad del harness: macOS + Linux (2026-10-29)
+- **Matriz probada:** macOS (bash 3.2, BSD), Linux GNU (Alpine + coreutils/findutils/grep/sed = userland de
+  Ubuntu/Debian/Fedora) y Linux busybox mínimo. Las 4 suites (178) y el E2E de consumers (22, con
+  framework pre-commit real) en verde en las tres.
+- **Cómo correrlo:** Docker Desktop solo comparte `$HOME` — el volumen `/Volumes/case-sensitive` y el
+  scratchpad (`/private/tmp`) NO se montan. Mandar el repo por stdin:
+  `COPYFILE_DISABLE=1 tar -cf - . | docker run -i alpine:3.20 sh -c '…; tar -xf - -C /work'`.
+  apt de Debian está bloqueado por el proxy corporativo (Cloudflare); `apk` de Alpine sí funciona.
+- **Bug real (fail-open):** `shasum` no es estándar en Linux (perl-utils / perl-Digest-SHA). Sin él,
+  `install-hooks.sh` calculaba hashes vacíos e iguales → toda modificación local parecía "al día" y se
+  sobrescribía sin backup. Fix: `sha256sum` (coreutils) con fallback a `shasum`, y abortar si no hay
+  ninguno. Para comparar igualdad usar `cmp -s`; para snapshots, `cksum` (ambos POSIX).
+- **busybox `mktemp`** exige ≥6 `X` en la plantilla; con menos falla, el path queda vacío y los fixtures
+  colapsan al cwd (20 fallos "corridos" en githook-tests). Usar siempre `XXXXXX` y abortar si mktemp falla.
+- **shellcheck** detectó un test débil: T9 calculaba el mtime y nunca lo comparaba (cksum no detecta una
+  reescritura idéntica). Ahora usa `find -newer` (portable); verificado inyectando la reescritura.

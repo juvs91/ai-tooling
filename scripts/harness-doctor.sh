@@ -95,7 +95,7 @@ if [ -n "$AI_TOOLING_DIR" ] && [ -d "$AI_TOOLING_DIR/.claude/hooks" ]; then
     b=$(basename "$f")
     L="$REPO_ROOT/.claude/hooks/$b"
     if [ -f "$L" ]; then
-      [ "$(shasum -a 256 "$f" | cut -d' ' -f1)" != "$(shasum -a 256 "$L" | cut -d' ' -f1)" ] && DRIFT="$DRIFT $b"
+      cmp -s "$f" "$L" || DRIFT="$DRIFT $b"   # cmp es POSIX; shasum no existe en todo Linux
     else
       DRIFT="$DRIFT $b(ausente)"
     fi
