@@ -48,3 +48,4 @@ cloud-provider-env/*
 .claude/settings.local.json
 # Salesforce
 .sfdx/
+vendor/**/.claude/
