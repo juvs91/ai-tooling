@@ -1611,3 +1611,18 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
 - **Tests:** funciones que crean fixtures dentro de `$(…)` no pueden usar contadores globales (subshell) —
   usar `mktemp -d`. Al listar el entorno con `env | grep`, filtrar por nombre exacto: un patrón amplio
   imprimió un token de socket local en la sesión anterior.
+
+### Prueba exhaustiva ADR-0073/0074 (2026-10-29)
+- **Mutation testing** (30 mutaciones en un worktree temporal, sub-suite por mutación): 24/30 detectadas de
+  entrada. Sobrevivientes: 3 huecos reales de test (canon_path sin `-P`, match de tsc sin anclar, `cp` a
+  directorio sin `/`), 1 mutación mal escrita, 1 equivalente (`set -e` ya aborta) y **1 test vacío**:
+  `(cd x && ${2:+VAR="$2"} bash …)` — una asignación producida por expansión NO es asignación, bash la toma
+  como nombre de comando y el test pasaba sin ejecutar nada. Usar `env ${2:+VAR="$2"} cmd`, y agregar una
+  aserción que pruebe que el código bajo test sí corrió. Tras corregir: 29/30 (la restante equivalente).
+- **E2E en vivo:** `cd` + Agent (gate ya no bloquea), EnterWorktree real (settings.local.json copiado por
+  .worktreeinclude, adr-gate/protect-secrets/commit-msg bloquean dentro del worktree, sync_skills no-op,
+  main-top sigue al worktree), subagente con isolation real corre task-verify y CONSERVA el scope del
+  padre; el hilo principal lo borra.
+- **Consumers reales:** gitops-init con framework pre-commit real → `--check` 13 y el framework sigue
+  bloqueando; consumer legacy → auto-sync migra, conserva hook propio, `[skip-adr]` viejo ya no bypasea.
+- `gitops-init.sh` sin `GITOPS_STACKS`/`GITOPS_PROJECT_MAP` pide input interactivo — en scripts, pasarlos.

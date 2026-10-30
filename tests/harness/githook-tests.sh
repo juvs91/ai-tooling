@@ -81,7 +81,7 @@ eq "checker incompatible: instalación exit 0" "$(inst "$R")" 0
 echo "══ G2: auto-sync migra solo instalaciones previas ══"
 consumer() { local d; d=$(repo); mkdir -p "$d/.claude"
   echo "{\"local_path\":\"$AI_TOOLING\",\"sync_skills\":false,\"sync_hooks\":false,\"sync_doclens\":false${1:+,$1}}" > "$d/.ai-tooling"; echo "$d"; }
-async() { echo "{\"cwd\":\"$1\"}" | (cd "$1" && CLAUDE_PROJECT_DIR="$1" ${2:+AI_TOOLING_HOME="$2"} bash "$AI_TOOLING/.claude/hooks/auto-sync-daily.sh" >/dev/null 2>&1); }
+async() { echo "{\"cwd\":\"$1\"}" | (cd "$1" && env CLAUDE_PROJECT_DIR="$1" ${2:+AI_TOOLING_HOME="$2"} bash "$AI_TOOLING/.claude/hooks/auto-sync-daily.sh" >/dev/null 2>&1); }
 C=$(consumer); { echo '#!/bin/sh'; echo 'echo ajeno'; printf '%s\n' "$OLD_BLOCK"; } > "$(hooks "$C")/pre-commit"
 async "$C"
 eq "caso 11 → migrado" "$(chk "$C")" 10
@@ -96,8 +96,11 @@ C=$(consumer '"sync_git_hooks":false'); printf '%s\n' "$OLD_PC" > "$(hooks "$C")
 grep -q 'ai-tooling:adr-gate' "$(hooks "$C")/pre-commit" && ok "sync_git_hooks:false → no toca" || bad "sync_git_hooks:false migró"
 OLDTB="$T/oldtoolbox"; mkdir -p "$OLDTB/tools"
 git -C "$AI_TOOLING" show 750b7a3:tools/install_hooks.sh > "$OLDTB/tools/install_hooks.sh"
+mkdir -p "$OLDTB/scripts" && printf '#!/bin/sh\necho "[doctor] OK — doctor falso del toolbox viejo"\n' > "$OLDTB/scripts/harness-doctor.sh"   # deja huella en sync.log
 C=$(consumer); async "$C" "$OLDTB"
 [ ! -f "$(hooks "$C")/commit-msg" ] && ok "toolbox viejo (sin --check) no se usa: no escribe" || bad "toolbox viejo instaló"
+grep -q "git-hooks" "$C/.claude/sync.log" 2>/dev/null && bad "toolbox viejo: auto-sync no debió ni chequear" || ok "toolbox viejo: auto-sync omite el subsistema"
+[ -f "$C/.claude/sync.log" ] && ok "auto-sync sí corrió (el test no es vacío)" || bad "auto-sync no corrió: test vacío"
 
 echo "══ G3: doctor y task-verify avisan sin escribir ══"
 C=$(consumer); OUT=$(bash "$AI_TOOLING/scripts/harness-doctor.sh" "$C" 2>&1)

@@ -95,6 +95,9 @@ qe() { echo "{\"cwd\":\"$1\",\"tool_input\":{\"file_path\":\"$2\"}}" | (cd "$1" 
 echo 'src/x.tsx(1,1): error TS1005: otro archivo' > "$TSC_OUT"; echo 2 > "$TSC_RC"
 qg "$M/src" "$M/src/x.ts"
 eq "x.ts no matchea errores de x.tsx" "$(qe "$M" "$M/src/x.ts")" 0
+echo 'lib/src/x.ts(1,1): error TS2322: otro archivo con sufijo igual' > "$TSC_OUT"
+qg "$M/src" "$M/src/x.ts"
+eq "lib/src/x.ts no cuenta para src/x.ts (match anclado)" "$(qe "$M" "$M/src/x.ts")" 0
 echo 'src/x.ts(1,1): error TS2322: bad' > "$TSC_OUT"
 qg "$M/src" "$M/src/x.ts"
 eq "error en x.ts (gate desde subdir) bloquea desde la raíz" "$(qe "$M" "$M/src/x.ts")" 2
@@ -122,6 +125,7 @@ rm -f "$M/.claude/sessions/$SID-task-scope.json"
 echo "══ W7: adr-gate y protect-secrets actúan sobre el repo del archivo ══"
 ag() { echo "{\"cwd\":\"$M\",\"tool_input\":{\"file_path\":\"$1\"}}" | (cd "$M" && bash "$H/adr-gate.sh" >/dev/null 2>&1); echo $?; }
 eq "skill en W sin ADR → 2" "$(ag "$W/.agents/skills/x/SKILL.md")" 2
+eq "skill vía symlink (prefijo alterno) sin ADR → 2" "$(ag "$T/alias/M/.agents/skills/x/SKILL.md")" 2
 printf '# ADR-0002\nToca .agents/skills/\n' > "$W/docs/adr/ADR-0002-x.md"
 eq "skill en W con ADR untracked en W → 0" "$(ag "$W/.agents/skills/x/SKILL.md")" 0
 (cd "$W" && g add docs/adr/ADR-0002-x.md) && echo "más" >> "$W/docs/adr/ADR-0002-x.md"
