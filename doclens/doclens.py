@@ -27,9 +27,12 @@ espejo de doclens/ (misma estructura, ADR-0076) vía doclens/sync.sh — no edit
 DOCLENS_VERSION = "1.1.0"
 SIDECAR_FORMAT_VERSION = 1
 
+import hashlib
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 MAX_TEXT_CHARS_PER_PAGE = 8000
@@ -52,6 +55,16 @@ def detect_kind(path: Path) -> str:
     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}:
         return "image"
     return "unknown"
+
+
+def sidecar_dir(path: Path) -> Path:
+    """<archivo>.inspect/ junto al documento; si esa carpeta no admite escritura
+    (solo lectura, montaje ajeno), un directorio temporal estable por documento."""
+    beside = path.parent / f"{path.name}.inspect"
+    if beside.is_dir() or os.access(path.parent, os.W_OK):
+        return beside
+    key = hashlib.sha1(str(path.resolve()).encode()).hexdigest()[:12]
+    return Path(tempfile.gettempdir()) / "doclens" / key / f"{path.name}.inspect"
 
 
 def ignore_sidecar(outdir: Path) -> None:
@@ -238,7 +251,7 @@ def main() -> int:
         log(f"no existe: {path}")
         return 1
 
-    outdir = path.parent / f"{path.name}.inspect"
+    outdir = sidecar_dir(path)
     index = outdir / "index.md"
     if index.exists() and index.stat().st_mtime > path.stat().st_mtime:
         ignore_sidecar(outdir)  # sidecars de versiones previas a 1.1.0

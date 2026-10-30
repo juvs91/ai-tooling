@@ -55,11 +55,15 @@ faltante.
   `--check` solo reporta).
 - El venv es **propio y aislado**: nunca usa ni modifica el venv del proyecto
   (`.venv`, poetry, conda) — PyMuPDF es AGPL y no debe entrar como dependencia
-  del proyecto. Python base: `$DOCLENS_PYTHON`, si no `/usr/bin/python3`, si no
-  `python3` del PATH (≥3.9), sin heredar `VIRTUAL_ENV`/`CONDA_PREFIX`; con `uv`
+  del proyecto. Python base: `$DOCLENS_BASE_PYTHON`, si no `/usr/bin/python3`, si
+  no `python3` del PATH (≥3.9), sin heredar `VIRTUAL_ENV`/`CONDA_PREFIX`; con `uv`
   si está disponible.
-- `DOCLENS_PYTHON` también sirve para que `doc-guard` use un intérprete que ya
-  tenga las dependencias, sin crear `doclens/.venv`.
+- `DOCLENS_PYTHON`: un intérprete que YA tiene las dependencias; sync y doc-guard
+  lo usan en lugar de `doclens/.venv` (que entonces no se crea).
+- doc-guard nunca espera más de 90 s (`DOCLENS_HOOK_WAIT`): un hook que vence su
+  timeout NO bloquea en Claude Code y el PDF crudo pasaría. Lo que tarda más
+  (venv la primera vez, documento enorme) sigue en segundo plano y el Read se
+  bloquea con "reintenta en un momento".
 - OCR opcional (scans y texto en figuras): `brew install tesseract tesseract-lang`.
 
 ## Versionado y sync
@@ -68,7 +72,11 @@ faltante.
   `doclens.py`) = versión del contrato del sidecar; los adapters pueden
   detectar sidecars viejos.
 - Los proyectos **no editan su copia local**: el sync compara por contenido y
-  la reemplaza (respaldando lo que pisa). Los cambios se hacen aquí.
+  la reemplaza (respaldando lo que pisa). Los cambios se hacen aquí y llegan a
+  los consumers al **commitearlos**: el espejo es HEAD de ai-tooling, no su
+  working tree.
+- `sync.sh <repo>` usa `<repo>` tal cual (en un monorepo, el subproyecto). Si
+  `doclens/` del destino es un symlink a otra carpeta, no se toca.
 - Si el linter del consumer (ruff, mypy, pre-commit) revisa `doclens/`,
   exclúyelo en su configuración (p. ej. `extend-exclude = ["doclens"]` en ruff).
 

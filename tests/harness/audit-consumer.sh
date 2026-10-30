@@ -54,7 +54,7 @@ grep -q "# custom" "$BK/block-dangerous.sh.bak" 2>/dev/null && ok "backup preser
 rm -rf "$(dirname "$FIX")"
 
 echo "══ A5: sintaxis y JSON de lo instalado en el consumer ══"
-for f in "$CONSUMER/.claude/hooks/auto-sync-daily.sh" "$CONSUMER/scripts/harness-doctor.sh" "$CONSUMER/scripts/sync-doclens.sh"; do
+for f in "$CONSUMER/.claude/hooks/auto-sync-daily.sh" "$CONSUMER/scripts/harness-doctor.sh" "$CONSUMER/doclens/sync.sh" "$CONSUMER/scripts/sync-doclens.sh"; do
   [ -f "$f" ] && { bash -n "$f" 2>/dev/null && ok "bash -n: $(basename $f)" || bad "sintaxis: $f"; } || ok "ausente (no aplica): $(basename $f)"
 done
 for f in "$CONSUMER/.claude/settings.json" "$CONSUMER/.claude/settings.local.json" "$CONSUMER/.ai-tooling"; do

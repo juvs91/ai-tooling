@@ -1683,6 +1683,7 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   nunca descargar desde él). `brew install ruff`.
 - **doc-guard en el toolbox:** doclens vive en `doclens/doclens.py` (doclens/sync.sh no se copia a sí mismo),
   no en `scripts/` → el hook caía siempre al bloqueo manual. Fallback a `doclens/` + requirements correcto.
+  [SUPERADO por ADR-0076: ahora doclens/.venv y se crea solo — ver entrada "doclens homologado"]
   Setup: `uv venv --python /usr/bin/python3 scripts/.venv-doc-tools && uv pip install --python
   scripts/.venv-doc-tools/bin/python -r doclens/requirements.txt` (funciona tras el proxy corporativo).
   `.gitignore`: `scripts/.venv-doc-tools/` y `*.inspect/`. Verificado en vivo con un Read de PDF.
@@ -1709,3 +1710,14 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   `python3` falso en el PATH para no depender del Python del sistema.
 - **`cut -c` en GNU cuenta bytes** (la "í" son 2) y en macOS caracteres: en tests comparar por prefijo con `case`.
 - El aviso de rutas viejas debe excluir el propio doc-guard (usa `scripts/` a propósito como transición).
+- **2ª validación de ADR-0076 (revisor independiente, sin mis conclusiones):** 9 hallazgos reproducidos + 1
+  confirmado en docs. Lo más grave: **un hook PreToolUse que vence su timeout NO bloquea** (Claude Code lo
+  trata como error no bloqueante; también exit ≠ 0/2) → un gate lento falla ABIERTO. Todo hook-guardián debe
+  acotar su propia espera por debajo del timeout y bloquear con "reintenta" (trabajo en background con
+  setsid/perl setpgrp, un solo plazo global con $SECONDS, lock por item con PID).
+- Otros patrones: `find -path "$VAR*"` trata la ruta como glob (usar rutas relativas tras `cd`); nunca escribir
+  a través de un symlink del destino; un mismo env var con dos significados en dos scripts es un bug; el
+  espejo debe salir de HEAD (`git ls-tree`/`git show HEAD:./f`), no del working tree; `while … [ -f ] && echo`
+  como última iteración + pipefail + `set -e` = salida silenciosa (usar `if`).
+- Los scripts de repro de un revisor pueden usar SU copia del código (aquí, un toolbox de prueba con el sync.sh
+  viejo commiteado): volver a correrlos no prueba el fix; lo prueban tests nuevos contra el código real.

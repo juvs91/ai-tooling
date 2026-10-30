@@ -98,6 +98,37 @@ bloqueo manual. Además:
   corrida, que converge por contenido; el respaldo conserva lo anterior.
 - OCR (scans y texto en figuras) requiere tesseract, que no se instala solo; el smoke test lo avisa.
 
+## Segunda validación (revisión adversarial independiente, 2026-10-30)
+
+Un revisor independiente reprodujo 9 hallazgos, y se confirmó uno más que él no pudo verificar. Todos
+están corregidos y cubiertos por tests (D14–D22):
+
+- **Fail-open por timeout, el más grave:** según la documentación de Claude Code, un hook PreToolUse que
+  vence su `timeout` **no bloquea**, y el Read sigue. Si crear el venv o procesar un PDF enorme tardaba más
+  de 120 s, el PDF crudo llegaba al modelo.
+  - Ahora doc-guard tiene **un único plazo de 90 s** para todo el hook.
+  - Lo que no termina sigue en segundo plano, en su propio grupo de procesos, y el Read se bloquea con
+    "reintenta".
+  - Un lock por documento evita lanzar dos procesos.
+- **`doclens/` como symlink:** el espejo escribía y borraba a través de él, fuera del repo. Ahora un symlink
+  al propio toolbox cuenta como modo propio (solo venv), y uno a cualquier otro sitio da error sin tocar
+  nada.
+- **Monorepo:** sync subía a la raíz git, mientras que doc-guard y auto-sync usan `CLAUDE_PROJECT_DIR`.
+  Ahora un destino explícito se usa tal cual.
+- **`DOCLENS_PYTHON` tenía dos significados:** ahora siempre es "intérprete ya listo" en sync y en
+  doc-guard. El Python base para crear el venv pasa a `DOCLENS_BASE_PYTHON`.
+- **Rutas con `[` o `*`:** `find -path "$VENV*"` las tomaba como patrón y borraba el lock y directorios de
+  otro proceso. Ahora usa rutas relativas.
+- **Espejo desde HEAD, no desde el working tree:** lo borrado o editado sin commitear en ai-tooling ya no
+  llega a los consumers. Esto corrige también la salida silenciosa por `pipefail` cuando el último archivo
+  faltaba.
+- **El lock guarda el PID:** si el dueño murió (por ejemplo con SIGKILL), se libera de inmediato, sin
+  esperar 10 minutos.
+- **Mensajes:** un PDF dañado ya no manda a "reinstalar el venv" y tampoco relanza la instalación. Si la
+  carpeta del documento es de solo lectura, el digest va a un temporal estable.
+- **Casos que dejaban pasar el PDF:** sin `jq`, los PDFs se bloquean igual, y un PDF real dentro de una
+  carpeta `*.inspect/` se procesa. El fallback sin git ya no copia `.DS_Store`, `*.orig` ni caches.
+
 ## Verificación
 
 - `tests/harness/doclens-tests.sh` (57 casos): espejo, no-op, propagación sin subir `VERSION`, archivos

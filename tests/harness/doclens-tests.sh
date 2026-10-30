@@ -175,7 +175,7 @@ C6=$(consumer); cp -R "$TB/doclens" "$C6/doclens"; rm -rf "$C6/doclens/.venv"
 R=$(dg "$C6" "$T/doc.pdf"); case "$R" in "2|"*pre-procesado*) ok "sin venv: lo crea solo y procesa el PDF" ;; *) bad "arranque perezoso: ${R%%$'\n'*}" ;; esac
 [ -x "$C6/doclens/.venv/bin/python" ] && ok "doclens/.venv creado por doc-guard" || bad "doc-guard no creó el venv"
 rm -rf "$C6/doclens/.venv" "$T/doc.pdf.inspect"; mkdir "$C6/doclens/.venv.lock"
-R=$(dg "$C6" "$T/doc.pdf"); case "$R" in "2|"*"se está preparando"*) ok "lock tomado → 'se está preparando' (no 2º arranque)" ;; *) bad "con lock: ${R%%$'\n'*}" ;; esac
+R=$(dg "$C6" "$T/doc.pdf"); case "$R" in "2|"*"reintenta el Read"*) ok "lock tomado → 'reintenta' (no 2º arranque)" ;; *) bad "con lock: ${R%%$'\n'*}" ;; esac
 rmdir "$C6/doclens/.venv.lock"; date > "$C6/doclens/.venv.failed"
 R=$(dg "$C6" "$T/doc.pdf"); case "$R" in "2|"*"bash doclens/sync.sh --force"*) ok "fallo reciente → mensaje manual con el comando" ;; *) bad "fallo reciente: ${R%%$'\n'*}" ;; esac
 rm -f "$C6/doclens/.venv.failed"
@@ -199,6 +199,11 @@ if [ -x "$AI_TOOLING/doclens/.venv/bin/python" ] && "$AI_TOOLING/doclens/.venv/b
   "$AI_TOOLING/doclens/.venv/bin/python" -c "import fitz,sys; d=fitz.open(); d.new_page().insert_text((72,72),'hola'); d.save(sys.argv[1])" "$T/real.pdf"
   "$AI_TOOLING/doclens/.venv/bin/python" "$AI_TOOLING/doclens/doclens.py" "$T/real.pdf" >/dev/null 2>&1
   grep -qx '\*' "$T/real.pdf.inspect/.gitignore" 2>/dev/null && ok "el sidecar .inspect/ se ignora solo" || bad "sidecar sin .gitignore"
+  mkdir -p "$T/ro"; cp "$T/real.pdf" "$T/ro/r.pdf"; chmod 555 "$T/ro"
+  OUT=$("$AI_TOOLING/doclens/.venv/bin/python" "$AI_TOOLING/doclens/doclens.py" "$T/ro/r.pdf" 2>/dev/null); chmod 755 "$T/ro"
+  D="${OUT#*INSPECT_DIR=}"
+  [ -f "$D/index.md" ] && case "$D" in "$T/ro/"*) false ;; *) true ;; esac \
+    && ok "carpeta de solo lectura → sidecar en un temporal" || bad "solo lectura: [$OUT]"
 else
   echo "  - omitido: sin doclens/.venv real (corre bash doclens/sync.sh)"
 fi
@@ -207,6 +212,104 @@ if command -v ruff >/dev/null 2>&1; then
 else
   echo "  - omitido: ruff no instalado"
 fi
+
+# ── Segunda validación (revisión adversarial) ─────────────────────────────────
+echo "══ D14: doclens/ como symlink — nunca se escribe ni borra a través de él ══"
+C8=$(consumer); mkdir -p "$T/shared/doclens"; echo dato > "$T/shared/doclens/data.csv"; ln -s "$T/shared/doclens" "$C8/doclens"
+OUT=$(bash "$SYNC" "$C8" 2>&1); RC=$?
+eq "symlink a otra carpeta → exit 3" "$RC" 3
+[ "$(cat "$T/shared/doclens/data.csv" 2>/dev/null)" = dato ] && [ ! -f "$T/shared/doclens/doclens.py" ] && ok "carpeta ajena intacta" || bad "escribió/borró a través del symlink"
+C9=$(consumer); ln -s "$TB/doclens" "$C9/doclens"; echo nota > "$TB/doclens/NOTES-local.txt"
+eq "symlink al propio toolbox → --check toolbox" "$(bash "$SYNC" "$C9" --check)" "toolbox: solo venv"
+bash "$SYNC" "$C9" >/dev/null 2>&1
+[ -f "$TB/doclens/NOTES-local.txt" ] && ok "no borra archivos del toolbox vía symlink" || bad "borró NOTES-local.txt del toolbox"
+rm -f "$TB/doclens/NOTES-local.txt"
+
+echo "══ D15: monorepo — el destino explícito se respeta (no sube a la raíz git) ══"
+MONO=$(consumer); mkdir -p "$MONO/app"; stubvenv "$MONO/app/doclens/.venv"
+bash "$SYNC" "$MONO/app" >/dev/null 2>&1
+[ -f "$MONO/app/doclens/doclens.py" ] && [ ! -e "$MONO/doclens" ] && ok "doclens/ en el proyecto (mono/app), no en la raíz git" || bad "monorepo: $(ls -d "$MONO"/doclens "$MONO"/app/doclens 2>&1 | tr '\n' ' ')"
+: > "$MONO/app/x.pdf"
+R=$(dg "$MONO/app" "$MONO/app/x.pdf"); case "$R" in "2|"*pre-procesado*) ok "doc-guard lo encuentra (misma raíz que el sync)" ;; *) bad "doc-guard en monorepo: ${R%%$'\n'*}" ;; esac
+
+echo "══ D16: DOCLENS_PYTHON = intérprete ya listo (mismo significado en sync y doc-guard) ══"
+C10=$(consumer); bash "$SYNC" "$C10" --check >/dev/null
+OUT=$(env DOCLENS_PYTHON="$STUB" bash "$SYNC" "$C10" 2>&1); RC=$?
+eq "sync con DOCLENS_PYTHON sano → exit 0" "$RC" 0
+has "lo usa en vez de crear venv" "$OUT" "usa DOCLENS_PYTHON"
+[ ! -e "$C10/doclens/.venv" ] && ok "no crea doclens/.venv" || bad "creó venv con DOCLENS_PYTHON"
+mkdir -p "$T/badpy/bin"; printf '#!/bin/sh\necho "ModuleNotFoundError: No module named fitz" >&2; exit 1\n' > "$T/badpy/bin/python"; chmod +x "$T/badpy/bin/python"
+OUT=$(env DOCLENS_PYTHON="$T/badpy/bin/python" bash "$SYNC" "$C10" 2>&1); RC=$?
+eq "DOCLENS_PYTHON sin dependencias → exit 1" "$RC" 1
+has "explica qué falta" "$OUT" "no tiene las dependencias"
+stubvenv "$C10/doclens/.venv"; : > "$T/d16.pdf"
+R=$(dg "$C10" "$T/d16.pdf" DOCLENS_PYTHON="$T/badpy/bin/python"); case "$R" in "2|"*"DOCLENS_PYTHON="*) ok "doc-guard: mensaje nombra DOCLENS_PYTHON (no 'reinstala el venv')" ;; *) bad "doc-guard DOCLENS_PYTHON roto: ${R%%$'\n'*}" ;; esac
+
+echo "══ D17: ruta con [corchetes] — el lock y .venv de otro proceso intactos ══"
+CB="$T/proj [v2]"; mkdir -p "$CB" && (cd "$CB" && g init -q && touch R && g add -A && g commit -qm i) >/dev/null
+stubvenv "$CB/doclens/.venv"; mkdir -p "$CB/doclens/.venv/emptydir" "$CB/doclens/.venv.lock"; echo $$ > "$CB/doclens/.venv.lock/pid"
+bash "$SYNC" "$CB" >/dev/null 2>&1
+[ -d "$CB/doclens/.venv.lock" ] && [ -d "$CB/doclens/.venv/emptydir" ] && ok "lock y .venv intactos con '[' en la ruta" || bad "borró lock o .venv por glob"
+
+echo "══ D18: el espejo es lo COMMITEADO del toolbox, no su working tree ══"
+echo nota > "$TB/doclens/zz-notes.md"; (cd "$TB" && g add -A && g commit -qm zz) >/dev/null
+rm "$TB/doclens/zz-notes.md"; echo "edición sin commit" >> "$TB/doclens/README.md"; echo nuevo > "$TB/doclens/untracked.txt"
+C11=$(consumer); stubvenv "$C11/doclens/.venv"
+bash "$SYNC" "$C11" >/dev/null 2>&1; RC=$?
+eq "último archivo borrado del working tree → exit 0 (no muere por pipefail)" "$RC" 0
+[ -f "$C11/doclens/zz-notes.md" ] && ok "archivo commiteado llega aunque falte en el working tree" || bad "zz-notes.md no llegó"
+! grep -q "edición sin commit" "$C11/doclens/README.md" && ok "edición sin commitear NO se propaga" || bad "propagó edición sin commit"
+[ ! -e "$C11/doclens/untracked.txt" ] && ok "archivo sin versionar NO se propaga" || bad "propagó untracked"
+(cd "$TB" && g checkout -q -- doclens && rm -f doclens/untracked.txt)
+[ -x "$C11/doclens/sync.sh" ] && ok "sync.sh conserva el bit de ejecución" || echo "  - (sync.sh no es ejecutable en el toolbox: sin verificar)"
+
+echo "══ D19: lock de un proceso muerto → se libera de inmediato ══"
+C12=$(consumer); cp -R "$TB/doclens" "$C12/doclens"; rm -rf "$C12/doclens/.venv"
+sh -c 'exit 0' & DEAD=$!; wait "$DEAD"
+mkdir "$C12/doclens/.venv.lock"; echo "$DEAD" > "$C12/doclens/.venv.lock/pid"
+env PATH="$UVPATH" bash "$C12/doclens/sync.sh" "$C12" --venv >/dev/null 2>&1; RC=$?
+eq "PID muerto → toma el lock y crea el venv" "$RC" 0
+rm -rf "$C12/doclens/.venv"; mkdir "$C12/doclens/.venv.lock"; echo "$DEAD" > "$C12/doclens/.venv.lock/pid"; : > "$T/d19.pdf"
+R=$(dg "$C12" "$T/d19.pdf"); case "$R" in "2|"*pre-procesado*) ok "doc-guard no espera 10 min por un lock huérfano" ;; *) bad "lock huérfano en doc-guard: ${R%%$'\n'*}" ;; esac
+
+echo "══ D20: doc-guard nunca alcanza el timeout del hook (fail-open) ══"
+C13=$(consumer); mkdir -p "$C13/doclens/.venv/bin"; : > "$C13/doclens/doclens.py"
+cat > "$C13/doclens/.venv/bin/python" <<EOF
+#!/bin/sh
+[ "\$1" = -c ] && exit 0
+echo x >> "$T/slow.calls"; sleep 4
+d="\$2.inspect"; mkdir -p "\$d"; : > "\$d/index.md"; echo "INSPECT_DIR=\$d"
+EOF
+chmod +x "$C13/doclens/.venv/bin/python"; : > "$T/grande.pdf"; : > "$T/slow.calls"
+S0=$SECONDS; R=$(dg "$C13" "$T/grande.pdf" DOCLENS_HOOK_WAIT=1); EL=$((SECONDS - S0))
+case "$R" in "2|"*"reintenta el Read"*) ok "documento lento → bloquea con 'reintenta' (exit 2)" ;; *) bad "lento: ${R%%$'\n'*}" ;; esac
+[ "$EL" -le 3 ] && ok "respeta el plazo (${EL}s, no espera al proceso)" || bad "esperó ${EL}s"
+R=$(dg "$C13" "$T/grande.pdf" DOCLENS_HOOK_WAIT=1)
+eq "2º Read mientras procesa → no lanza otro proceso" "$(wc -l < "$T/slow.calls" | tr -d ' ')" 1
+sleep 4
+R=$(dg "$C13" "$T/grande.pdf"); case "$R" in "2|"*pre-procesado*) ok "al terminar en segundo plano → digest listo" ;; *) bad "después: ${R%%$'\n'*}" ;; esac
+
+echo "══ D21: falla del ARCHIVO (no del venv) → mensaje correcto, sin reinstalar ══"
+C14=$(consumer); mkdir -p "$C14/doclens/.venv/bin"; : > "$C14/doclens/doclens.py"; cp "$SYNC" "$C14/doclens/sync.sh"
+printf '#!/bin/sh\n[ "$1" = -c ] && exit 0\necho "RuntimeError: cannot open broken document" >&2; exit 1\n' > "$C14/doclens/.venv/bin/python"
+chmod +x "$C14/doclens/.venv/bin/python"; : > "$T/danado.pdf"; : > "$UVLOG"
+R=$(dg "$C14" "$T/danado.pdf"); case "$R" in "2|"*"no pudo procesar este archivo"*"cannot open broken"*) ok "dice que el archivo falló (con el error de doclens)" ;; *) bad "archivo dañado: ${R%%$'\n'*}" ;; esac
+[ ! -s "$UVLOG" ] && ok "no intenta reinstalar el venv" || bad "relanzó la creación del venv"
+
+echo "══ D22: sin jq, PDF dentro de *.inspect/, toolbox sin git ══"
+mkdir -p "$T/nojq"; for b in grep cat; do ln -sf "$(command -v $b)" "$T/nojq/$b"; done
+R=$(echo '{"tool_name":"Read","tool_input":{"file_path":"/x/a.pdf"}}' | PATH="$T/nojq" "$BASH" "$H/doc-guard.sh" 2>&1 >/dev/null; echo "|$?")
+case "$R" in *"falta jq"*"|2") ok "sin jq: el PDF se bloquea igual" ;; *) bad "sin jq: [$R]" ;; esac
+R=$(echo '{"tool_name":"Read","tool_input":{"file_path":"/x/a.md"}}' | PATH="$T/nojq" "$BASH" "$H/doc-guard.sh" >/dev/null 2>&1; echo $?)
+eq "sin jq: lo que no es PDF pasa" "$R" 0
+mkdir -p "$T/rep.inspect/raw"; : > "$T/rep.inspect/raw/x.pdf"
+R=$(dg "$C1" "$T/rep.inspect/raw/x.pdf"); case "$R" in "2|"*) ok "PDF real dentro de *.inspect/ → se intercepta" ;; *) bad "PDF en .inspect pasó: ${R%%|*}" ;; esac
+eq "md dentro de *.inspect/ → libre" "$(dg "$C1" "$T/rep.inspect/index.md" | cut -d'|' -f1)" 0
+mkdir -p "$T/tbfs"; (cd "$TB" && git archive HEAD doclens) | tar -xf - -C "$T/tbfs"
+: > "$T/tbfs/doclens/.DS_Store"; : > "$T/tbfs/doclens/doclens.py.orig"; mkdir -p "$T/tbfs/doclens/.ruff_cache"; : > "$T/tbfs/doclens/.ruff_cache/x"
+C15=$(consumer); stubvenv "$C15/doclens/.venv"; bash "$T/tbfs/doclens/sync.sh" "$C15" >/dev/null 2>&1
+[ -f "$C15/doclens/doclens.py" ] && [ ! -e "$C15/doclens/.DS_Store" ] && [ ! -e "$C15/doclens/doclens.py.orig" ] && [ ! -e "$C15/doclens/.ruff_cache" ] \
+  && ok "toolbox sin git: copia sin basura (.DS_Store, *.orig, caches)" || bad "copió basura: $(cd "$C15/doclens" && ls -a | tr '\n' ' ')"
 
 echo ""
 echo "══ doclens: $PASS ok, $FAIL fallos ══"
