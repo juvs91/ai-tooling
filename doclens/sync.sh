@@ -26,6 +26,7 @@ set -euo pipefail
 
 DOCLENS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 EXPLICIT=false
+if [ "$#" -gt 0 ] && [ -z "$1" ]; then shift; fi   # sync.sh "" --check ≡ sync.sh --check
 case "${1:-}" in ""|-*) TARGET="$(pwd)" ;; *) TARGET="$1"; EXPLICIT=true; shift ;; esac
 FLAG="${1:-}"
 case "$FLAG" in --force|--check|--venv|"") ;; *) echo "doclens: flag desconocida: $FLAG" >&2; exit 2 ;; esac
@@ -80,7 +81,7 @@ files_in() {
 }
 list_src() {
   if [ "$SRC_MODE" = git ]; then
-    git -C "$DOCLENS_HOME" -c core.quotePath=false ls-tree -r --name-only HEAD -- . | LC_ALL=C sort
+    git -C "$DOCLENS_HOME" ls-tree -r -z --name-only HEAD -- . | tr '\0' '\n' | LC_ALL=C sort
   else
     files_in "$DOCLENS_HOME"
   fi
@@ -88,7 +89,7 @@ list_src() {
 src_cat() { if [ "$SRC_MODE" = git ]; then git -C "$DOCLENS_HOME" show "HEAD:./$1"; else cat "$DOCLENS_HOME/$1"; fi; }
 src_is_exec() {
   if [ "$SRC_MODE" = git ]; then
-    [ "$(git -C "$DOCLENS_HOME" ls-tree HEAD -- "$1" | cut -c1-6)" = 100755 ]
+    [ "$(git -C "$DOCLENS_HOME" ls-tree -z HEAD -- "$1" | cut -c1-6)" = 100755 ]
   else
     [ -x "$DOCLENS_HOME/$1" ]
   fi
@@ -203,11 +204,16 @@ if ! $SELF && [ "$FLAG" != "--venv" ] && { has_legacy || [ "$FLAG" = "--force" ]
   trap 'rm -rf "$STAGE"' EXIT
   SRC_LIST=$(list_src)
   while IFS= read -r f; do
-    mkdir -p "$STAGE/$(dirname "$f")"; src_cat "$f" > "$STAGE/$f"
+    mkdir -p "$STAGE/$(dirname "$f")"
+    if ! src_cat "$f" > "$STAGE/$f" 2>/dev/null; then
+      rm -f "$STAGE/$f"; echo "doclens: AVISO — no se pudo copiar '$f' (nombre no soportado); omitido"; continue
+    fi
     if src_is_exec "$f"; then chmod +x "$STAGE/$f"; fi
   done <<< "$SRC_LIST"
   mkdir -p "$DST"
-  while IFS= read -r f; do mkdir -p "$DST/$(dirname "$f")"; mv -f "$STAGE/$f" "$DST/$f"; done <<< "$SRC_LIST"
+  while IFS= read -r f; do
+    if [ -f "$STAGE/$f" ]; then mkdir -p "$DST/$(dirname "$f")"; mv -f "$STAGE/$f" "$DST/$f"; fi
+  done <<< "$SRC_LIST"
   # Lo que ya no existe en el toolbox se borra (quedó en el respaldo)
   list_dst | while IFS= read -r f; do grep -qxF -- "$f" <<< "$SRC_LIST" || rm -f "$DST/$f"; done
   # Rutas relativas: un '[' o '*' en la ruta del repo no puede volverse patrón
@@ -231,12 +237,14 @@ fi
 
 # ── intérprete: DOCLENS_PYTHON ya preparado, o doclens/.venv ──────────────────
 if [ -n "${DOCLENS_PYTHON:-}" ]; then
+  DOCLENS_PYTHON=$(command -v "$DOCLENS_PYTHON" 2>/dev/null || echo "$DOCLENS_PYTHON")   # admite "python3"
   if [ -x "$DOCLENS_PYTHON" ] && deps_ok "$DOCLENS_PYTHON"; then
     echo "doclens: usa DOCLENS_PYTHON=$DOCLENS_PYTHON (no crea doclens/.venv)"
     smoke "$DOCLENS_PYTHON"; exit 0
   fi
-  echo "doclens: ERROR — DOCLENS_PYTHON=$DOCLENS_PYTHON no tiene las dependencias (pip install -r doclens/requirements.txt), o quita la variable" >&2
-  exit 1
+  # Compatibilidad: antes DOCLENS_PYTHON era el Python base; no fallar, usar el venv
+  echo "doclens: AVISO — DOCLENS_PYTHON=$DOCLENS_PYTHON no tiene las dependencias; se usa doclens/.venv (para el Python base usa DOCLENS_BASE_PYTHON)"
+  : "${DOCLENS_BASE_PYTHON:=$DOCLENS_PYTHON}"
 fi
 VRC=0; ensure_venv || VRC=$?
 [ "$VRC" = 0 ] || exit "$VRC"

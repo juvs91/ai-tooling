@@ -239,11 +239,15 @@ eq "sync con DOCLENS_PYTHON sano → exit 0" "$RC" 0
 has "lo usa en vez de crear venv" "$OUT" "usa DOCLENS_PYTHON"
 [ ! -e "$C10/doclens/.venv" ] && ok "no crea doclens/.venv" || bad "creó venv con DOCLENS_PYTHON"
 mkdir -p "$T/badpy/bin"; printf '#!/bin/sh\necho "ModuleNotFoundError: No module named fitz" >&2; exit 1\n' > "$T/badpy/bin/python"; chmod +x "$T/badpy/bin/python"
+stubvenv "$C10/doclens/.venv"
 OUT=$(env DOCLENS_PYTHON="$T/badpy/bin/python" bash "$SYNC" "$C10" 2>&1); RC=$?
-eq "DOCLENS_PYTHON sin dependencias → exit 1" "$RC" 1
-has "explica qué falta" "$OUT" "no tiene las dependencias"
-stubvenv "$C10/doclens/.venv"; : > "$T/d16.pdf"
-R=$(dg "$C10" "$T/d16.pdf" DOCLENS_PYTHON="$T/badpy/bin/python"); case "$R" in "2|"*"DOCLENS_PYTHON="*) ok "doc-guard: mensaje nombra DOCLENS_PYTHON (no 'reinstala el venv')" ;; *) bad "doc-guard DOCLENS_PYTHON roto: ${R%%$'\n'*}" ;; esac
+eq "DOCLENS_PYTHON sin dependencias → no falla (compatibilidad)" "$RC" 0
+has "avisa y usa doclens/.venv" "$OUT" "se usa doclens/.venv"
+: > "$T/d16.pdf"
+R=$(dg "$C10" "$T/d16.pdf" DOCLENS_PYTHON="$T/badpy/bin/python"); case "$R" in "2|"*pre-procesado*) ok "doc-guard: DOCLENS_PYTHON roto → usa doclens/.venv" ;; *) bad "doc-guard DOCLENS_PYTHON roto: ${R%%$'\n'*}" ;; esac
+rm -rf "$C10/doclens/.venv"; date > "$C10/doclens/.venv.failed"; rm -rf "$T/d16.pdf.inspect"
+R=$(dg "$C10" "$T/d16.pdf" DOCLENS_PYTHON="$T/badpy/bin/python"); case "$R" in "2|"*"DOCLENS_PYTHON="*"no tiene las dependencias"*) ok "sin venv: el mensaje nombra DOCLENS_PYTHON" ;; *) bad "mensaje DOCLENS_PYTHON: ${R%%$'\n'*}" ;; esac
+rm -f "$C10/doclens/.venv.failed"
 
 echo "══ D17: ruta con [corchetes] — el lock y .venv de otro proceso intactos ══"
 CB="$T/proj [v2]"; mkdir -p "$CB" && (cd "$CB" && g init -q && touch R && g add -A && g commit -qm i) >/dev/null
@@ -310,6 +314,40 @@ mkdir -p "$T/tbfs"; (cd "$TB" && git archive HEAD doclens) | tar -xf - -C "$T/tb
 C15=$(consumer); stubvenv "$C15/doclens/.venv"; bash "$T/tbfs/doclens/sync.sh" "$C15" >/dev/null 2>&1
 [ -f "$C15/doclens/doclens.py" ] && [ ! -e "$C15/doclens/.DS_Store" ] && [ ! -e "$C15/doclens/doclens.py.orig" ] && [ ! -e "$C15/doclens/.ruff_cache" ] \
   && ok "toolbox sin git: copia sin basura (.DS_Store, *.orig, caches)" || bad "copió basura: $(cd "$C15/doclens" && ls -a | tr '\n' ' ')"
+
+echo "══ D23: regresiones de la 3ª validación (estado, rendimiento, nombres, compatibilidad) ══"
+C16=$(consumer); stubvenv "$C16/doclens/.venv"; bash "$SYNC" "$C16" >/dev/null 2>&1; : > "$T/d23.pdf"
+TD="$T/tmpd"; mkdir -p "$TD"; SD="$TD/doclens-hook-$(id -u)"
+R=$(dg "$C16" "$T/d23.pdf" TMPDIR="$TD"); case "$R" in "2|"*pre-procesado*) ok "PDF procesado" ;; *) bad "d23: ${R%%$'\n'*}" ;; esac
+[ -z "$(ls "$SD" 2>/dev/null)" ] && ok "no deja .out/.pid tras terminar" || bad "quedó estado: $(ls "$SD" | tr '\n' ' ')"
+KEY=$(printf '%s' "$T/d23.pdf" | cksum | cut -d' ' -f1); echo $$ > "$SD/$KEY.pid"; touch -t 202001010000 "$SD/$KEY.pid"
+R=$(dg "$C16" "$T/d23.pdf" TMPDIR="$TD"); case "$R" in "2|"*pre-procesado*) ok "pidfile viejo con PID reutilizado (vivo) → no bloquea el documento" ;; *) bad "PID reutilizado: ${R%%$'\n'*}" ;; esac
+rm -f "$SD"/*; chmod 500 "$SD"   # vacía: un .out previo sí se podría sobrescribir
+R=$(dg "$C16" "$T/d23.pdf" TMPDIR="$TD"); chmod 700 "$SD"; case "$R" in "2|"*pre-procesado*) ok "carpeta de estado sin escritura → usa un temporal propio" ;; *) bad "estado no escribible: ${R%%$'\n'*}" ;; esac
+REF2="$T/d23ref"; sleep 1; : > "$REF2"; sleep 1; touch "$T/d23.pdf"
+dg "$C16" "$T/d23.pdf" >/dev/null
+[ -n "$(find "$T/d23.pdf.inspect/index.md" -newer "$REF2")" ] && ok "PDF modificado → se reprocesa (el caché no sirve un digest viejo)" || bad "sirvió un digest viejo"
+: > "$UVLOG"; mv "$C16/doclens/.venv" "$C16/doclens/.venv-off"
+R=$(dg "$C16" "$T/d23.pdf"); mv "$C16/doclens/.venv-off" "$C16/doclens/.venv"
+case "$R" in "2|"*pre-procesado*) ok "digest vigente → respuesta directa, sin lanzar procesos ni venv" ;; *) bad "camino rápido: ${R%%$'\n'*}" ;; esac
+TD2="$T/tmpd2"; mkdir -p "$TD2"
+R=$(dg "$C16" "$T/notas.md" TMPDIR="$TD2" | cut -d'|' -f1)
+eq "Read de un .md → exit 0" "$R" 0
+[ ! -e "$TD2/doclens-hook-$(id -u)" ] && ok "lo que no es PDF sale antes de cualquier preparación" || bad "preparó estado para un .md"
+ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+S0=$(ms); for i in 1 2 3 4 5; do dg "$C16" "$T/d23.pdf" TMPDIR="$TD" >/dev/null; done
+echo "  - informativo: Read de PDF ya procesado ≈ $(( ($(ms) - S0) / 5 )) ms (depende de la máquina; no se asserta)"
+printf 'x\n' > "$TB/doclens/adapters/a\\b \"c\"\td.txt"; (cd "$TB" && g add -A && g commit -qm raro) >/dev/null
+C17=$(consumer); stubvenv "$C17/doclens/.venv"; bash "$SYNC" "$C17" >/dev/null 2>&1; RC=$?
+eq "nombre con \\, comillas y tab en el toolbox → exit 0" "$RC" 0
+[ -f "$C17/doclens/adapters/a\\b \"c\"\td.txt" ] && [ -f "$C17/doclens/doclens.py" ] && ok "se copia (y el resto también)" || bad "nombre raro: $(ls "$C17/doclens/adapters" | tr '\n' ',')"
+has "--check → al día con nombre raro" "$(bash "$SYNC" "$C17" --check)" "doclens al día"
+(cd "$TB" && g rm -q "doclens/adapters/a\\b \"c\"\td.txt" && g commit -qm quita) >/dev/null
+C18=$(consumer); OUT=$(cd "$C18" && bash "$SYNC" "" --check 2>&1)
+case "$OUT" in "update disponible"*) ok "sync.sh \"\" --check → solo reporta" ;; *) bad "primer arg vacío: [$OUT]" ;; esac
+[ ! -e "$C18/doclens" ] && ok "y no copia nada" || bad "copió con --check"
+OUT=$(env DOCLENS_PYTHON=python3-no-existe PATH="$UVPATH" bash "$SYNC" "$C16" 2>&1); RC=$?
+eq "DOCLENS_PYTHON inexistente → no falla (usa el venv)" "$RC" 0
 
 echo ""
 echo "══ doclens: $PASS ok, $FAIL fallos ══"

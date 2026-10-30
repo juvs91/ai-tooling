@@ -1721,3 +1721,12 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   como última iteración + pipefail + `set -e` = salida silenciosa (usar `if`).
 - Los scripts de repro de un revisor pueden usar SU copia del código (aquí, un toolbox de prueba con el sync.sh
   viejo commiteado): volver a correrlos no prueba el fix; lo prueban tests nuevos contra el código real.
+- **3ª validación (regresiones de la 2ª):** pedir explícitamente "¿qué ROMPIÓ este commit?" comparando contra
+  la versión anterior encuentra cosas distintas que "busca bugs". Primer paso barato y decisivo: correr la suite
+  ORIGINAL contra el código nuevo. 6 regresiones menores (estado en TMPDIR nunca limpiado + PID reutilizado,
+  carpeta de estado no escribible, latencia del sondeo, `ls-tree` sin `-z`, cambio de semántica de una env var,
+  argumento vacío). Al verificar que los tests nuevos detectan el bug en el código viejo aparecieron 2 aserciones
+  vacuas (un `.out` existente se puede sobrescribir en una carpeta 500; "5 Reads en ≤3 s" también lo cumplía el
+  código lento) → siempre correr el test contra el código viejo antes de darlo por bueno.
+- Camino rápido de caché en el propio hook (digest `-nt` PDF) → 86 ms sin lanzar procesos; medir latencia con
+  el mismo arnés para las 3 versiones antes de afirmar "más lento/más rápido".

@@ -129,6 +129,36 @@ están corregidos y cubiertos por tests (D14–D22):
 - **Casos que dejaban pasar el PDF:** sin `jq`, los PDFs se bloquean igual, y un PDF real dentro de una
   carpeta `*.inspect/` se procesa. El fallback sin git ya no copia `.DS_Store`, `*.orig` ni caches.
 
+## Tercera validación: regresiones de la segunda (2026-10-30)
+
+Una revisión enfocada solo en lo que la segunda validación pudo haber roto. Partió de la suite
+**original** de c02d00c: corrida contra el código nuevo, solo falló por un texto cambiado a propósito.
+Encontró 6 regresiones menores, todas corregidas y cubiertas en D23. Esos tests fallan con el código de
+90fa067 (14 fallos):
+
+- **Archivo de estado viejo con un PID reutilizado:** el PDF quedaba en "reintenta" para siempre. Ahora el
+  envoltorio borra el pidfile al terminar, y un pidfile de más de 30 min se ignora.
+- **Carpeta de estado sin permiso de escritura:** se bloqueaban todos los PDFs. Ahora se verifica `-w`/`-O`
+  y, si no, se usa un temporal propio.
+- **Latencia y estado acumulado:**
+  - lo que no es PDF ni imagen grande sale antes de cualquier preparación (40 ms, igual que antes);
+  - un PDF con digest vigente responde desde bash, sin lanzar procesos: 86 ms, cuando c02d00c tardaba
+    98 ms y 90fa067 322 ms;
+  - el sondeo arranca en 50 ms;
+  - el estado de más de 1 día se purga.
+- **Nombres con `\`, comillas o tabuladores en `doclens/`:** abortaban todo el sync. Ahora se lista con
+  `ls-tree -z`, y un archivo que no se puede copiar se omite con un aviso.
+- **`DOCLENS_PYTHON` con el significado anterior** (Python sin dependencias): ahora no falla. sync avisa y
+  usa `doclens/.venv`; doc-guard prueba ese intérprete y, si no sirve, usa el venv. Acepta nombres sin ruta
+  (`python3`).
+- **`sync.sh "" --check`:** un primer argumento vacío vuelve a contar como "sin destino".
+
+Probado en vivo, sin stubs:
+- sin venv, un PDF de 300 páginas creó el venv con uv y se procesó completo dentro del plazo;
+- un consumer con la estructura vieja y un venv viejo real se migró con auto-sync real, el venv movido
+  siguió funcionando y el PDF se procesó;
+- un consumer nuevo quedó listo en ~6 s.
+
 ## Verificación
 
 - `tests/harness/doclens-tests.sh` (57 casos): espejo, no-op, propagación sin subir `VERSION`, archivos
