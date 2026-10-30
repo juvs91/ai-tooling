@@ -165,7 +165,8 @@ if [ "$SYNC_GIT_HOOKS" = "true" ] && [ -n "$AI_TOOLING_DIR" ] && [ -f "$GH_INSTA
   case "$GH_RC" in
     11)
       GH_BK="$REPO_ROOT/.claude/.harness-backup-$(date -u +%Y%m%dT%H%M%SZ)-githooks"
-      GH_DIR=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path hooks 2>/dev/null)
+      GH_DIR=$(git -C "$REPO_ROOT" rev-parse --git-path hooks 2>/dev/null)   # sin --path-format: git <2.31
+      case "$GH_DIR" in /*) ;; *) GH_DIR="$REPO_ROOT/$GH_DIR" ;; esac
       mkdir -p "$GH_BK"
       for h in pre-commit commit-msg; do [ -f "$GH_DIR/$h" ] && cp -p "$GH_DIR/$h" "$GH_BK/$h.bak"; done
       if OUT=$(cd "$REPO_ROOT" && bash "$GH_INSTALLER" 2>&1); then

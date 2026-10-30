@@ -77,7 +77,9 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
 fi
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 HOOKS_PATH_CFG="$(git config --get core.hooksPath || true)"
-HOOKS_DIR="$(git rev-parse --path-format=absolute --git-path hooks)"
+# --path-format=absolute exige git ≥2.31; --git-path (≥2.5) es relativo al cwd
+HOOKS_DIR="$(git rev-parse --git-path hooks)"
+case "$HOOKS_DIR" in /*) ;; *) HOOKS_DIR="$PWD/$HOOKS_DIR" ;; esac
 COMMIT_MSG_HOOK="$HOOKS_DIR/commit-msg"
 PRE_COMMIT="$HOOKS_DIR/pre-commit"
 PC_CONFIG="$REPO_ROOT/.pre-commit-config.yaml"

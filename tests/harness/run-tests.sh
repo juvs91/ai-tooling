@@ -174,6 +174,25 @@ grep -qx 'sessions/' "$FIX/.claude/.gitignore" && ok "última línea previa inta
 sed -i.x '/^\/worktrees\/$/d' "$FIX/.claude/.gitignore"; bash "$IH" "$FIX" --apply >/dev/null 2>&1
 ! grep -qx '/worktrees/' "$FIX/.claude/.gitignore" && ok "quitado por el usuario no se re-agrega" || bad "re-agregó /worktrees/"
 
+echo "══ T14: routing de skills — rutas existen, nombres únicos, tabla == name: ══"
+# Las rutas viven copiadas a mano en 3 archivos: un borrado/movimiento de skill las
+# rompe en silencio (pasó en b53b6ba con python-testing en workflow-coordinator.md).
+SK="$AI_TOOLING/.agents/skills"; WC="$AI_TOOLING/.claude/commands/workflow-coordinator.md"
+fm_name() { [ -f "$1" ] || return 0; awk 'NR==1&&!/^---/{exit} NR>1&&/^---/{exit} /^name:/{sub(/^name:[[:space:]]*/,""); gsub(/["'"'"']/,""); print; exit}' "$1"; }
+MISS=""
+for p in $(grep -ohE '\.agents/skills/[A-Za-z0-9_./-]+/SKILL\.md' "$WC" | sort -u); do
+  [ -f "$AI_TOOLING/$p" ] || MISS="$MISS ${p#.agents/skills/}(wc)"
+done
+for p in $(grep -ohE '`[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+/SKILL\.md`' "$AI_TOOLING/AGENTS.md" "$SK/skills.md" | tr -d '`' | sed 's|^\.agents/skills/||' | sort -u); do
+  [ -f "$SK/$p" ] || MISS="$MISS $p"
+done
+[ -z "$MISS" ] && ok "toda ruta de AGENTS.md, skills.md y workflow-coordinator.md existe" || bad "rutas rotas:$MISS"
+DUP=$(find "$SK" -name SKILL.md | while read -r f; do fm_name "$f"; done | sort | uniq -d | tr '\n' ' ')
+[ -z "$DUP" ] && ok "sin skills con name: duplicado" || bad "name: duplicado (OpenCode/Claude cargan uno al azar): $DUP"
+MISM=$(grep -E '^\| .*\| `[^`]+` \| `\.agents/skills/' "$WC" | sed -E 's/.*\| `([^`]+)` \| `([^`]+)`.*/\1 \2/' |
+  while read -r n p; do [ "$n" = "$(fm_name "$AI_TOOLING/$p")" ] || printf '%s ' "$n"; done)
+[ -z "$MISM" ] && ok "tabla de workflow-coordinator.md == name: del skill" || bad "fila apunta a otro skill: $MISM"
+
 echo ""
 echo "══ Resultado: $PASS ok, $FAIL fallos ══"
 rm -rf "$(dirname "$FIX")"

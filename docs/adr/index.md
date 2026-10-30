@@ -42,3 +42,4 @@
 | [ADR-0072](ADR-0072-harness-sync-hardening.md) | Hardening del harness de sync — doctor, manifest, dry-run, dedupe y backups | Accepted | 2026-10-28 | Harness |
 | [ADR-0073](ADR-0073-worktrees-nativos-harness.md) | Worktrees nativos de Claude Code en el harness — raíz de sesión canónica, repo del archivo, guards | Accepted | 2026-10-29 | Harness |
 | [ADR-0074](ADR-0074-harness-merge-y-hooks-git.md) | Merge de hooks del consumer, worktrees en consumers y ADR gate git (--check, solo migración) | Accepted | 2026-10-29 | Harness |
+| [ADR-0075](ADR-0075-dedup-skills-e-invariante-routing.md) | Deduplicación de skills (retroactivo b53b6ba) e invariante de routing verificado por test (T14) | Accepted | 2026-10-30 | Harness |

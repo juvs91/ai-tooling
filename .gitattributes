@@ -1,0 +1,14 @@
+# Fin de línea LF para todo lo que ejecuta bash/python/node o leen los hooks.
+# Por qué: Git for Windows clona con core.autocrlf=true por defecto. Con CRLF,
+# bash falla con $'\r' y TODOS los hooks salen con 2 → Claude Code bloquea
+# cualquier tool call (incluso `ls`) en WSL. Verificado en contenedor Linux.
+* text=auto eol=lf
+
+# Scripts sin extensión
+bin/*     text eol=lf
+scripts/* text eol=lf
+
+# Binarios
+*.png binary
+*.jpg binary
+*.pdf binary

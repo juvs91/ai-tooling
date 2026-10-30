@@ -148,8 +148,9 @@ require_project_dir() {
 
 # Verifica que el repo tiene historial completo (CI shallow clone fix)
 require_full_history() {
-  # --git-path: correcto desde subdirectorios y worktrees (.git es archivo ahí) — ADR-0073
-  if [[ -f "$(git rev-parse --path-format=absolute --git-path shallow)" ]]; then
+  # --git-path: correcto desde subdirectorios y worktrees (.git es archivo ahí) — ADR-0073.
+  # Relativo al cwd, válido para -f; sin --path-format=absolute (exige git ≥2.31).
+  if [[ -f "$(git rev-parse --git-path shallow)" ]]; then
     info "shallow clone detectado — fetching full history"
     local remote; remote=$(resolve_remote)
     git fetch --unshallow "$remote" --quiet
@@ -565,7 +566,7 @@ cmd_cherry() {
     if git cherry-pick "$sha" 2>/dev/null; then
       ok "$t aplicado"
       cherry_count=$((cherry_count + 1))
-    elif [[ -f "$(git rev-parse --path-format=absolute --git-path CHERRY_PICK_HEAD)" ]]; then
+    elif [[ -f "$(git rev-parse --git-path CHERRY_PICK_HEAD)" ]]; then
       # Distinguir commit vacío (ya aplicado de otra forma) de conflicto real
       local conflicts; conflicts=$(git diff --name-only --diff-filter=U 2>/dev/null)
       if [[ -z "$conflicts" ]]; then

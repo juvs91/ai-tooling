@@ -19,7 +19,7 @@ SID=test-sid-0073
 FAKE_SECRET="API""_KEY=$(printf 'x%.0s' $(seq 1 24))"
 
 # ── Fixture: M (principal) + W (anidado) + S (hermano) + alias (symlink) + otro repo
-mkdir -p "$T/M" && cd "$T/M" && g init -q -b master
+mkdir -p "$T/M" && cd "$T/M" && g init -q && g symbolic-ref HEAD refs/heads/master   # init -b exige git ≥2.28
 mkdir -p src apps/web .claude/hooks scripts tools docs/adr .agents/skills/x .agents/skills/workflow/workflow-coordinator
 touch AGENTS.md .agents/skills/workflow/workflow-coordinator/SKILL.md   # skill-autoload exige ambos
 cp "$H/task-scope-lib.sh" .claude/hooks/

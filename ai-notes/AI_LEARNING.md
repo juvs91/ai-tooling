@@ -1649,3 +1649,25 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   de `software/...` dan falsos positivos). `doc-guard.sh` nuevo traía los dos patrones ya corregidos en
   el resto: rutas relativas al cwd (fallaban tras `cd` y en worktrees → usar `$CLAUDE_PROJECT_DIR`) y
   `stat -f%z` (solo macOS; en Linux la imagen grande pasaba) → `wc -c`. Tests W14.
+
+### WSL, git viejo y robustez del routing (2026-10-30)
+- **Matriz verificada (186/186 en cada una):** macOS (repo en volumen case-sensitive y en uno case-insensitive,
+  como /mnt/c de WSL), Linux git 2.22 / 2.26 / 2.32 / 2.40 / 2.45, GNU y busybox.
+- **`--path-format=absolute` exige git ≥2.31.** En git viejo rev-parse imprime la opción literal + ruta
+  relativa: `tools/install_hooks.sh` no instalaba el gate (exit 1, `--check` siempre 12). Usar
+  `git rev-parse --git-path X` (git ≥2.5, relativo al cwd) y absolutizar con `$PWD`/`$REPO_ROOT`, o usarlo
+  tal cual en `-f`. Las comparaciones git-dir vs common-dir sí funcionan (ambos lados se corrompen igual),
+  pero no confiar en eso para código nuevo. Tests: `git init -b` exige 2.28 → `init` + `symbolic-ref`.
+- **WSL / CRLF (grave):** sin `.gitattributes`, un clon con Git for Windows (`core.autocrlf=true` por
+  defecto) deja los 70 `.sh` con CRLF y TODOS los hooks salen con 2 (bash: `$'\r'`) → Claude Code bloquea
+  cualquier tool call, incluso `ls`. Fix: `.gitattributes` con `* text=auto eol=lf` (ningún archivo
+  versionado tenía CRLF, no hubo renormalización). WSL real no probado (no hay Windows); se simularon sus
+  dos riesgos propios (CRLF y FS case-insensitive). Los permisos de ejecución no aplican: drvfs expone 0777
+  y los hooks se invocan con `bash x.sh`.
+- **Routing:** las rutas de skills viven copiadas a mano en 3 archivos → T14 (rutas existen, `name:` único,
+  fila == `name:`). ADR-0075 documenta retroactivo el borrado de 11 duplicados (b53b6ba, hecho desde un
+  clon sin ADR gate).
+- `doclens/adapters/claude-code/doc-guard.sh` es una 2ª copia de `.claude/hooks/doc-guard.sh`: al corregir
+  uno, sincronizar el otro (`cmp`).
+- El hook block-dangerous de la sesión inspecciona el texto del comando, aunque el patrón vaya a correr
+  dentro de Docker: armar el patrón en runtime (`D="git reset --ha"; D="${D}rd"`).
