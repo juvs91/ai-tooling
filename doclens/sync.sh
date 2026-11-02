@@ -117,8 +117,11 @@ dst_version() { cat "$DST/VERSION" 2>/dev/null || echo none; }
 src_version() { src_cat VERSION 2>/dev/null || echo none; }
 
 # ── venv ──────────────────────────────────────────────────────────────────────
-deps_ok() { "$1" -c 'import fitz, pdfplumber, pypdf, PIL' >/dev/null 2>&1; }
-venv_healthy() { [ -x "$VENV/bin/python" ] && deps_ok "$VENV/bin/python"; }
+deps_ok() { "$1" -c 'import fitz, pdfplumber, pypdf, PIL, cv2' >/dev/null 2>&1; }   # cv2: caras (ADR-0079)
+# Sello del lock instalado (ADR-0079): si requirements.txt cambió (p. ej. llegó opencv), el venv se rehace
+lock_sum() { { sha256sum "$DST/requirements.txt" 2>/dev/null || shasum -a 256 "$DST/requirements.txt"; } | cut -d' ' -f1; }
+stamp_ok() { [ ! -f "$VENV/.lock-sha256" ] || [ "$(cat "$VENV/.lock-sha256")" = "$(lock_sum)" ]; }
+venv_healthy() { [ -x "$VENV/bin/python" ] && deps_ok "$VENV/bin/python" && stamp_ok; }
 # Python base explícito y aislado: ni el venv/conda activado del proyecto, ni un
 # .python-version (uv/pyenv) del consumer deciden con qué se crea el venv de doclens.
 clean_env() { env -u VIRTUAL_ENV -u CONDA_PREFIX -u PYTHONPATH -u PYTHONHOME UV_PYTHON_DOWNLOADS=never "$@"; }
@@ -179,6 +182,7 @@ ensure_venv() {  # 0 listo · 1 falló · 3 otro proceso lo está preparando
       (cd "$DST" && clean_env "$base" -m venv "$VENV" \
         && clean_env "$VENV/bin/python" -m pip install -q --require-hashes -r "$reqs") || rc=1
     fi
+    [ "$rc" = 0 ] && lock_sum > "$VENV/.lock-sha256"
     [ "$rc" = 0 ] && ! venv_healthy && rc=1
   fi
   # rm antes de escribir: un .venv.failed symlink no redirige la escritura

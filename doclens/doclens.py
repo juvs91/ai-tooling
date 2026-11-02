@@ -12,7 +12,8 @@ genera un digest `<caché>/<sha256>.inspect/` con artifacts estructurados:
                       tesseract) -> texto DENTRO de figuras: <img>.ocr.txt
                       (completo) y <img>.ocr.tsv (cada palabra con su caja en
                       píxeles de esa imagen, ADR-0078). Una imagen suelta
-                      también: figures/image.ocr.txt y .ocr.tsv
+                      también: figures/image.ocr.txt y .ocr.tsv. Caras (ADR-0079,
+                      OpenCV YuNet): <img>.faces.tsv con la caja de cada cara
 
 El LLM lee index.md y los PNG — nunca el PDF original (el backend Kimi lo
 rechaza con HTTP 400 y envenena la sesión).
@@ -32,8 +33,8 @@ Origen: ai-tooling/doclens (toolbox compartido). Los proyectos consumen una
 espejo de doclens/ (misma estructura, ADR-0076) vía doclens/sync.sh — no editar la copia local.
 """
 
-DOCLENS_VERSION = "2.2.0"
-SIDECAR_FORMAT_VERSION = 4  # 2: caché por usuario (ADR-0077); 3: OCR con cajas (ADR-0078); 4: figuras deduplicadas, .ocr.txt marcado (ADR-0077 3ª pasada)
+DOCLENS_VERSION = "2.3.0"
+SIDECAR_FORMAT_VERSION = 5  # 5: caras con YuNet (ADR-0079); 2: caché por usuario (ADR-0077); 3: OCR con cajas (ADR-0078); 4: figuras deduplicadas, .ocr.txt marcado (ADR-0077 3ª pasada)
 
 import hashlib
 import io
@@ -197,13 +198,19 @@ def over_budget(outdir: Path) -> bool:
 def write_index(outdir: Path, md: list[str]) -> None:
     # outdir es un directorio recién creado y privado (mkdtemp): nada pre-plantado
     (outdir / "index.md").write_text("\n".join(md))
-    (outdir / ".format").write_text(f"{SIDECAR_FORMAT_VERSION}\n")
+    (outdir / ".format").write_text(f"{format_tag()}\n")
+
+
+def format_tag() -> str:
+    """Versión de formato del digest; "-sin-caras" si no se pudieron buscar (ADR-0079): ese digest se rehace
+    cuando el venv ya puede, en lugar de quedarse en la caché sin caras."""
+    return f"{SIDECAR_FORMAT_VERSION}" + ("-sin-caras" if faces_available() else "")
 
 
 def current_format(d: Path) -> bool:
     """El digest fue hecho con el formato actual (ADR-0078): si no, se regenera."""
     try:
-        return (d / ".format").read_text().strip() == str(SIDECAR_FORMAT_VERSION)
+        return (d / ".format").read_text().strip() == format_tag()
     except OSError:
         return False
 
@@ -248,6 +255,71 @@ def ocr_words(img_path: Path) -> tuple[str, str]:
 
 def ocr_image(img_path: Path) -> str:
     return ocr_words(img_path)[0]
+
+
+FACE_MODEL = Path(__file__).resolve().parent / "models" / "face_detection_yunet_2023mar.onnx"
+FACE_MODEL_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"  # opencv_zoo, oid de su LFS
+FACE_SCORE = 0.6
+
+
+def faces_available() -> str:
+    """"" si se pueden buscar caras; si no, el motivo (ADR-0079)."""
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        return "falta opencv-python-headless en el venv"
+    try:
+        if hashlib.sha256(FACE_MODEL.read_bytes()).hexdigest() != FACE_MODEL_SHA256:
+            return "el modelo de caras no coincide con su sha256: no se usa"
+    except OSError:
+        return "falta el modelo de caras (doclens/models/)"
+    return ""
+
+
+def _area(u) -> float:
+    return (u[2] - u[0]) * (u[3] - u[1])
+
+
+def _overlap(u, v) -> float:
+    return max(0, min(u[2], v[2]) - max(u[0], v[0])) * max(0, min(u[3], v[3]) - max(u[1], v[1]))
+
+
+def detect_faces(data: bytes) -> list:
+    """[(x0, y0, x1, y1, score)] en píxeles de la imagen: la imagen completa más una cuadrícula de 3×3 recortes
+    de la mitad del tamaño, ampliados 2 veces (en una pantalla las caras pequeñas se pierden en la imagen completa)."""
+    import cv2
+    import numpy as np
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is None or img.shape[0] * img.shape[1] > MAX_PAGE_PIXELS:
+        return []
+    h, w = img.shape[:2]
+    det = cv2.FaceDetectorYN.create(str(FACE_MODEL), "", (w, h), FACE_SCORE, 0.3, 5000)
+    views = [(img, 0, 0, 1)]
+    tw, th = w // 2, h // 2
+    for i in range(3):
+        for j in range(3):
+            x0, y0 = i * tw // 2, j * th // 2
+            crop = img[y0:y0 + th, x0:x0 + tw]
+            if crop.size:
+                views.append((cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC), x0, y0, 2))
+    found = []
+    for view, x0, y0, k in views:
+        det.setInputSize((view.shape[1], view.shape[0]))
+        _, faces = det.detect(view)
+        for f in faces if faces is not None else []:
+            a, b, c, d = (float(v) / k for v in f[:4])
+            box = (x0 + a, y0 + b, x0 + a + c, y0 + b + d, float(f[-1]))
+            if not any(_overlap(u, box) > 0.5 * min(_area(u), _area(box)) for u in found):
+                found.append(box)
+    return found
+
+
+def write_faces(data: bytes, out_base: Path) -> int:
+    """Caras de la imagen -> <out_base>.faces.tsv (x0 y0 x1 y1 score, en píxeles). Devuelve cuántas."""
+    faces = detect_faces(data)
+    Path(f"{out_base}.faces.tsv").write_text("x0\ty0\tx1\ty1\tscore\n" + "".join(
+        f"{a:.0f}\t{b:.0f}\t{c:.0f}\t{d:.0f}\t{e:.2f}\n" for a, b, c, d, e in faces))
+    return len(faces)
 
 
 def write_ocr(img_path: Path, out_base: Path) -> str:
@@ -390,6 +462,10 @@ def process_pdf(path: Path, data: bytes, outdir: Path, dpi: int) -> None:
                         if fig_text:
                             line += (f"\n    - texto en figura (OCR, extracto): «{clean(fig_text)}» — completo en "
                                      f"`figures/{fig_path.name}.ocr.txt`, palabras con caja en `.ocr.tsv`")
+                    if not faces_available():
+                        n_faces = write_faces(extracted["image"], fig_path)
+                        if n_faces:
+                            line += f"\n    - caras: {n_faces} (cajas en `figures/{fig_path.name}.faces.tsv`)"
                     md.append(line)
                     any_fig = True
                 except Exception as e:  # noqa: BLE001
@@ -454,6 +530,15 @@ def process_image(path: Path, data: bytes, outdir: Path) -> None:
             md.append("- texto completo: `figures/image.ocr.txt` · palabras con caja (px): `figures/image.ocr.tsv`\n")
         else:
             md.append("- (sin texto reconocible)\n")
+
+    why = faces_available()   # ADR-0079: cajas de caras, en píxeles de la imagen original
+    md.append("## Caras\n")
+    if why:
+        md.append(f"- no se buscaron: {why}\n")
+    else:
+        (outdir / "figures").mkdir(exist_ok=True)
+        n_faces = write_faces(data, outdir / "figures" / "image")
+        md.append(f"- {n_faces} encontradas · cajas (px): `figures/image.faces.tsv`\n")
 
     write_index(outdir, md)
 

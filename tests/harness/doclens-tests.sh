@@ -628,6 +628,28 @@ if $REAL && command -v tesseract >/dev/null 2>&1; then
 else
   echo "  - omitido: sin doclens/.venv real o sin tesseract (OCR con cajas)"
 fi
+
+echo "Caras con YuNet (ADR-0079)"
+if $REAL && "$REAL_PY" -c 'import cv2' 2>/dev/null; then
+  mkdir -p "$T/s5"
+  "$REAL_PY" -c "import fitz; d=fitz.open(); p=d.new_page(width=300,height=200); p.insert_text((20,100),'sin caras',fontsize=30); p.get_pixmap().save('$T/s5/nada.png')"
+  "$REAL_PY" "$AI_TOOLING/doclens/doclens.py" "$T/s5/nada.png" >/dev/null 2>&1; D5="$(dgst "$T/s5/nada.png")"
+  [ "$(head -1 "$D5/figures/image.faces.tsv" 2>/dev/null)" = "$(printf 'x0\ty0\tx1\ty1\tscore')" ] && [ "$(wc -l < "$D5/figures/image.faces.tsv" | tr -d ' ')" = 1 ] \
+    && grep -q '0 encontradas' "$D5/index.md" && ok "imagen sin caras → faces.tsv solo con encabezado y '0 encontradas'" || bad "faces.tsv o sección Caras mal formados"
+  # copia del motor con el modelo alterado: no se usa (hash); el digest queda marcado y se rehace al corregirlo
+  mkdir -p "$T/s5/dl/models"; cp "$AI_TOOLING/doclens/doclens.py" "$T/s5/dl/"; printf 'x' > "$T/s5/dl/models/face_detection_yunet_2023mar.onnx"
+  "$REAL_PY" "$T/s5/dl/doclens.py" "$T/s5/nada.png" >/dev/null 2>&1
+  grep -q 'no se buscaron: el modelo de caras no coincide' "$D5/index.md" && grep -q -- '-sin-caras' "$D5/.format" \
+    && ok "modelo alterado → no se usa, el digest queda marcado -sin-caras" || bad "modelo alterado usado o digest sin marcar"
+  cp "$AI_TOOLING/doclens/models/face_detection_yunet_2023mar.onnx" "$T/s5/dl/models/"
+  "$REAL_PY" "$T/s5/dl/doclens.py" "$T/s5/nada.png" >/dev/null 2>&1
+  grep -q '0 encontradas' "$D5/index.md" && ! grep -q -- '-sin-caras' "$D5/.format" \
+    && ok "modelo correcto otra vez → el digest -sin-caras se rehace con caras" || bad "se quedó el digest sin caras"
+  grep -q "import fitz, pdfplumber, pypdf, PIL, cv2" "$AI_TOOLING/doclens/sync.sh" && grep -q 'lock-sha256' "$AI_TOOLING/doclens/sync.sh" \
+    && ok "sync.sh rehace el venv si falta cv2 o si cambió el lock" || bad "sync.sh no detecta un venv sin cv2 o con lock viejo"
+else
+  echo "  - omitido: sin doclens/.venv real con opencv (caras)"
+fi
 echo "══ D27: 3ª pasada de seguridad (ADR-0077) ══"
 C26=$(consumer); stubvenv "$C26/doclens/.venv"; bash "$SYNC" "$C26" >/dev/null 2>&1; mkdir -p "$T/s3b"
 # 2. dos Reads simultáneos de documentos distintos: cada uno recibe SU digest
@@ -690,7 +712,7 @@ for _ in range(19):
 d.save(sys.argv[1])
 PY
   "$REAL_PY" "$AI_TOOLING/doclens/doclens.py" "$T/s3b/rep.pdf" >/dev/null 2>&1; RD="$(dgst "$T/s3b/rep.pdf")"
-  NF=$(ls "$RD/figures" 2>/dev/null | grep -vc '\.ocr\.')
+  NF=$(ls "$RD/figures" 2>/dev/null | grep -vEc '\.(ocr|faces)\.')
   [ "$NF" = 1 ] && ok "la misma imagen en 20 páginas → 1 sola figura extraída" || bad "figuras duplicadas: $NF"
   rm -rf "$RD"; S1=$(du -sk "$DOCLENS_CACHE" | cut -f1)
   DOCLENS_MAX_DIGEST_MB=1 "$REAL_PY" "$AI_TOOLING/doclens/doclens.py" "$T/s3b/rep.pdf" >/dev/null 2>&1

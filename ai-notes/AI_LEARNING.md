@@ -1797,3 +1797,13 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   real (y viceversa) → pasar el stub solo donde se necesita (`DOCLENS_BASE_PYTHON`) y testear el respaldo aparte.
 - Coordinación: otra sesión dejó commits locales sin push que tocaban el mismo archivo; se preguntó al usuario, se
   esperó a que terminara, se validó todo junto y se corrigió encima.
+
+## 2026-11-02 · doclens 2.3.0: caras con OpenCV YuNet (ADR-0079)
+
+- **Por qué:** ai_by_design tapa caras en las imágenes de su KDB.
+- **Cómo:** YuNet detecta sobre la imagen completa y sobre 9 recortes ampliados, porque en una pantalla completa se pierden las caras pequeñas. El modelo se verifica por sha256.
+- **Aprendizajes:**
+  - `sync.sh` solo rehacía un venv roto, no uno con un lock viejo: ahora guarda el sha256 del lock y exige `cv2`.
+  - Un digest hecho sin poder buscar caras se marca `-sin-caras` para que no se quede en la caché.
+  - Un ayudante en Swift (Vision) funcionaba, pero se descartó porque la regla es Python.
+- **Pruebas:** 185 de 185.

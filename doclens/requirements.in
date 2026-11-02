@@ -4,3 +4,4 @@ pymupdf>=1.24,<2  # 2.x: versión mayor + onnxruntime/modelos de layout; evaluar
 pdfplumber>=0.11
 pypdf>=4.0
 pillow>=10.0
+opencv-python-headless>=4.8,<5  # caras con YuNet (ADR-0079); el modelo va en doclens/models/
