@@ -120,6 +120,29 @@ Sin verificar: si el Read de Claude Code detecta PDFs por contenido cuando la ex
 ancho completo). El hook ahora detecta por `%PDF-` los archivos sin extensión conocida, pero no los que tienen
 otra extensión de la lista.
 
+## Tercera pasada de seguridad (independiente, sobre 9db54b4 + OCR de ADR-0078)
+
+Se aplicó encima del trabajo de OCR con tesseract (ADR-0078). 7 hallazgos, todos corregidos y cubiertos en
+D27. Esos tests fallan con f8316ac (15 fallos).
+
+| # | Sev. | Hallazgo → corrección |
+|---|---|---|
+| 1 | HIGH | Disco lleno: cada figura se extraía en cada página donde aparecía (un PDF de 6,6 MB dio un digest de 194 MB; uno de 27 MB proyectaba unos 28 GB). Además, SIGXCPU (`ulimit -t`) mataba a doclens sin correr el `finally`, y las etapas quedaban huérfanas para siempre. Ahora: figuras deduplicadas por xref; `DOCLENS_MAX_FIGURES` (200) y `DOCLENS_MAX_DIGEST_MB` (500); `ulimit -f`; límite de CPU blando (900 s) por debajo del duro (960 s), con SIGXCPU atrapado para salir limpio; la purga borra las etapas de más de 1 h. |
+| 2 | MEDIUM | `DOC_KEY` era el CRC32 (`cksum`) de la ruta: dos rutas colisionadas a mano y leídas a la vez cruzaban resultados, y un Read recibía el digest de otro documento (22 de 60 intentos). Ahora la clave es el sha256 de la ruta y cada invocación tiene sus propios archivos de salida (`mktemp`). |
+| 3 | MEDIUM | El atajo de caché del hook servía digests de formatos anteriores, sin el saneo actual. Ahora exige que `.format` coincida con el `SIDECAR_FORMAT_VERSION` de `doclens.py`, que pasa a ser 4 para que los digests v3 se regeneren. |
+| 4 | LOW | Una imagen que es FIFO o `/dev/zero` colgaba el hook en `wc` (fail-open) y dejaba un `wc` huérfano. Ahora se exige un archivo regular y el tamaño se mira con `find -size` y `ls -ln`, sin leerlo. |
+| 5 | LOW | Un PDF con extensión de imagen, o una imagen grande cuyo digest previo tenía solo `as-image.png`, pasaba sin redirigir. Ahora `%PDF-` cuenta como PDF, y para imágenes vale `downscaled.png` o `as-image.png`. |
+| 6 | LOW | `SAFE_PATH` conservaba U+2028, NEL y las marcas bidi. Ahora se sanea con `isprintable()` (python3) y, sin python3, solo queda ASCII imprimible. `printf %q` de bash 3.2 dejaba bytes a medio escapar: con rutas no ASCII, los comandos sugeridos usan un placeholder `"$F"`. |
+| 7 | INFO | `cut -c1-200` sin locale cortaba UTF-8 por la mitad. Ahora corta por caracteres (python3) o deja solo ASCII. |
+
+Sobre el trabajo de OCR (ADR-0078): los `.ocr.txt` llevan la marca de no confiable, porque el índice le indica
+al modelo que los lea y su contenido viene del documento.
+
+Al verificar los tests contra el código viejo apareció un test vacío, ya corregido: 300 "é" se cortaban justo
+entre caracteres, y con un locale UTF-8 `cut` es consciente de caracteres. Ahora el test agrega un prefijo
+ASCII y corre con `LC_ALL=C`. Los tests ya no ponen un `python3` falso en el PATH (usan
+`DOCLENS_BASE_PYTHON`), y el respaldo sin python3 tiene su propio test.
+
 ## Modelo de confianza (lo que NO se defiende)
 
 El código del repo y del toolbox se ejecuta: el venv, `doclens/sync.sh`, `requirements` y el `local_path`

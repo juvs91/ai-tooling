@@ -74,10 +74,17 @@ CACHE="${DOCLENS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/doclens}"
 # como "x.inspect/../huge.png" o un symlink "notas.txt -> factura.pdf" no evaden el hook
 CACHE_REAL="$CACHE"
 if command -v python3 >/dev/null 2>&1; then
-  { IFS= read -r -d '' C1; IFS= read -r -d '' C2; } < <(python3 -c 'import os,sys; sys.stdout.write(os.path.realpath(sys.argv[1]) + "\0" + os.path.realpath(sys.argv[2]) + "\0")' "$FILE_PATH" "$CACHE" 2>/dev/null)
+  # 3er campo: la ruta para mensajes, solo con caracteres imprimibles (quita también U+2028,
+  # NEL y marcas bidi, que tr -d '\000-\037' deja pasar)
+  { IFS= read -r -d '' C1; IFS= read -r -d '' C2; IFS= read -r -d '' C3; } < <(python3 -c 'import os,sys; r=os.path.realpath(sys.argv[1]); sys.stdout.write(r + "\0" + os.path.realpath(sys.argv[2]) + "\0" + "".join(c if c.isprintable() else "?" for c in r) + "\0")' "$FILE_PATH" "$CACHE" 2>/dev/null)
   [ -n "${C1:-}" ] && FILE_PATH="$C1"; [ -n "${C2:-}" ] && CACHE_REAL="$C2"
   [ -n "$(ext_of "$FILE_PATH")" ] && EXT=$(ext_of "$FILE_PATH")
 fi
+# Un archivo con extensión de imagen que en realidad es un PDF se trata como PDF
+case "$EXT" in
+  .png|.jpg|.jpeg|.webp|.tif|.tiff)
+    if [ -f "$FILE_PATH" ] && [ "$(head -c 5 "$FILE_PATH" 2>/dev/null)" = "%PDF-" ]; then EXT=.pdf; fi ;;
+esac
 # Los artifacts de doclens (md/png de un digest) se leen libremente, pero SOLO dentro del
 # caché; un PDF nunca está exento
 case "$FILE_PATH" in
@@ -86,13 +93,24 @@ esac
 case "$EXT" in
   .pdf) ;;
   .png|.jpg|.jpeg|.webp|.tif|.tiff)
-    SIZE=$(wc -c < "$FILE_PATH" 2>/dev/null | tr -d ' '); SIZE=${SIZE:-0}   # stat -f%z es solo macOS
-    [ "$SIZE" -gt 8388608 ] || exit 0 ;;
+    # Sin leer: un FIFO o un symlink a /dev/zero con nombre .png colgaba el hook en wc
+    [ -f "$FILE_PATH" ] || exit 0
+    [ -n "$(find "$FILE_PATH" -prune -size +16384 2>/dev/null)" ] || exit 0   # > 8 MB (bloques de 512)
+    SIZE=$(ls -ln "$FILE_PATH" 2>/dev/null | awk '{print $5}'); SIZE=${SIZE:-8388609} ;;
   *) exit 0 ;;
 esac
 # Para mensajes: sin caracteres de control. Para comandos sugeridos: escapada para shell
-SAFE_PATH=$(printf '%s' "$FILE_PATH" | tr -d '\000-\037')
-Q=$(printf '%q' "$FILE_PATH")
+# Sin python3: solo ASCII imprimible (sin locale, tr/cut trabajan por bytes: nada de
+# U+2028/NEL/bidi ni UTF-8 cortado a la mitad)
+SAFE_PATH=${C3:-$(printf '%s' "$FILE_PATH" | LC_ALL=C tr -c '\040-\176' '?')}
+# Ruta en los comandos sugeridos: solo si es ASCII simple, escapada con %q. Si no (Unicode,
+# controles), %q de bash 3.2 deja bytes crudos a medio escapar: placeholder "$F" y el modelo
+# asigna la ruta — los comandos nunca llevan bytes elegidos por quien nombró el archivo.
+F_NOTE=""
+case "$FILE_PATH" in
+  *[!A-Za-z0-9._/@+=,:%\ -]*) Q='"$F"'; F_NOTE="(F = la ruta del archivo que intentaste leer, entre comillas simples) " ;;
+  *) Q=$(printf '%q' "$FILE_PATH") ;;
+esac
 
 # Raíz del proyecto, no el cwd: el cwd del hook sigue al `cd` del Bash tool y a los
 # worktrees (ADR-0073), donde el venv (gitignorado) no existe. CLAUDE_PROJECT_DIR
@@ -142,8 +160,22 @@ if ! prepare_state "$STATE"; then
   }
 fi
 find "$STATE" -type f -mmin +1440 -delete 2>/dev/null   # estado de más de 1 día
-DOC_KEY=$(printf '%s' "$FILE_PATH" | cksum | cut -d' ' -f1)
+# Clave por documento para deduplicar (pidfile): sha256 de la ruta — un CRC32 (cksum) se
+# colisiona a propósito y dos Reads cruzaban sus resultados
+DOC_KEY=$(printf '%s' "$FILE_PATH" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-40)
 INSPECT_DIR=""; LAST_ERR=""; VENV_ERR=""; AGE=0; BUSY=0
+# Última línea, solo imprimibles y ≤ 200 caracteres (no bytes: sin UTF-8 cortado a la mitad)
+sanitize() {
+  local in r=""; in=$(cat)
+  if command -v python3 >/dev/null 2>&1; then
+    r=$(printf '%s' "$in" | python3 -c 'import sys; l=(sys.stdin.read().strip().splitlines() or [""])[-1]; sys.stdout.write("".join(c if c.isprintable() else " " for c in l)[:200])' 2>/dev/null)
+  fi
+  # python3 ausente o roto (sin salida): el método simple, nunca un mensaje vacío
+  [ -n "$r" ] || r=$(printf '%s\n' "$in" | tail -n 1 | LC_ALL=C tr -c '\040-\176\n' ' ' | cut -c1-200)
+  printf '%s' "$r"
+}
+# Versión de formato que produce este doclens.py: el atajo de caché no sirve digests viejos
+CUR_FMT=$(sed -n 's/^SIDECAR_FORMAT_VERSION = \([0-9][0-9]*\).*/\1/p' "$DOCLENS" 2>/dev/null | head -n 1)
 # INSPECT_DIR válido = <caché>/<sha256 de 64 hex>.inspect (o, en la estructura vieja de
 # scripts/, el sidecar junto al PDF). Cualquier otra cosa no se le sirve al modelo.
 valid_inspect() {
@@ -175,7 +207,7 @@ bounded() {  # bounded <out> <pidfile> cmd… → exit del cmd, o 124 si sigue c
   # DL_LIMITS: CPU (y memoria en Linux) acotadas para documentos hostiles; no para crear el venv
   # stdout y stderr por separado: lo que doclens loguea (p. ej. un nombre de archivo con
   # saltos de línea) no puede parecer una línea INSPECT_DIR= de stdout
-  detach sh -c ': doclens-bg; if [ -n "$DL_LIMITS" ]; then ulimit -t 900 2>/dev/null; [ "$(uname)" = Linux ] && ulimit -v 4194304 2>/dev/null; fi; pf=$1; shift; "$@"; rc=$?; rm -f "$pf"; exit $rc' doclens-bg "$pidf" "$@" > "$out" 2> "$out.err" < /dev/null &
+  detach sh -c ': doclens-bg; if [ -n "$DL_LIMITS" ]; then ulimit -H -t 960 2>/dev/null; ulimit -S -t 900 2>/dev/null; ulimit -f 4194304 2>/dev/null; [ "$(uname)" = Linux ] && ulimit -v 4194304 2>/dev/null; fi; pf=$1; shift; "$@"; rc=$?; rm -f "$pf"; exit $rc' doclens-bg "$pidf" "$@" > "$out" 2> "$out.err" < /dev/null &
   pid=$!; echo "$pid $(date +%s)" > "$pidf"   # PID + inicio (para decir cuánto lleva)
   while kill -0 "$pid" 2>/dev/null; do
     [ "$SECONDS" -ge "$DEADLINE" ] && return 124
@@ -199,7 +231,7 @@ alive() {
   case "$t" in ''|*[!0-9]*) AGE=0 ;; *) AGE=$(( $(date +%s) - t )) ;; esac
 }
 run_doclens() {  # 0 digest en $INSPECT_DIR · 4 sigue procesando · otro: doclens falló
-  local out="$STATE/$DOC_KEY.out" pidf="$STATE/$DOC_KEY.pid" rc=0
+  local out pidf="$STATE/$DOC_KEY.pid" rc=0
   if alive "$pidf"; then              # ya hay un proceso con este documento: no lanzar otro
     [ "$AGE" -ge 3600 ] && return 6   # > 1 h: probablemente colgado
     return 4
@@ -210,12 +242,13 @@ run_doclens() {  # 0 digest en $INSPECT_DIR · 4 sigue procesando · otro: docle
   for f in "$STATE"/*.pid; do alive "$f" && [ "$AGE" -lt 3600 ] && n=$((n + 1)); done
   AGE=0
   [ "$n" -ge "$MAX_JOBS" ] && { BUSY=$n; return 8; }
+  out=$(mktemp "$STATE/out.XXXXXX") || return 1   # salida propia de esta invocación
   DL_LIMITS=1 bounded "$out" "$pidf" "$PY" "$DOCLENS" "$FILE_PATH" || rc=$?
   [ "$rc" = 124 ] && { AGE=0; return 4; }
   INSPECT_DIR=$(grep '^INSPECT_DIR=' "$out" 2>/dev/null | tail -n 1 | cut -d= -f2-)
   valid_inspect || INSPECT_DIR=""
   # Al modelo solo llega una línea corta y sin caracteres de control
-  LAST_ERR=$(tail -n 1 "$out.err" 2>/dev/null | tr -d '\000-\037' | cut -c1-200)
+  LAST_ERR=$(sanitize < "$out.err")
   rm -f "$out" "$out.err"
   [ -n "$INSPECT_DIR" ]
 }
@@ -230,9 +263,10 @@ bootstrap() {  # 0 venv listo · 1 no disponible · 4 preparándose
   venv_lock_busy && return 4
   [ -n "$(find "$ROOT/doclens/.venv.failed" -mmin -60 2>/dev/null)" ] && return 1
   local rc=0
-  bounded "$STATE/venv.out" "$STATE/venv.pid" env -u DOCLENS_PYTHON bash "$SYNC" "$ROOT" --venv || rc=$?
-  VENV_ERR=$(cat "$STATE/venv.out" "$STATE/venv.out.err" 2>/dev/null | grep 'ERROR' | tail -n 1 | tr -d '\000-\037' | cut -c1-200)
-  rm -f "$STATE/venv.out" "$STATE/venv.out.err"
+  local VOUT; VOUT=$(mktemp "$STATE/venv.XXXXXX") || return 1
+  bounded "$VOUT" "$VOUT.pid" env -u DOCLENS_PYTHON bash "$SYNC" "$ROOT" --venv || rc=$?
+  VENV_ERR=$(cat "$VOUT" "$VOUT.err" 2>/dev/null | grep 'ERROR' | sanitize)
+  rm -f "$VOUT" "$VOUT.err"
   case "$rc" in
     0) [ -x "$VENV_PY" ] ;;
     3|124) return 4 ;;
@@ -287,14 +321,18 @@ if [ "$EXT" = ".pdf" ]; then
   H=""
   # Tamaño antes de leer (find -size: solo stat); el hash corre acotado por el plazo — un
   # archivo enorme o en un FS lento no puede llevar el hook más allá de su timeout
-  if [ -f "$FILE_PATH" ] && private_dir "$CACHE" \
+  HF=$(mktemp "$STATE/h.XXXXXX") || HF=""
+  if [ -n "$HF" ] && [ -f "$FILE_PATH" ] && private_dir "$CACHE" \
      && [ -z "$(find "$FILE_PATH" -prune -size +$((MAX_MB * 2048)) 2>/dev/null)" ] \
-     && bounded "$STATE/$DOC_KEY.h" "$STATE/$DOC_KEY.hpid" sh -c 'sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"' doclens-hash "$FILE_PATH"; then
-    H=$(cut -d' ' -f1 "$STATE/$DOC_KEY.h" 2>/dev/null)
+     && bounded "$HF" "$HF.pid" sh -c 'sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"' doclens-hash "$FILE_PATH"; then
+    H=$(cut -d' ' -f1 "$HF" 2>/dev/null)
     case "$H" in *[!0-9a-f]*) H="" ;; esac
   fi
-  rm -f "$STATE/$DOC_KEY.h" "$STATE/$DOC_KEY.h.err"
-  if [ -n "$H" ] && [ -f "$CACHE/$H.inspect/index.md" ] && [ ! -L "$CACHE/$H.inspect" ]; then
+  [ -n "$HF" ] && rm -f "$HF" "$HF.err"
+  # Solo digests del formato que produce el doclens.py actual: uno viejo (p. ej. previo al
+  # saneo) se regenera en vez de servirse tal cual
+  if [ -n "$H" ] && [ -f "$CACHE/$H.inspect/index.md" ] && [ ! -L "$CACHE/$H.inspect" ] \
+     && { [ -z "$CUR_FMT" ] || [ "$(cat "$CACHE/$H.inspect/.format" 2>/dev/null)" = "$CUR_FMT" ]; }; then
     INSPECT_DIR="$CACHE/$H.inspect"
   else
     process || PRC=$?
@@ -346,7 +384,7 @@ El backend Kimi de este repo NO acepta bloques PDF: HTTP 400 y sesión muerta.
 $WHY
 
 Ruta manual mientras tanto (con las herramientas que haya instaladas; usa un
-directorio propio: D=\$(mktemp -d)):
+directorio propio: D=\$(mktemp -d)) ${F_NOTE}:
 1. Visual (macOS): sips -s format png $Q --out "\$D/pagina.png"
    y lee el PNG (multi-página, con poppler: pdftoppm -png $Q "\$D/pagina")
 2. Texto (con poppler): pdftotext $Q -
@@ -364,8 +402,9 @@ case "$EXT" in
         echo "Imagen de $((SIZE / 1048576)) MB que doclens no pudo abrir ($LAST_ERR): probablemente está dañada; no la leas directo." >&2
         exit 2
       fi
-      if [ "$PRC" = 0 ] && [ -f "$INSPECT_DIR/downscaled.png" ]; then
-        echo "Imagen de $((SIZE / 1048576)) MB — demasiado grande para el API. Usa la copia downscaled: $INSPECT_DIR/downscaled.png (metadata en $INSPECT_DIR/index.md)" >&2
+      SMALL=""; for f in downscaled.png as-image.png; do [ -f "$INSPECT_DIR/$f" ] && { SMALL="$INSPECT_DIR/$f"; break; }; done
+      if [ "$PRC" = 0 ] && [ -n "$SMALL" ]; then
+        echo "Imagen de $((SIZE / 1048576)) MB — demasiado grande para el API. Usa la copia reducida: $SMALL (metadata en $INSPECT_DIR/index.md)" >&2
         exit 2
       fi
     fi

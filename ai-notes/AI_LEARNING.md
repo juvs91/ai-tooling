@@ -1785,3 +1785,15 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   - `.format` en cada digest: uno de formato anterior se regenera en la misma ruta.
 - **Pruebas:** `doclens-tests.sh` pasa 167 de 167. La prueba del tope de OCR ya no cuenta `tesseract --list-langs` como llamada de OCR.
 - **Aprendizaje:** la clave por contenido sola no invalida digests cuando cambia el formato del digest; hace falta versionarlo dentro del digest.
+- **3ª pasada de seguridad (con el OCR de otra sesión encima):** apareció 1 HIGH de DISCO, no de código: figuras
+  extraídas una vez por página (×190 el tamaño del PDF) + etapas huérfanas tras SIGXCPU (un límite del sistema mata sin
+  `finally`). Lecciones: deduplicar derivados por identidad (xref), tope de disco del resultado, límite blando de CPU <
+  duro y atrapar SIGXCPU, purgar temporales huérfanos por edad. Una clave de estado por CRC32 se colisiona a propósito:
+  sha256 + archivos por invocación.
+- `printf %q` de bash 3.2 deja bytes no ASCII a medio escapar (UTF-8 inválido): para rutas no ASCII, no embeberlas en
+  comandos sugeridos (placeholder). Y el canal de herramientas puede convertir escapes `\uXXXX` en caracteres literales
+  al escribir archivos: verificar con un escaneo de U+2028/U+202E antes de commitear tests.
+- Tests: un `python3` falso en el PATH hacía que el hook usara su camino de respaldo en TODOS los tests y ocultaba el
+  real (y viceversa) → pasar el stub solo donde se necesita (`DOCLENS_BASE_PYTHON`) y testear el respaldo aparte.
+- Coordinación: otra sesión dejó commits locales sin push que tocaban el mismo archivo; se preguntó al usuario, se
+  esperó a que terminara, se validó todo junto y se corrigió encima.
