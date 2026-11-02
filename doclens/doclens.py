@@ -9,7 +9,10 @@ genera un digest `<caché>/<sha256>.inspect/` con artifacts estructurados:
                       topología (bloques con coordenadas, dibujos vectoriales)
     pages/page-N.png  render de cada página (para lectura visual del LLM)
     figures/          imágenes/figuras embebidas extraídas + su OCR (si hay
-                      tesseract) -> texto DENTRO de figuras
+                      tesseract) -> texto DENTRO de figuras: <img>.ocr.txt
+                      (completo) y <img>.ocr.tsv (cada palabra con su caja en
+                      píxeles de esa imagen, ADR-0078). Una imagen suelta
+                      también: figures/image.ocr.txt y .ocr.tsv
 
 El LLM lee index.md y los PNG — nunca el PDF original (el backend Kimi lo
 rechaza con HTTP 400 y envenena la sesión).
@@ -29,8 +32,8 @@ Origen: ai-tooling/doclens (toolbox compartido). Los proyectos consumen una
 espejo de doclens/ (misma estructura, ADR-0076) vía doclens/sync.sh — no editar la copia local.
 """
 
-DOCLENS_VERSION = "2.0.0"
-SIDECAR_FORMAT_VERSION = 2  # 2: digests en el caché por usuario (ADR-0077)
+DOCLENS_VERSION = "2.1.0"
+SIDECAR_FORMAT_VERSION = 3  # 2: digests en el caché por usuario (ADR-0077); 3: OCR completo con cajas (ADR-0078)
 
 import hashlib
 import io
@@ -173,22 +176,66 @@ def fingerprint(data: bytes) -> str:
 def write_index(outdir: Path, md: list[str]) -> None:
     # outdir es un directorio recién creado y privado (mkdtemp): nada pre-plantado
     (outdir / "index.md").write_text("\n".join(md))
+    (outdir / ".format").write_text(f"{SIDECAR_FORMAT_VERSION}\n")
+
+
+def current_format(d: Path) -> bool:
+    """El digest fue hecho con el formato actual (ADR-0078): si no, se regenera."""
+    try:
+        return (d / ".format").read_text().strip() == str(SIDECAR_FORMAT_VERSION)
+    except OSError:
+        return False
 
 
 def ocr_available() -> bool:
     return shutil.which("tesseract") is not None
 
 
-def ocr_image(img_path: Path, lang: str = "spa") -> str:
+_OCR_LANG = None
+
+
+def ocr_lang() -> str:
+    """DOCLENS_OCR_LANG (por omisión spa+eng), limitado a los idiomas instalados; "" = el de tesseract."""
+    global _OCR_LANG
+    if _OCR_LANG is None:
+        want = [x for x in os.environ.get("DOCLENS_OCR_LANG", "spa+eng").split("+") if x]
+        try:
+            out = subprocess.run(["tesseract", "--list-langs"], capture_output=True, text=True, timeout=30, check=False)
+            have = {l.strip() for l in (out.stdout + out.stderr).splitlines()[1:] if l.strip()}
+        except Exception:  # noqa: BLE001
+            have = set()
+        _OCR_LANG = "+".join(x for x in want if x in have)
+    return _OCR_LANG
+
+
+def ocr_words(img_path: Path) -> tuple[str, str]:
+    """(texto por línea, TSV de tesseract con cada palabra y su caja). ("", "") si falla."""
+    cmd = ["tesseract", str(img_path), "stdout"] + (["-l", ocr_lang()] if ocr_lang() else []) + ["tsv"]
     try:
-        out = subprocess.run(
-            ["tesseract", str(img_path), "stdout", "-l", lang],
-            capture_output=True, text=True, timeout=60, check=False,
-        )
-        return out.stdout.strip()
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
     except Exception as e:  # noqa: BLE001
         log(f"OCR falló en {img_path.name}: {e}")
-        return ""
+        return "", ""
+    tsv = out.stdout
+    lines: dict[tuple, list[str]] = {}
+    for row in tsv.splitlines()[1:]:
+        f = row.split("\t")
+        if len(f) == 12 and f[0] == "5" and f[11].strip():
+            lines.setdefault((int(f[1]), int(f[2]), int(f[3]), int(f[4])), []).append(f[11])
+    return "\n".join(" ".join(w) for _, w in sorted(lines.items())), tsv
+
+
+def ocr_image(img_path: Path) -> str:
+    return ocr_words(img_path)[0]
+
+
+def write_ocr(img_path: Path, out_base: Path) -> str:
+    """OCR de img_path -> <out_base>.ocr.txt y <out_base>.ocr.tsv (ADR-0078). Devuelve el texto."""
+    text, tsv = ocr_words(img_path)
+    if tsv:
+        Path(f"{out_base}.ocr.txt").write_text(text + "\n")
+        Path(f"{out_base}.ocr.tsv").write_text(tsv)
+    return text
 
 
 def process_pdf(path: Path, data: bytes, outdir: Path, dpi: int) -> None:
@@ -310,9 +357,10 @@ def process_pdf(path: Path, data: bytes, outdir: Path, dpi: int) -> None:
                     line = f"  - `figures/{fig_path.name}` bbox={bbox} {extracted['width']}x{extracted['height']}"
                     if ocr_available() and ocr_done < MAX_OCR_PAGES:
                         ocr_done += 1
-                        fig_text = ocr_image(fig_path)
+                        fig_text = write_ocr(fig_path, fig_path)
                         if fig_text:
-                            line += f"\n    - texto en figura (OCR): «{clean(fig_text)}»"
+                            line += (f"\n    - texto en figura (OCR, extracto): «{clean(fig_text)}» — completo en "
+                                     f"`figures/{fig_path.name}.ocr.txt`, palabras con caja en `.ocr.tsv`")
                     md.append(line)
                     any_fig = True
                 except Exception as e:  # noqa: BLE001
@@ -360,7 +408,23 @@ def process_image(path: Path, data: bytes, outdir: Path) -> None:
         md.append(f"⚠️ imagen grande — usar `{small.name}` para el LLM (downscaled a {im2.size}).\n")
     else:
         md.append("La imagen es apta para lectura directa por el modelo de visión.")
-        md.append("Para análisis visual léela directo; este sidecar solo aporta metadata.\n")
+        md.append("Para análisis visual léela directo; este sidecar aporta metadata y OCR.\n")
+
+    if ocr_available():  # ADR-0078: texto completo + cajas por palabra, en píxeles de la imagen original
+        figs = outdir / "figures"
+        figs.mkdir(exist_ok=True)
+        tmp = figs / f"_ocr-src{'.png' if im.format == 'PNG' else '.jpg'}"
+        tmp.write_bytes(data)
+        try:
+            text = write_ocr(tmp, figs / "image")
+        finally:
+            tmp.unlink(missing_ok=True)
+        md.append("## OCR\n")
+        if text:
+            md.append(f"- extracto: «{clean(text)}»")
+            md.append("- texto completo: `figures/image.ocr.txt` · palabras con caja (px): `figures/image.ocr.tsv`\n")
+        else:
+            md.append("- (sin texto reconocible)\n")
 
     write_index(outdir, md)
 
@@ -409,7 +473,7 @@ def main() -> int:
         return 7
     digest = fingerprint(data)
     final = root / f"{digest}.inspect"
-    if (final / "index.md").is_file() and not final.is_symlink():
+    if (final / "index.md").is_file() and not final.is_symlink() and current_format(final):
         os.utime(final)  # uso reciente: la purga por antigüedad no lo toca
         print(f"INSPECT_DIR={final}")  # cache hit: mismo contenido
         return 0
@@ -427,6 +491,14 @@ def main() -> int:
         else:
             log("tipo no soportado")
             return 2
+        if final.is_dir() and not final.is_symlink() and not current_format(final):
+            # digest de un formato anterior (ADR-0078): se aparta con un nombre temporal y se reemplaza
+            old = Path(tempfile.mkdtemp(dir=root, prefix=f".{digest[:12]}.old."))
+            try:
+                os.rename(final, old / "d")
+            except OSError:
+                pass
+            shutil.rmtree(old, ignore_errors=True)
         try:
             os.rename(stage, final)
         except OSError:

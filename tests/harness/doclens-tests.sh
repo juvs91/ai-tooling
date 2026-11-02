@@ -574,7 +574,8 @@ case "$R" in *pre-procesado*) ok "DOCLENS_HOOK_WAIT de 20 dígitos → valor por
 # 4, 5, 6, 7 con el motor real
 if $REAL; then
   RPY="$REAL_PY"; mkdir -p "$T/s2/fakebin"
-  printf '#!/bin/sh\necho x >> "%s/tess.calls"; sleep "${TESS_SLEEP:-0}"; echo texto\n' "$T/s2" > "$T/s2/fakebin/tesseract"; chmod +x "$T/s2/fakebin/tesseract"
+  # la consulta de idiomas (--list-langs, ADR-0078) no es una llamada de OCR: no se cuenta
+  printf '#!/bin/sh\n[ "$1" = --list-langs ] && exit 0\necho x >> "%s/tess.calls"; sleep "${TESS_SLEEP:-0}"; echo texto\n' "$T/s2" > "$T/s2/fakebin/tesseract"; chmod +x "$T/s2/fakebin/tesseract"
   "$RPY" -c "import fitz; d=fitz.open(); [d.new_page() for _ in range(6)]; d.save('$T/s2/blanco.pdf')"
   : > "$T/s2/tess.calls"; env PATH="$T/s2/fakebin:$PATH" DOCLENS_MAX_OCR_PAGES=2 "$RPY" "$AI_TOOLING/doclens/doclens.py" "$T/s2/blanco.pdf" >/dev/null 2>&1
   [ "$(wc -l < "$T/s2/tess.calls" | tr -d ' ')" -le 2 ] && ok "OCR acotado por DOCLENS_MAX_OCR_PAGES" || bad "OCR sin tope: $(wc -l < "$T/s2/tess.calls") llamadas"
@@ -604,6 +605,24 @@ d.save('$T/s2/bomba-fig.pdf')" 2>/dev/null
   grep -q 'fitz.open(stream=data' "$AI_TOOLING/doclens/doclens.py" && ok "procesa los mismos bytes que hashea (sin TOCTOU)" || bad "reabre la ruta tras hashear"
 else
   echo "  - omitido: sin doclens/.venv real (OCR, tiempo total, figura gigante, metadata)"
+fi
+
+echo "OCR con cajas por palabra y versión de formato (ADR-0078)"
+if $REAL && command -v tesseract >/dev/null 2>&1; then
+  mkdir -p "$T/s3"
+  "$REAL_PY" -c "import fitz; d=fitz.open(); p=d.new_page(width=600,height=200); p.insert_text((40,110),'HOLA MUNDO 2026',fontsize=40); p.get_pixmap(dpi=150).save('$T/s3/texto.png')"
+  "$REAL_PY" "$AI_TOOLING/doclens/doclens.py" "$T/s3/texto.png" >/dev/null 2>&1; D3="$(dgst "$T/s3/texto.png")"
+  grep -qi 'MUNDO' "$D3/figures/image.ocr.txt" 2>/dev/null && ok "imagen suelta → OCR completo en figures/image.ocr.txt" || bad "sin image.ocr.txt con el texto"
+  awk -F'\t' '$1==5 && $12 ~ /MUNDO/ && $9 > 0 && $10 > 0 {f=1} END {exit !f}' "$D3/figures/image.ocr.tsv" 2>/dev/null && ok "image.ocr.tsv trae la palabra con su caja" || bad "sin caja de la palabra en image.ocr.tsv"
+  [ "$(cat "$D3/.format" 2>/dev/null)" = "3" ] && ok "el digest guarda su versión de formato (.format = 3)" || bad "sin .format 3"
+  echo 2 > "$D3/.format"; rm -f "$D3/figures/image.ocr.tsv"
+  "$REAL_PY" "$AI_TOOLING/doclens/doclens.py" "$T/s3/texto.png" >/dev/null 2>&1
+  [ "$(cat "$D3/.format" 2>/dev/null)" = "3" ] && [ -f "$D3/figures/image.ocr.tsv" ] && ok "digest de formato anterior → se regenera en la misma ruta" || bad "sirvió el digest de formato anterior"
+  "$REAL_PY" -c "import fitz; d=fitz.open(); p=d.new_page(); p.insert_image(fitz.Rect(50,50,350,150), filename='$T/s3/texto.png'); d.save('$T/s3/fig.pdf')"
+  "$REAL_PY" "$AI_TOOLING/doclens/doclens.py" "$T/s3/fig.pdf" >/dev/null 2>&1; D4="$(dgst "$T/s3/fig.pdf")"
+  ls "$D4"/figures/*.ocr.tsv >/dev/null 2>&1 && grep -q 'completo en `figures/' "$D4/index.md" && ok "figura de PDF → .ocr.txt/.ocr.tsv y el index apunta a ellos" || bad "figura de PDF sin OCR completo"
+else
+  echo "  - omitido: sin doclens/.venv real o sin tesseract (OCR con cajas)"
 fi
 cleanup_bg
 echo ""

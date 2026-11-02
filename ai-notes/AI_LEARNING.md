@@ -1775,3 +1775,13 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   solo trabajo no distingue "sin tope" de "tope 3". La regla se sostiene: si el test pasa con el código viejo, no prueba.
 - El chequeo de seguridad de Claude Code no deja correr comandos que no puede analizar (un `$(…)` literal en un nombre
   de archivo entre comillas): ponerlos en un script.
+
+## 2026-11-02 · doclens 2.1.0: OCR completo con cajas por palabra (ADR-0078)
+
+- **Por qué:** lo pidió ai_by_design, que necesita tapar nombres dentro de imágenes antes de versionarlas en su KDB y transcribir las figuras.
+- **Qué cambió:**
+  - `<img>.ocr.txt` (completo) y `<img>.ocr.tsv` (palabra con caja), también para imágenes sueltas;
+  - `spa+eng`;
+  - `.format` en cada digest: uno de formato anterior se regenera en la misma ruta.
+- **Pruebas:** `doclens-tests.sh` pasa 167 de 167. La prueba del tope de OCR ya no cuenta `tesseract --list-langs` como llamada de OCR.
+- **Aprendizaje:** la clave por contenido sola no invalida digests cuando cambia el formato del digest; hace falta versionarlo dentro del digest.

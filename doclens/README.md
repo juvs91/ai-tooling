@@ -14,8 +14,11 @@ ${DOCLENS_CACHE:-~/.cache/doclens}/<sha256 del contenido>.inspect/   (0700)
 │                     #   u OCR spa si es scan) + tablas en markdown +
 │                     #   topología (bloques con coordenadas, dibujos vectoriales)
 ├── pages/page-N.png  # render de cada página (lectura visual del LLM)
-└── figures/          # figuras embebidas extraídas + OCR del texto DENTRO
-                      #   de figuras (si hay tesseract)
+├── figures/          # figuras embebidas extraídas + OCR del texto DENTRO
+│                     #   de figuras (si hay tesseract): <fig>.ocr.txt completo
+│                     #   y <fig>.ocr.tsv con cada palabra y su caja (px, ADR-0078);
+│                     #   una imagen suelta: figures/image.ocr.txt y .ocr.tsv
+└── .format           # versión de formato del digest: si no es la actual, se regenera
 ```
 
 Por qué un caché por usuario (ADR-0077): un repo o zip no confiable no puede
@@ -50,6 +53,9 @@ sí. Cada digest se genera en un directorio privado nuevo y se publica con un
 rename atómico. Exit codes: `0` ok · `1` no existe · `2` formato no soportado ·
 `3` dependencia faltante · `4` PDF con contraseña · `5` caché inseguro ·
 `6` no es un archivo regular · `7` excede el tamaño máximo.
+
+OCR (ADR-0078): idiomas `DOCLENS_OCR_LANG` (por omisión `spa+eng`, solo los instalados;
+`brew install tesseract tesseract-lang`).
 
 Límites contra documentos hostiles (variables de entorno): `DOCLENS_MAX_MB`
 (200), `DOCLENS_MAX_PAGES` con render (500; el texto es completo), área máxima
