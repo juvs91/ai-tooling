@@ -34,21 +34,33 @@
 # con "reintenta en un momento".
 
 INPUT=$(cat)
-if ! command -v jq >/dev/null 2>&1; then
-  # Sin jq no se puede leer el JSON: los PDFs se bloquean igual (el resto pasa)
-  if printf '%s' "$INPUT" | grep -qiE '"file_path"[[:space:]]*:[[:space:]]*"[^"]*\.pdf"'; then
-    echo "doc-guard: falta jq — no se puede pre-procesar el PDF. Instala jq (brew install jq / apt install jq) y reintenta." >&2
+if command -v jq >/dev/null 2>&1; then
+  TOOL=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')
+  FILE_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty')
+elif command -v python3 >/dev/null 2>&1 \
+     && TOOL=$(printf '%s' "$INPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_name",""))' 2>/dev/null); then
+  # Sin jq: decodificar el JSON de verdad (los escapes \" o \u0070 no engañan a un regex).
+  # Si python3 existe pero falla, se cae al bloqueo de abajo (nunca fail-open).
+  FILE_PATH=$(printf '%s' "$INPUT" | python3 -c 'import json,sys; sys.stdout.write((json.load(sys.stdin).get("tool_input") or {}).get("file_path",""))' 2>/dev/null)
+else
+  # Sin jq ni python3: fail-closed para todo lo que pueda ser un PDF (también escapado)
+  if printf '%s' "$INPUT" | grep -qiE 'pdf|\\u00'; then
+    echo "doc-guard: faltan jq y python3 — no se puede leer la petición. Instala jq (brew install jq / apt install jq) y reintenta." >&2
     exit 2
   fi
   exit 0
 fi
-TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
-FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 
 [ "$TOOL" != "Read" ] && exit 0
 [ -z "$FILE_PATH" ] && exit 0
 
-EXT=$(echo "$FILE_PATH" | grep -oiE '\.[a-z0-9]+$' | tr '[:upper:]' '[:lower:]')
+# Extensión sobre la cadena COMPLETA (no por línea: un nombre con salto de línea
+# "a.txt<NL>b.pdf" no puede esconder el .pdf)
+LOWER=$(printf '%s' "$FILE_PATH" | tr '[:upper:]' '[:lower:]')
+case "$LOWER" in
+  *.pdf) EXT=.pdf ;; *.png) EXT=.png ;; *.jpg) EXT=.jpg ;; *.jpeg) EXT=.jpeg ;;
+  *.webp) EXT=.webp ;; *.tif) EXT=.tif ;; *.tiff) EXT=.tiff ;; *) EXT="" ;;
+esac
 # Los artifacts de doclens (md/png dentro de un .inspect/) se leen libremente; un PDF
 # real que esté dentro de una carpeta *.inspect/ sí se procesa
 case "$FILE_PATH" in
@@ -76,12 +88,35 @@ OVERRIDE=""; OVERRIDE_BROKEN=false
 PY="$VENV_PY"
 
 # Un solo plazo para TODO el hook (venv + procesamiento), no uno por paso
-DEADLINE=$((SECONDS + ${DOCLENS_HOOK_WAIT:-90}))
-STATE="${TMPDIR:-/tmp}/doclens-hook-$(id -u)"
-if ! { mkdir -p "$STATE" 2>/dev/null && [ -w "$STATE" ] && [ -O "$STATE" ]; }; then
-  STATE=$(mktemp -d 2>/dev/null || mktemp -d -t doclens 2>/dev/null || echo "/tmp")
+# Solo dígitos y ≤ 100 (por debajo del timeout de 120 s): nunca se evalúa texto arbitrario
+WAIT="${DOCLENS_HOOK_WAIT:-90}"
+case "$WAIT" in ''|*[!0-9]*) WAIT=90 ;; esac
+[ "$WAIT" -gt 100 ] && WAIT=100
+DEADLINE=$((SECONDS + WAIT))
+# Estado privado del hook: directorio real (no symlink), del usuario y 0700. Si no se puede
+# verificar, un mktemp -d propio (también 0700). Solo se purga el directorio verificado.
+private_dir() { [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && [ "$(ls -ld "$1" | cut -c1-10)" = drwx------ ]; }
+STATE="${TMPDIR:-/tmp}"; STATE="${STATE%/}/doclens-hook-$(id -u)"
+[ -L "$STATE" ] || mkdir -m 700 "$STATE" 2>/dev/null
+# Versiones previas lo creaban 755: si es nuestro, real y NADIE más pudo escribir en él
+# (sin w de grupo/otros), endurecerlo a 700 es seguro. Si otros podían escribir, no se usa.
+if [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ -O "$STATE" ]; then
+  case "$(ls -ld "$STATE" | cut -c1-10)" in ?????w????|????????w?) ;; *) chmod 700 "$STATE" 2>/dev/null ;; esac
 fi
-find "$STATE" -type f -mmin +1440 -delete 2>/dev/null   # estado de más de 1 día
+TMP_STATE=""; KEEP_STATE=""
+if private_dir "$STATE"; then
+  find "$STATE" -type f -mmin +1440 -delete 2>/dev/null   # estado de más de 1 día
+else
+  STATE=$(mktemp -d 2>/dev/null) && private_dir "$STATE" || {
+    echo "doc-guard: no hay un directorio temporal privado utilizable (TMPDIR=${TMPDIR:-}); no se puede procesar $FILE_PATH de forma segura." >&2
+    exit 2
+  }
+  TMP_STATE=1
+  # Temporal de un solo uso: se borra al salir, salvo que quede trabajo en segundo plano
+  trap '[ -n "$TMP_STATE" ] && [ -z "$KEEP_STATE" ] && rm -rf "$STATE"' EXIT
+fi
+# Caché de digests por usuario (ADR-0077): mismo criterio que doclens.py
+CACHE="${DOCLENS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/doclens}"
 DOC_KEY=$(printf '%s' "$FILE_PATH" | cksum | cut -d' ' -f1)
 INSPECT_DIR=""; LAST_ERR=""; VENV_ERR=""; AGE=0
 
@@ -99,7 +134,8 @@ bounded() {  # bounded <out> <pidfile> cmd… → exit del cmd, o 124 si sigue c
   local n=0 rc=0
   # El envoltorio borra el pidfile al terminar (también si sigue en segundo plano)
   # ": doclens-bg" al inicio: marca visible en ps aunque recorte la línea de comando
-  detach sh -c ': doclens-bg; pf=$1; shift; "$@"; rc=$?; rm -f "$pf"; exit $rc' doclens-bg "$pidf" "$@" > "$out" 2>&1 < /dev/null &
+  # DL_LIMITS: CPU (y memoria en Linux) acotadas para documentos hostiles; no para crear el venv
+  detach sh -c ': doclens-bg; if [ -n "$DL_LIMITS" ]; then ulimit -t 900 2>/dev/null; [ "$(uname)" = Linux ] && ulimit -v 4194304 2>/dev/null; fi; pf=$1; shift; "$@"; rc=$?; rm -f "$pf"; exit $rc' doclens-bg "$pidf" "$@" > "$out" 2>&1 < /dev/null &
   pid=$!; echo "$pid $(date +%s)" > "$pidf"   # PID + inicio (para decir cuánto lleva)
   while kill -0 "$pid" 2>/dev/null; do
     [ "$SECONDS" -ge "$DEADLINE" ] && return 124
@@ -128,10 +164,16 @@ run_doclens() {  # 0 digest en $INSPECT_DIR · 4 sigue procesando · otro: docle
     [ "$AGE" -ge 3600 ] && return 6   # > 1 h: probablemente colgado
     return 4
   fi
-  bounded "$out" "$pidf" "$PY" "$DOCLENS" "$FILE_PATH" || rc=$?
+  # Tope de procesos doclens simultáneos por usuario (N documentos hostiles ≠ N núcleos)
+  local f n=0
+  for f in "$STATE"/*.pid; do alive "$f" && n=$((n + 1)); done
+  AGE=0
+  [ "$n" -ge "${DOCLENS_MAX_JOBS:-3}" ] && return 4
+  DL_LIMITS=1 bounded "$out" "$pidf" "$PY" "$DOCLENS" "$FILE_PATH" || rc=$?
   [ "$rc" = 124 ] && { AGE=0; return 4; }
   INSPECT_DIR=$(grep '^INSPECT_DIR=' "$out" 2>/dev/null | cut -d= -f2-)
-  LAST_ERR=$(grep -v '^INSPECT_DIR=' "$out" 2>/dev/null | tail -n 1)
+  # Al modelo solo llega una línea corta y sin caracteres de control
+  LAST_ERR=$(grep -v '^INSPECT_DIR=' "$out" 2>/dev/null | tail -n 1 | tr -d '\000-\037' | cut -c1-200)
   rm -f "$out"
   [ -n "$INSPECT_DIR" ]
 }
@@ -181,6 +223,7 @@ process() {  # 0 digest · 1 no disponible · 4 en curso · 5 falló con ESTE ar
   return 5
 }
 in_progress() {
+  KEEP_STATE=1   # hay un proceso en segundo plano usando el estado
   local lleva=""; [ "$AGE" -gt 0 ] && lleva=" (lleva $((AGE / 60)) min $((AGE % 60)) s)"
   echo "doclens está preparando o procesando $FILE_PATH$lleva (la primera vez crea doclens/.venv; un documento grande o escaneado tarda). Sigue en segundo plano: reintenta el Read en ~30 s." >&2
   exit 2
@@ -193,13 +236,13 @@ hash_of() {
 # ── PDF: pre-procesar y redirigir ─────────────────────────────────────────
 if [ "$EXT" = ".pdf" ]; then
   PRC=0
-  # Camino rápido: digest del MISMO contenido (sha256 en .source, igual que doclens.py).
-  # Nunca por fechas: un PDF reemplazado con fecha vieja debe reprocesarse.
-  SIDE="$FILE_PATH.inspect"; H=""
-  [ -f "$SIDE/index.md" ] && [ -f "$SIDE/.source" ] && H=$(hash_of "$FILE_PATH")
-  if [ -n "$H" ] && [ "$H" = "$(head -n 1 "$SIDE/.source" 2>/dev/null)" ]; then
-    INSPECT_DIR="$SIDE"
-    [ -f "$INSPECT_DIR/.gitignore" ] || printf '# generado por doclens: sidecar local, no versionar\n*\n' > "$INSPECT_DIR/.gitignore" 2>/dev/null
+  # Camino rápido: digest del MISMO contenido en el caché por usuario (ADR-0077). Solo si
+  # el caché es privado y propio (como valida doclens.py) y el archivo es regular: un
+  # symlink a /dev/zero no se hashea.
+  H=""
+  if [ -f "$FILE_PATH" ] && private_dir "$CACHE"; then H=$(hash_of "$FILE_PATH"); fi
+  if [ -n "$H" ] && [ -f "$CACHE/$H.inspect/index.md" ] && [ ! -L "$CACHE/$H.inspect" ]; then
+    INSPECT_DIR="$CACHE/$H.inspect"
   else
     process || PRC=$?
   fi
@@ -248,9 +291,10 @@ BLOCKED: Read directo de PDF ($FILE_PATH).
 El backend Kimi de este repo NO acepta bloques PDF: HTTP 400 y sesión muerta.
 $WHY
 
-Ruta manual mientras tanto (con las herramientas que haya instaladas):
-1. Visual (macOS): sips -s format png "$FILE_PATH" --out "${TMPDIR:-/tmp}/doclens-manual-$DOC_KEY.png"
-   y lee el PNG (multi-página, con poppler: pdftoppm -png "$FILE_PATH" "${TMPDIR:-/tmp}/doclens-manual-$DOC_KEY")
+Ruta manual mientras tanto (con las herramientas que haya instaladas; usa un
+directorio propio: D=\$(mktemp -d)):
+1. Visual (macOS): sips -s format png "$FILE_PATH" --out "\$D/pagina.png"
+   y lee el PNG (multi-página, con poppler: pdftoppm -png "$FILE_PATH" "\$D/pagina")
 2. Texto (con poppler): pdftotext "$FILE_PATH" -
 EOF
   exit 2

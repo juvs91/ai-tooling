@@ -26,7 +26,7 @@ export default tool({
     const script = path.join(context.worktree, "doclens/doclens.py")
     const py = path.join(context.worktree, "doclens/.venv/bin/python")
     if (!existsSync(py)) await Bun.$`bash ${path.join(context.worktree, "doclens/sync.sh")} --venv`.cwd(context.worktree).quiet()
-    const dpi = args.dpi ?? 150
+    const dpi = Math.min(Math.max(Math.round(args.dpi ?? 150), 36), 300)  // el modelo elige: acotar (DoS)
     const result = await Bun.$`${py} ${script} ${args.file} --dpi ${dpi}`.text()
     return result.trim()
   },

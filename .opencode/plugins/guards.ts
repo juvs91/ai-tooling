@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process"
+import { execFileSync, execSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
@@ -45,9 +45,12 @@ export const Guards = async ({ directory }: { directory: string }) => {
       if (input.tool === "read" && /\.pdf$/i.test(args.filePath ?? "")) {
         // Estructura homologada (ADR-0076): doclens/ + doclens/.venv; sin venv, se prepara solo
         if (!existsSync(join(directory, "doclens/.venv/bin/python")))
-          execSync("bash doclens/sync.sh --venv", { cwd: directory, stdio: "pipe" })
-        const out = execSync(
-          `doclens/.venv/bin/python doclens/doclens.py "${args.filePath}"`,
+          execFileSync("bash", ["doclens/sync.sh", "--venv"], { cwd: directory, stdio: "pipe" })
+        // execFileSync con argumentos en lista, NUNCA un string de shell: la ruta la elige
+        // el modelo (o viene en el nombre de un archivo) y "x$(cmd).pdf" ejecutaría cmd (ADR-0077)
+        const out = execFileSync(
+          "doclens/.venv/bin/python",
+          ["doclens/doclens.py", String(args.filePath)],
           { cwd: directory }
         ).toString()
         const dir = out.match(/INSPECT_DIR=(.+)/)?.[1]

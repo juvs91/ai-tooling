@@ -1740,3 +1740,27 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
 - Un `sh -c 'sleep 30'` hace exec directo a sleep (pierde $0/marca): en fixtures usar comandos compuestos.
 - block-no-verify detecta `git commit … -n` aunque esté en el TEXTO de un heredoc/patch (p. ej. "git commit)" seguido
   de `[ -n`) → escribir esos parches a un archivo y ejecutarlo.
+
+### Seguridad de doclens — ADR-0077 (2026-11-02)
+- **Una pasada de SEGURIDAD encuentra otra clase de cosas que 4 rondas de robustez:** 2 HIGH sin prompt injection
+  (basta abrir un PDF de un repo/zip): (1) escribir derivados JUNTO al documento siguiendo symlinks plantados →
+  `~/.bashrc` sobrescrito con el texto del PDF; (2) `execSync` con template string y `filePath` → `x$(cmd).pdf`.
+  Ambos venían del diseño original. Regla: derivados de entrada no confiable van a un caché PROPIO (0700,
+  validado: no symlink, uid propio, sin g/o) generado en `mkdtemp` + `rename` atómico; nunca shell con datos del
+  modelo → `execFileSync(bin, [args])`.
+- **Fail-open escondidos:** python3 presente pero roto (el `/usr/bin/python3` de macOS es un shim que necesita
+  xcrun en PATH) → TOOL vacío → `exit 0`. Todo parser de respaldo en un hook-guardián: si falla, bloquear.
+- **Tests de seguridad vacíos (4 de 25):** stub en vez del motor real; `grep` por línea sobre código multilínea;
+  macOS 15 trae `/usr/bin/jq` (un PATH "sin jq" debe excluirlo explícitamente); `find "$link"` no recorre un
+  symlink de punto de partida. Correr SIEMPRE los tests contra el código vulnerable: 25 fallos = prueban algo.
+- **Los tests contaminaban el repo:** doc-guard sin `CLAUDE_PROJECT_DIR` usa el cwd como raíz → su arranque perezoso
+  creó `doclens/.venv` DENTRO del repo (visible en Linux, oculto en macOS donde ya existía). Tests: `cd "$T"`,
+  `TMPDIR` propio, y terminar los procesos en segundo plano al final (correr contra código con el DoS de
+  `/dev/zero` dejó 4 procesos al 98 % de CPU).
+- **Estado heredado:** endurecer a 0700 un directorio propio que nadie más pudo escribir (sin w de g/o) en vez de
+  rechazarlo; si no, cada Read usa un temporal nuevo y se pierde la deduplicación.
+- **Lock con hashes:** `uv pip compile --universal --python-version 3.9 --generate-hashes`; acotar `pymupdf<2` (la 2.x
+  arrastra onnxruntime). El espejo sale de HEAD: probar E2E de consumers DESPUÉS del commit local (antes, el
+  consumer recibe el lock viejo).
+- Hooks del repo con falsos positivos al escribir parches: `block-no-verify` (texto `git commit` … `-n`) y
+  `block-dangerous` (`rm -rf` + `~` en el mismo comando) → parches y scripts en archivos.

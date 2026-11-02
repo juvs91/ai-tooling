@@ -1,0 +1,6 @@
+# Rangos de doclens. NO instalar desde aquí: requirements.txt es el lock con hashes.
+# Regenerar (ADR-0077): uv pip compile --universal --python-version 3.9 --generate-hashes doclens/requirements.in -o doclens/requirements.txt
+pymupdf>=1.24,<2  # 2.x: versión mayor + onnxruntime/modelos de layout; evaluar aparte
+pdfplumber>=0.11
+pypdf>=4.0
+pillow>=10.0

@@ -4,11 +4,12 @@
 el crudo al LLM.**
 
 El backend Kimi (y otros) rechazan PDFs crudos con HTTP 400 y la sesión se
-envenena. doclens procesa primero y genera un **sidecar** `<archivo>.inspect/`
-con artifacts estructurados que el agente sí puede leer:
+envenena. doclens procesa primero y genera un **digest** con artifacts
+estructurados que el agente sí puede leer, en un **caché por usuario**
+(ADR-0077), nunca junto al documento:
 
 ```
-<archivo>.inspect/
+${DOCLENS_CACHE:-~/.cache/doclens}/<sha256 del contenido>.inspect/   (0700)
 ├── index.md          # metadata + inventario de páginas + texto (capa de texto
 │                     #   u OCR spa si es scan) + tablas en markdown +
 │                     #   topología (bloques con coordenadas, dibujos vectoriales)
@@ -17,14 +18,18 @@ con artifacts estructurados que el agente sí puede leer:
                       #   de figuras (si hay tesseract)
 ```
 
-El sidecar trae su propio `.gitignore` (`*`): analizar documentos en cualquier
-repo no ensucia git.
+Por qué un caché por usuario (ADR-0077): un repo o zip no confiable no puede
+plantar ahí symlinks (que harían a doclens escribir en `~/.bashrc`) ni digests
+falsos; el texto de un PDF privado no queda legible para otros usuarios; y no se
+ensucia ningún repo. La raíz se valida (propia, no symlink, 0700) o no se usa.
+Cada `index.md` empieza marcando su contenido como **no confiable** (datos, no
+instrucciones) — el texto de un documento es un canal de prompt injection.
 
 ## Estructura — igual en ai-tooling y en cada consumidor (ADR-0076)
 
 ```
 doclens/
-├── doclens.py, requirements.txt, VERSION, README.md, sync.sh, adapters/, .gitignore
+├── doclens.py, requirements.in/.txt, VERSION, README.md, sync.sh, adapters/, .gitignore
 │                     # versionados; en consumers = espejo exacto de ai-tooling/doclens
 └── .venv/            # local, no versionado (lo crea sync.sh)
 ```
@@ -33,17 +38,35 @@ doclens/
 
 ```bash
 doclens/.venv/bin/python doclens/doclens.py <archivo> [--dpi 150]
-# stdout incluye: INSPECT_DIR=<ruta del sidecar>
+# stdout incluye: INSPECT_DIR=<ruta del digest en el caché>
 ```
 
 En Claude Code no hace falta llamarlo: el hook `doc-guard` intercepta el `Read`
-de un PDF y redirige al sidecar.
+de un PDF y redirige al digest.
 
-Idempotente: si el sidecar corresponde al **mismo contenido** (sha256 guardado
-en `.source`), no reprocesa; no usa fechas, así que un PDF reemplazado con fecha
-vieja (`cp -p`, unzip, rsync) se reprocesa. Al reprocesar se limpian `pages/` y
-`figures/`. Exit codes: `0` ok · `1` no existe · `2` formato no soportado ·
-`3` dependencia faltante · `4` PDF con contraseña de apertura.
+Idempotente por **contenido**: la clave del caché es el sha256 del archivo, así
+que un PDF ya visto no se reprocesa y uno reemplazado (aunque conserve la fecha)
+sí. Cada digest se genera en un directorio privado nuevo y se publica con un
+rename atómico. Exit codes: `0` ok · `1` no existe · `2` formato no soportado ·
+`3` dependencia faltante · `4` PDF con contraseña · `5` caché inseguro ·
+`6` no es un archivo regular · `7` excede el tamaño máximo.
+
+Límites contra documentos hostiles (variables de entorno): `DOCLENS_MAX_MB`
+(200), `DOCLENS_MAX_PAGES` con render (500; el texto es completo), área máxima
+por render 40 Mpx, DPI 36–300, `DOCLENS_CACHE_DAYS` (30, purga de digests sin
+uso), `DOCLENS_MAX_JOBS` (3 procesos a la vez); en el hook, CPU ≤ 900 s y
+memoria ≤ 4 GB en Linux.
+
+## Dependencias: versiones fijas con hashes (ADR-0077)
+
+`requirements.txt` es un lock generado desde `requirements.in` y se instala con
+`--require-hashes` (una versión distinta o un paquete alterado no se instala).
+Para actualizar:
+
+```bash
+uv pip compile --universal --python-version 3.9 --generate-hashes \
+  doclens/requirements.in -o doclens/requirements.txt
+```
 
 ## Listo para usar (sin pasos manuales)
 

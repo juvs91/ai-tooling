@@ -64,6 +64,15 @@ elif [ -e "$DST" ] && [ ! -d "$DST" ]; then
   echo "doclens: ERROR — $DST existe y no es una carpeta; no se toca" >&2
   exit 3
 fi
+# Symlinks DENTRO de doclens/ (salvo el venv): escribir o borrar a través de ellos tocaría
+# archivos fuera del repo (un repo/zip no confiable podría traerlos) — ADR-0077
+if [ -d "$DST" ]; then
+  BAD_LINK=$(cd "$DST" && find . -mindepth 1 -type l ! -path './.venv' ! -path './.venv/*' 2>/dev/null | head -n 1)
+  if [ -n "$BAD_LINK" ]; then
+    echo "doclens: ERROR — doclens/${BAD_LINK#./} es un symlink; no se sincroniza (quítalo)" >&2
+    exit 3
+  fi
+fi
 
 # ── fuente del espejo: lo commiteado (HEAD), no el working tree del toolbox ───
 # Así un archivo borrado o editado sin commitear en ai-tooling no llega a los consumers.
@@ -145,6 +154,11 @@ ensure_venv() {  # 0 listo · 1 falló · 3 otro proceso lo está preparando
   fi
   venv_healthy && return 0
   [ -f "$reqs" ] || { echo "doclens: ERROR — falta $reqs" >&2; return 1; }
+  # Solo se instala desde un lock con hashes (ADR-0077): uno viejo sin hashes no se acepta
+  grep -q -- '--hash=sha256:' "$reqs" || {
+    echo "doclens: ERROR — $reqs no tiene hashes (lock anterior a ADR-0077); actualiza doclens desde ai-tooling (sync.sh)" >&2
+    return 1
+  }
   if [ "$FLAG" != "--force" ] && [ -n "$(find "$FAILED" -mmin -60 2>/dev/null)" ]; then
     echo "doclens: ERROR — el venv falló hace menos de 1 h; reintento omitido (sync.sh --force para forzar)" >&2
     return 1
@@ -157,15 +171,18 @@ ensure_venv() {  # 0 listo · 1 falló · 3 otro proceso lo está preparando
     echo "doclens: creando venv en doclens/.venv (base: $base)…"
     rm -rf "$VENV"
     if command -v uv >/dev/null 2>&1; then
+      # --require-hashes: requirements.txt es un lock con hashes (ADR-0077); una versión
+      # distinta o un paquete alterado en PyPI no se instala
       (cd "$DST" && clean_env uv venv --no-config -q --python "$base" "$VENV" \
-        && clean_env uv pip install --no-config -q --python "$VENV/bin/python" -r "$reqs") || rc=1
+        && clean_env uv pip install --no-config -q --require-hashes --python "$VENV/bin/python" -r "$reqs") || rc=1
     else
       (cd "$DST" && clean_env "$base" -m venv "$VENV" \
-        && clean_env "$VENV/bin/python" -m pip install -q -r "$reqs") || rc=1
+        && clean_env "$VENV/bin/python" -m pip install -q --require-hashes -r "$reqs") || rc=1
     fi
     [ "$rc" = 0 ] && ! venv_healthy && rc=1
   fi
-  if [ "$rc" = 0 ]; then rm -f "$FAILED"; else date > "$FAILED"; echo "doclens: ERROR — no se pudo preparar el venv (sin red o sin python3); reintento en 1 h" >&2; fi
+  # rm antes de escribir: un .venv.failed symlink no redirige la escritura
+  if [ "$rc" = 0 ]; then rm -f "$FAILED"; else rm -f "$FAILED"; date > "$FAILED"; echo "doclens: ERROR — no se pudo preparar el venv (sin red o sin python3); reintento en 1 h" >&2; fi
   release_lock
   trap - EXIT
   return "$rc"
