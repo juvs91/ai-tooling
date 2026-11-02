@@ -1764,3 +1764,14 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   consumer recibe el lock viejo).
 - Hooks del repo con falsos positivos al escribir parches: `block-no-verify` (texto `git commit` … `-n`) y
   `block-dangerous` (`rm -rf` + `~` en el mismo comando) → parches y scripts en archivos.
+- **2ª pasada de seguridad (sobre el propio fix):** 10 hallazgos más; ninguno HIGH, pero 3 MEDIUM explotables por
+  NOMBRE de archivo: (1) los comandos "ruta manual" que el hook le sugiere al modelo interpolaban la ruta → `printf %q`;
+  (2) mezclar stdout+stderr del motor deja que un nombre con `\n` imite `INSPECT_DIR=` → separar y VALIDAR el formato;
+  (3) hashear antes de mirar el tamaño = fail-open por timeout con un sparse. Lección: lo que el hook le dice al
+  modelo (mensajes, comandos sugeridos) también es superficie de ataque.
+- `signal.alarm` + `raise TimeoutError` no corta nada si hay `except Exception` en el camino (TimeoutError ⊂ OSError ⊂
+  Exception): usar una excepción propia que herede de BaseException.
+- Tests vacíos otra vez (2): `sed 's/^[^p]*pdftotext/…/'` se detiene en la "p" de "poppler"; un test de tope con 1
+  solo trabajo no distingue "sin tope" de "tope 3". La regla se sostiene: si el test pasa con el código viejo, no prueba.
+- El chequeo de seguridad de Claude Code no deja correr comandos que no puede analizar (un `$(…)` literal en un nombre
+  de archivo entre comillas): ponerlos en un script.

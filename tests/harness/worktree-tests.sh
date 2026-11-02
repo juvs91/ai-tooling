@@ -7,6 +7,8 @@ set -uo pipefail
 AI_TOOLING="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 H="$AI_TOOLING/.claude/hooks"
 T=$(mktemp -d); T=$(cd -P "$T" && pwd -P)
+# doclens/doc-guard: caché de digests y estado propios del test (nunca los del usuario)
+export DOCLENS_CACHE="$T/doclens-cache" XDG_CACHE_HOME="$T/xdg" TMPDIR="$T/tmp"; mkdir -m 700 "$DOCLENS_CACHE"; mkdir -p "$TMPDIR"
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "  ✓ $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  ✗ FAIL: $1"; }
@@ -182,7 +184,13 @@ echo "══ W14: doc-guard — venv desde la raíz del proyecto, tamaño portab
 # venv falso (gitignorado en la vida real → solo existe en M, nunca en W): simula doclens.
 # Estructura homologada (ADR-0076): doclens/doclens.py + doclens/.venv
 mkdir -p "$M/doclens/.venv/bin"; touch "$M/doclens/doclens.py"
-printf '#!/bin/sh\nd="$2.inspect"; mkdir -p "$d"; : > "$d/index.md"; : > "$d/downscaled.png"; echo "INSPECT_DIR=$d"\n' > "$M/doclens/.venv/bin/python"
+cat > "$M/doclens/.venv/bin/python" <<'STUB'
+#!/bin/sh
+# imita a doclens: digest en el caché por contenido (o junto al PDF con el motor viejo)
+if [ -n "$STUB_BESIDE" ]; then d="$2.inspect"
+else d="$DOCLENS_CACHE/$({ sha256sum "$2" 2>/dev/null || shasum -a 256 "$2"; } | cut -d' ' -f1).inspect"; fi
+mkdir -p "$d"; : > "$d/index.md"; : > "$d/downscaled.png"; echo "INSPECT_DIR=$d"
+STUB
 chmod +x "$M/doclens/.venv/bin/python"
 : > "$T/doc.pdf"; : > "$T/small.png"; dd if=/dev/zero of="$T/big.png" bs=1048576 count=9 2>/dev/null
 dg() {  # dg <cwd> <file> → "rc|stderr"
@@ -195,10 +203,10 @@ R=$(dg "$M" "$T/big.png");     case "$R" in "2|"*downscaled*) ok "imagen de 9 MB
 R=$(dg "$M" "$T/small.png");   eq "imagen chica → permitida" "${R%%|*}" 0
 R=$(dg "$M" "$T/doc.pdf.inspect/index.md"); eq "artefactos .inspect → permitidos" "${R%%|*}" 0
 # Transición: consumer aún con la estructura vieja (scripts/doclens.py + scripts/.venv-doc-tools)
-mkdir -p "$M/scripts/.venv-doc-tools/bin"; touch "$M/scripts/doclens.py"
+mkdir -p "$M/scripts/.venv-doc-tools/bin"; touch "$M/scripts/doclens.py"; export STUB_BESIDE=1
 mv "$M/doclens/.venv/bin/python" "$M/scripts/.venv-doc-tools/bin/python"; rm -rf "$M/doclens"
 R=$(dg "$M" "$T/doc.pdf"); case "$R" in "2|"*pre-procesado*) ok "estructura vieja (scripts/) → sigue funcionando" ;; *) bad "estructura vieja: ${R%%$'\n'*}" ;; esac
-rm -rf "$M/scripts/doclens.py" "$M/scripts/.venv-doc-tools"
+rm -rf "$M/scripts/doclens.py" "$M/scripts/.venv-doc-tools"; unset STUB_BESIDE
 
 echo "══ W15: quality-gate visible al modelo (doc-guard sin venv: doclens-tests.sh) ══"
 # quality-gate: ruff falso primero en PATH; jq aislado para el caso "sin ruff ni uvx"

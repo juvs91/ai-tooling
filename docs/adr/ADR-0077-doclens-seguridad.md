@@ -91,6 +91,35 @@ injection: basta con abrir un PDF de un repo o un zip preparado. Los dos vienen 
 
 Versión de doclens: 2.0.0 (cambia la ubicación de los digests) y `SIDECAR_FORMAT_VERSION` 2.
 
+## Segunda pasada de seguridad (independiente, sobre e1e8a8a)
+
+Se intentó romper el resultado. Hubo 10 hallazgos, todos corregidos y cubiertos en D26. Esos tests fallan con
+e1e8a8a (20 fallos).
+
+| # | Sev. | Hallazgo → corrección |
+|---|---|---|
+| 1 | MEDIUM | La ruta manual que se sugiere al modelo interpolaba el nombre: con `r$(cmd).pdf`, copiar el comando ejecutaba `cmd`. Ahora la ruta va escapada con `printf %q` en los comandos y sin caracteres de control en los mensajes. |
+| 2 | MEDIUM | Un nombre con `\n` hacía que el log de doclens imitara `INSPECT_DIR=` y el hook redirigía a un `index.md` plantado. Ahora stdout y stderr van separados, el log usa `repr`, y solo se acepta `<caché>/<64 hex>.inspect`. |
+| 3 | MEDIUM | El hash del atajo de caché no tenía límite y corría antes del tamaño: un sparse de 300 GB llevaba el hook más allá de 120 s (fail-open). Ahora se mira el tamaño con `find -size` y el hash corre dentro del plazo. |
+| 4 | MEDIUM | El OCR no tenía límite (todas las páginas), `ulimit -t` no cuenta a los hijos, y el tope de trabajos contaba procesos colgados. Ahora: `DOCLENS_MAX_OCR_PAGES` (50); `DOCLENS_MAX_SECONDS` (1800) con `signal.alarm` y una excepción `BaseException` (un `except Exception` se tragaba el `TimeoutError`, verificado); solo cuentan los trabajos de menos de 1 h, y el tope tiene un mensaje propio. |
+| 5 | MEDIUM | Una figura embebida de 20000×20000 se decodificaba entera (2,5 GB en macOS). Ahora se omite si ancho × alto supera 40 Mpx, antes de extraerla. |
+| 6 | LOW | TOCTOU entre el hash y el procesamiento (envenenaba el caché). Ahora se leen los bytes una vez, se hashean y se procesan con `fitz.open(stream=…)` / `BytesIO`. |
+| 7 | LOW | Había texto del documento fuera de los fences (producer con `\n`, nombre, previews, tablas, OCR). Ahora pasa por `clean()` (una línea, sin control ni backticks), las tablas van dentro de un fence y la marca de no confiable va primero. |
+| 8 | LOW | Una imagen grande evadía el hook con `x.inspect/`, `..` o `~`. Ahora las decisiones se toman sobre la ruta canónica (`realpath`, `~` expandido) y la exención aplica solo dentro del caché. Además, un PDF sin extensión `.pdf` (o detrás de un symlink) se detecta por `%PDF-`. |
+| 9 | LOW | Con el estado de TMPDIR inutilizable se usaba un `mktemp` por llamada, sin deduplicación ni tope. Ahora el respaldo es `~/.cache/doclens-hook` (0700); si tampoco sirve, se bloquea sin lanzar nada. |
+| 10 | INFO | `DOCLENS_HOOK_WAIT=08` (octal) dejaba el plazo sin efecto, y `DOCLENS_MAX_JOBS=abc` desactivaba el tope. Ahora se usa base 10 (`10#`) con longitud acotada, y los valores inválidos toman el valor por defecto. |
+
+Además, el guard de OpenCode usa `execFileSync` con `timeout` (90 s y 300 s para el venv): un documento
+hostil ya no bloquea el plugin.
+
+Al verificar los tests contra el código viejo aparecieron 2 tests vacíos, ya corregidos:
+- la extracción del comando sugerido fallaba porque "poppler" también empieza con `p`;
+- `MAX_JOBS=abc` con un solo trabajo no distinguía "sin tope" de "tope 3".
+
+Sin verificar: si el Read de Claude Code detecta PDFs por contenido cuando la extensión es Unicode (`.pdf` de
+ancho completo). El hook ahora detecta por `%PDF-` los archivos sin extensión conocida, pero no los que tienen
+otra extensión de la lista.
+
 ## Modelo de confianza (lo que NO se defiende)
 
 El código del repo y del toolbox se ejecuta: el venv, `doclens/sync.sh`, `requirements` y el `local_path`

@@ -54,8 +54,11 @@ rename atómico. Exit codes: `0` ok · `1` no existe · `2` formato no soportado
 Límites contra documentos hostiles (variables de entorno): `DOCLENS_MAX_MB`
 (200), `DOCLENS_MAX_PAGES` con render (500; el texto es completo), área máxima
 por render 40 Mpx, DPI 36–300, `DOCLENS_CACHE_DAYS` (30, purga de digests sin
-uso), `DOCLENS_MAX_JOBS` (3 procesos a la vez); en el hook, CPU ≤ 900 s y
-memoria ≤ 4 GB en Linux.
+uso), `DOCLENS_MAX_JOBS` (3 procesos a la vez), `DOCLENS_MAX_OCR_PAGES` (50),
+`DOCLENS_MAX_SECONDS` (1800, tiempo total incluido tesseract); figuras de más de
+40 Mpx se omiten sin decodificarlas; en el hook, CPU ≤ 900 s y memoria ≤ 4 GB en
+Linux. doc-guard decide sobre la ruta canónica (`~`, `..`, symlinks) y detecta
+PDFs sin extensión `.pdf` por su contenido (`%PDF-`).
 
 ## Dependencias: versiones fijas con hashes (ADR-0077)
 

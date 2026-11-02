@@ -14,12 +14,13 @@ import { join } from "node:path"
 //   if (input.tool === "read" && /\.pdf$/i.test(args.filePath ?? "")) {
 //     // Estructura homologada (ADR-0076): doclens/ + doclens/.venv; sin venv, se prepara solo
 //     if (!existsSync(join(directory, "doclens/.venv/bin/python")))
-//       execFileSync("bash", ["doclens/sync.sh", "--venv"], { cwd: directory, stdio: "pipe" })
+//       execFileSync("bash", ["doclens/sync.sh", "--venv"], { cwd: directory, stdio: "pipe", timeout: 300_000 })
 //     // argumentos en lista, NUNCA un string de shell: "x$(cmd).pdf" ejecutaría cmd (ADR-0077)
 //     const out = execFileSync(
 //       "doclens/.venv/bin/python",
 //       ["doclens/doclens.py", String(args.filePath)],
-//       { cwd: directory }
+//       // timeout: un documento hostil no bloquea el plugin (si vence, lanza y el read se bloquea)
+//       { cwd: directory, timeout: 90_000, killSignal: "SIGKILL" }
 //     ).toString()
 //     const dir = out.match(/INSPECT_DIR=(.+)/)?.[1]
 //     throw new Error(
