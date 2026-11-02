@@ -45,3 +45,4 @@
 | [ADR-0075](ADR-0075-dedup-skills-e-invariante-routing.md) | Deduplicación de skills (retroactivo b53b6ba) e invariante de routing verificado por test (T14) | Accepted | 2026-10-30 | Harness |
 | [ADR-0076](ADR-0076-doclens-homologado.md) | doclens homologado: misma estructura doclens/ en ai-tooling y consumers (espejo), migración con respaldo, venv aislado y listo para usar | Accepted | 2026-10-30 | Harness |
 | [ADR-0077](ADR-0077-doclens-seguridad.md) | Seguridad de doclens: digests en caché por usuario (sin symlinks ni digests plantados), sin shell en OpenCode, límites de recursos, dependencias con hashes | Accepted | 2026-11-02 | Harness |
+| [ADR-0078](ADR-0078-doclens-ocr-con-posiciones.md) | doclens 2.1.0: OCR completo con cajas por palabra (también en imágenes sueltas), spa+eng y versión de formato del digest | Accepted | 2026-11-02 | Harness |
