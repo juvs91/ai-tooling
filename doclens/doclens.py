@@ -33,8 +33,8 @@ Origen: ai-tooling/doclens (toolbox compartido). Los proyectos consumen una
 espejo de doclens/ (misma estructura, ADR-0076) vía doclens/sync.sh — no editar la copia local.
 """
 
-DOCLENS_VERSION = "2.3.0"
-SIDECAR_FORMAT_VERSION = 5  # 5: caras con YuNet (ADR-0079); 2: caché por usuario (ADR-0077); 3: OCR con cajas (ADR-0078); 4: figuras deduplicadas, .ocr.txt marcado (ADR-0077 3ª pasada)
+DOCLENS_VERSION = "2.4.0"
+SIDECAR_FORMAT_VERSION = 6  # 6: OCR desde PNG propio, figuras > 8 MB reducidas (ADR-0077 4ª pasada); 5: caras con YuNet (ADR-0079); 2: caché por usuario (ADR-0077); 3: OCR con cajas (ADR-0078); 4: figuras deduplicadas, .ocr.txt marcado (ADR-0077 3ª pasada)
 
 import hashlib
 import io
@@ -46,8 +46,14 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
+
+try:  # Unix: lectura del RSS para el vigía de memoria (ADR-0077, 4ª pasada)
+    import resource
+except ImportError:  # pragma: no cover
+    resource = None
 
 MAX_TEXT_CHARS_PER_PAGE = 8000
 MAX_TOPO_BLOCKS_PER_PAGE = 40
@@ -65,11 +71,16 @@ def _env_int(name: str, default: int) -> int:
 MAX_MB = _env_int("DOCLENS_MAX_MB", 200)
 MAX_RENDER_PAGES = _env_int("DOCLENS_MAX_PAGES", 500)
 MAX_PAGE_PIXELS = 40_000_000  # por render; páginas gigantes se bajan de zoom
+# OpenCV rechaza decodificar imágenes más grandes que esto ANTES de reservar memoria (imdecode)
+os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", str(MAX_PAGE_PIXELS))
 DPI_MIN, DPI_MAX = 36, 300
 CACHE_DAYS = _env_int("DOCLENS_CACHE_DAYS", 30)
 MAX_OCR_PAGES = _env_int("DOCLENS_MAX_OCR_PAGES", 50)  # OCR (tesseract) es lo más lento
 MAX_SECONDS = _env_int("DOCLENS_MAX_SECONDS", 1800)    # tiempo total (incluye a tesseract)
 MAX_FIGURES = _env_int("DOCLENS_MAX_FIGURES", 200)     # figuras distintas extraídas
+MAX_PAGE_CONTENT = _env_int("DOCLENS_MAX_PAGE_CONTENT_KB", 1024) * 1024  # contenido de una página para topología/tablas
+MAX_RSS_MB = _env_int("DOCLENS_MAX_RSS_MB", 3072)       # memoria del proceso (vigía; en macOS no hay ulimit -v)
+MAX_FIG_BYTES = 8 * 1024 * 1024                         # figura más grande se guarda reducida (tope del API)
 MAX_DIGEST_MB = _env_int("DOCLENS_MAX_DIGEST_MB", 500)  # disco total de un digest (renders + figuras)
 STAGE_MAX_AGE = 3600  # una etapa (.xxxx.) más vieja que esto es de un proceso muerto
 UNTRUSTED_HEADER = (
@@ -183,6 +194,74 @@ def fingerprint(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def start_rss_watchdog() -> None:
+    """Hilo que corta el proceso si su memoria pasa DOCLENS_MAX_RSS_MB. Una señal no serviría:
+    mientras MuPDF reserva en C, el handler de Python no corre. La etapa que queda la purga
+    purge_cache (más de 1 h)."""
+    if resource is None:
+        return
+    unit = 1 if sys.platform == "darwin" else 1024  # ru_maxrss: bytes en macOS, KB en Linux
+    limit = MAX_RSS_MB * 1024 * 1024
+
+    def watch() -> None:
+        while True:
+            if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * unit > limit:
+                log(f"memoria excedida (DOCLENS_MAX_RSS_MB={MAX_RSS_MB}): procesamiento cortado")
+                sys.stderr.flush()
+                os._exit(9)
+            time.sleep(0.2)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def save_reduced(data: bytes, dst: Path) -> bool:
+    """JPEG ≤ MAX_FIG_BYTES (una imagen de ruido no se comprime en PNG: 2048 px seguían pesando 11 MB).
+
+    False si la imagen real excede MAX_PAGE_PIXELS (su cabecera puede no coincidir con el
+    /Width × /Height del PDF que se revisó antes). draft() + thumbnail() ANTES de convert():
+    un JPEG se decodifica ya reducido, no a resolución completa.
+    """
+    from PIL import Image
+    im = Image.open(io.BytesIO(data))
+    if im.width * im.height > MAX_PAGE_PIXELS:
+        return False
+    im.draft("RGB", (2048, 2048))
+    im.thumbnail((2048, 2048))
+    im = im.convert("RGB")
+    side = 2048
+    while True:
+        im.thumbnail((side, side))
+        im.save(dst, format="JPEG", quality=85)
+        if dst.stat().st_size <= MAX_FIG_BYTES or side <= 256:
+            return True
+        side = int(side * 0.7)
+
+
+def page_is_heavy(doc, page, sizes: "dict[int, int]") -> bool:
+    """¿Dibuja la página más de MAX_PAGE_CONTENT bytes de operadores?
+
+    Cuenta su /Contents y TODOS los Form XObjects que alcanza (get_xobjects es recursivo):
+    300k trazos dentro de un "/X0 Do" no aparecen en read_contents(). Cada stream se mide una
+    vez por documento (sizes, por xref). Un stream que MuPDF no puede descomprimir (bomba de
+    compresión, filtro roto) cuenta como pesado: se omite esa página, no el documento.
+    """
+    total = 0
+    try:
+        xrefs = list(page.get_contents()) + [x[0] for x in page.get_xobjects()]
+    except Exception:  # noqa: BLE001 — MuPDF no pudo listar los streams: página pesada
+        return True
+    for xref in xrefs:
+        if xref not in sizes:
+            try:
+                sizes[xref] = len(doc.xref_stream(xref) or b"")
+            except Exception:  # noqa: BLE001 — bomba de compresión o filtro roto
+                sizes[xref] = MAX_PAGE_CONTENT + 1
+        total += sizes[xref]
+        if total > MAX_PAGE_CONTENT:
+            return True
+    return False
+
+
 def over_budget(outdir: Path) -> bool:
     """Disco usado por el digest en construcción ≥ DOCLENS_MAX_DIGEST_MB."""
     total = 0
@@ -237,10 +316,13 @@ def ocr_lang() -> str:
 
 
 def ocr_words(img_path: Path) -> tuple[str, str]:
-    """(texto por línea, TSV de tesseract con cada palabra y su caja). ("", "") si falla."""
+    """(texto por línea, TSV de tesseract con cada palabra y su caja). ("", "") si falla.
+    img_path es SIEMPRE un PNG generado por doclens (ocr_input): tesseract trata un archivo que no
+    reconoce como imagen como una LISTA DE RUTAS y aplica OCR a cada una — con bytes del documento,
+    un PDF podía hacerle leer cualquier imagen del disco. cwd = el stage: nada relativo sale de ahí."""
     cmd = ["tesseract", str(img_path), "stdout"] + (["-l", ocr_lang()] if ocr_lang() else []) + ["tsv"]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False, cwd=img_path.parent)
     except Exception as e:  # noqa: BLE001
         log(f"OCR falló en {img_path.name}: {e}")
         return "", ""
@@ -262,8 +344,18 @@ FACE_MODEL_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed25
 FACE_SCORE = 0.6
 
 
+_FACES = None
+
+
 def faces_available() -> str:
-    """"" si se pueden buscar caras; si no, el motivo (ADR-0079)."""
+    """"" si se pueden buscar caras; si no, el motivo (ADR-0079). Se calcula una vez."""
+    global _FACES
+    if _FACES is None:
+        _FACES = _faces_check()
+    return _FACES
+
+
+def _faces_check() -> str:
     try:
         import cv2  # noqa: F401
     except ImportError:
@@ -322,9 +414,30 @@ def write_faces(data: bytes, out_base: Path) -> int:
     return len(faces)
 
 
-def write_ocr(img_path: Path, out_base: Path) -> str:
-    """OCR de img_path -> <out_base>.ocr.txt y <out_base>.ocr.tsv (ADR-0078). Devuelve el texto."""
-    text, tsv = ocr_words(img_path)
+def ocr_input(data: bytes, workdir: Path) -> "Path | None":
+    """Decodifica con PIL (acotado a MAX_PAGE_PIXELS) y re-codifica como PNG propio para tesseract."""
+    from PIL import Image
+    try:
+        im = Image.open(io.BytesIO(data))
+        if im.size[0] * im.size[1] > MAX_PAGE_PIXELS:
+            return None
+        dst = workdir / "_ocr-in.png"
+        im.convert("RGB" if im.mode not in ("L", "RGB") else im.mode).save(dst, format="PNG")
+        return dst
+    except Exception as e:  # noqa: BLE001 — imagen que PIL no entiende: sin OCR
+        log(f"OCR omitido: {clean(e)}")
+        return None
+
+
+def write_ocr(data: bytes, out_base: Path, workdir: Path) -> str:
+    """OCR de una imagen (bytes) -> <out_base>.ocr.txt y <out_base>.ocr.tsv (ADR-0078). Devuelve el texto."""
+    src = ocr_input(data, workdir)
+    if src is None:
+        return ""
+    try:
+        text, tsv = ocr_words(src)
+    finally:
+        src.unlink(missing_ok=True)
     if tsv:
         Path(f"{out_base}.ocr.txt").write_text(UNTRUSTED_HEADER + "\n" + text + "\n")
         Path(f"{out_base}.ocr.tsv").write_text(tsv)
@@ -358,6 +471,7 @@ def process_pdf(path: Path, data: bytes, outdir: Path, dpi: int) -> None:
     any_fig = False
     ocr_done = 0
     seen_figs: dict[int, str] = {}
+    stream_sizes: dict[int, int] = {}
     if doc.page_count > MAX_RENDER_PAGES:
         md.append(f"> renders solo de las primeras {MAX_RENDER_PAGES} páginas (DOCLENS_MAX_PAGES); el texto es completo.\n")
 
@@ -398,12 +512,17 @@ def process_pdf(path: Path, data: bytes, outdir: Path, dpi: int) -> None:
             md.append("_(sin texto extraíble)_\n")
 
         # topología: bloques con bbox + dibujos vectoriales
+        # Un contenido de pocos KB comprimidos puede ser millones de trazos: get_drawings y
+        # find_tables reservan ~5 KB por trazo (GB de RAM). Por encima del tope, se omiten.
+        heavy = page_is_heavy(doc, page, stream_sizes)
         blocks = [b for b in page.get_text("dict")["blocks"] if b.get("type") == 0]
-        drawings = page.get_drawings()
+        n_draw = "?" if heavy else len(page.get_drawings())
         md.append(
             f"- topología: {len(blocks)} bloques de texto, "
-            f"{len(drawings)} elementos vectoriales (líneas/rectángulos/tablas dibujadas)"
+            f"{n_draw} elementos vectoriales (líneas/rectángulos/tablas dibujadas)"
         )
+        if heavy:
+            md.append("- contenido de página enorme: dibujos y tablas omitidos (DOCLENS_MAX_PAGE_CONTENT_KB)")
         for b in blocks[:MAX_TOPO_BLOCKS_PER_PAGE]:
             preview = clean(" ".join(
                 s["text"] for line in b.get("lines", []) for s in line.get("spans", [])
@@ -416,6 +535,8 @@ def process_pdf(path: Path, data: bytes, outdir: Path, dpi: int) -> None:
 
         # tablas -> markdown
         try:
+            if heavy:
+                raise ValueError("contenido de página enorme")
             tables = page.find_tables()
             if tables.tables:
                 md.append(f"- tablas detectadas: {len(tables.tables)}")
@@ -450,20 +571,27 @@ def process_pdf(path: Path, data: bytes, outdir: Path, dpi: int) -> None:
                 try:
                     extracted = doc.extract_image(xref)
                     ext = extracted["ext"]
-                    fig_path = figs_dir / f"fig-p{pno + 1}-{n}.{ext}"
-                    fig_path.write_bytes(extracted["image"])
+                    fig_bytes = extracted["image"]
+                    if len(fig_bytes) > MAX_FIG_BYTES:  # más que el tope del API: se guarda reducida
+                        fig_path = figs_dir / f"fig-p{pno + 1}-{n}.jpg"
+                        if not save_reduced(fig_bytes, fig_path):
+                            md.append(f"  - figura {n} omitida: la imagen real excede el máximo de píxeles")
+                            continue
+                    else:
+                        fig_path = figs_dir / f"fig-p{pno + 1}-{n}.{ext}"
+                        fig_path.write_bytes(fig_bytes)
                     seen_figs[xref] = fig_path.name
                     rects = page.get_image_rects(xref)
                     bbox = [round(v, 1) for v in rects[0]] if rects else "n/a"
                     line = f"  - `figures/{fig_path.name}` bbox={bbox} {extracted['width']}x{extracted['height']}"
                     if ocr_available() and ocr_done < MAX_OCR_PAGES:
                         ocr_done += 1
-                        fig_text = write_ocr(fig_path, fig_path)
+                        fig_text = write_ocr(fig_bytes, fig_path, figs_dir)
                         if fig_text:
                             line += (f"\n    - texto en figura (OCR, extracto): «{clean(fig_text)}» — completo en "
                                      f"`figures/{fig_path.name}.ocr.txt`, palabras con caja en `.ocr.tsv`")
                     if not faces_available():
-                        n_faces = write_faces(extracted["image"], fig_path)
+                        n_faces = write_faces(fig_bytes, fig_path)
                         if n_faces:
                             line += f"\n    - caras: {n_faces} (cajas en `figures/{fig_path.name}.faces.tsv`)"
                     md.append(line)
@@ -518,12 +646,7 @@ def process_image(path: Path, data: bytes, outdir: Path) -> None:
     if ocr_available():  # ADR-0078: texto completo + cajas por palabra, en píxeles de la imagen original
         figs = outdir / "figures"
         figs.mkdir(exist_ok=True)
-        tmp = figs / f"_ocr-src{'.png' if im.format == 'PNG' else '.jpg'}"
-        tmp.write_bytes(data)
-        try:
-            text = write_ocr(tmp, figs / "image")
-        finally:
-            tmp.unlink(missing_ok=True)
+        text = write_ocr(data, figs / "image", figs)
         md.append("## OCR\n")
         if text:
             md.append(f"- extracto: «{clean(text)}»")
@@ -581,6 +704,7 @@ def main() -> int:
                              else f"excede DOCLENS_MAX_SECONDS={MAX_SECONDS}")
     signal.signal(signal.SIGALRM, _timeout)
     signal.signal(signal.SIGXCPU, _timeout)  # ulimit -t (límite blando): limpiar la etapa, no morir
+    start_rss_watchdog()
     signal.alarm(MAX_SECONDS)
     with path.open("rb") as f:  # UNA lectura: lo que se hashea es lo que se procesa
         data = f.read(MAX_MB * 1024 * 1024 + 1)

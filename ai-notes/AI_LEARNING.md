@@ -1807,3 +1807,38 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   - Un digest hecho sin poder buscar caras se marca `-sin-caras` para que no se quede en la caché.
   - Un ayudante en Swift (Vision) funcionaba, pero se descartó porque la regla es Python.
 - **Pruebas:** 185 de 185.
+
+## 2026-11-02 · doclens 2.4.0: 4ª pasada de seguridad + caja de arena en macOS (ADR-0077)
+
+- **Hallazgos H1–H6, todos corregidos y probados en D28** (9 tests que fallan con 1e7a0fd):
+  - **H1:** tesseract trataba un archivo que no es imagen como LISTA DE RUTAS.
+  - **H2:** un PDF con muchos trazos agotaba la RAM.
+  - **H3:** el tope de procesos no tenía lock.
+  - **H4:** figuras de más de 8 MB.
+  - **H5:** sin jq, una ruta con surrogate o UTF-8 inválido hacía fail-open.
+  - **H6:** sin python3, `..` dentro del caché quedaba exento.
+- **Aprendizajes:**
+  - **Nunca le pases a una herramienta externa los bytes del atacante tal cual.** Re-codifícalos a un formato propio (PIL → PNG) y córrela en un cwd controlado. tesseract, ffmpeg o ImageMagick interpretan entradas "raras" como listas, scripts o URLs.
+  - **`tr` en un locale UTF-8 falla con bytes inválidos.** La salida queda vacía y un hook decide "no es PDF". En hooks de seguridad, `LC_ALL=C` para todo lo que trabaje por bytes.
+  - **`get_drawings()` de PyMuPDF escala con el número de trazos, no con el tamaño del archivo.** Hay que medir el stream de contenido antes de procesarlo. En macOS no existe `ulimit -v`, así que el límite es un vigía de RSS en un hilo con `os._exit`.
+  - **Una imagen de ruido no baja de 8 MB en PNG ni a 2048 px.** Para reducir con un tope de bytes: JPEG y achicar en un bucle.
+  - **`cv2.imdecode` reserva memoria antes de cualquier validación propia.** Se acota con `OPENCV_IO_MAX_IMAGE_PIXELS`.
+- **Caja de arena en macOS:** doc-guard corre doclens con `sandbox-exec -p` (sin red; escritura solo en el caché, `$TMPDIR` y `/dev/*`). Se evaluó antes de aplicarla y OCR y OpenCV funcionan dentro. Se desactiva con `DOCLENS_SANDBOX=0`. Un test existente cuyo stub escribía fuera del caché falló, y eso confirmó que la caja contiene de verdad.
+- **Aprendizajes de las pruebas:**
+  - Con bash 3.2 y `set -u`, un array vacío expande con error: usar `${A[@]+"${A[@]}"}`.
+  - La matriz de Linux necesita `.git` dentro del contenedor, porque los tests arman el toolbox con `git ls-files`.
+  - `sync.sh` espeja HEAD, no el working tree: el E2E de consumer solo valida cambios ya commiteados.
+- **Pruebas:**
+  - macOS: 388 de 388 (doclens 197);
+  - Linux GNU, busybox y git 2.22: 338 de 338 en cada uno;
+  - Read en vivo con la caja activa: digest de formato 6.
+- **Revisión enfocada (solo sobre el diff), con 6 hallazgos reproducidos**, entre ellos 1 HIGH: mi corrección de H5 seguía siendo evadible.
+  - **Lección:** al normalizar una entrada, imita al consumidor REAL. Node convierte un surrogate suelto en U+FFFD; `surrogateescape` producía un nombre distinto del que se iba a leer.
+  - **Lección:** `read_contents()` no ve los Form XObjects; para medir lo que dibuja una página, usa `get_xobjects()`, que es recursivo.
+  - **Lección:** una caja de arena que solo permite escribir en el caché debe tener ese caché creado de antemano; si no, en una cuenta nueva el hook falla cerrado para siempre.
+  - **Lección:** para romper un candado huérfano sin carrera, guarda el PID del dueño en un archivo dentro del candado: solo gana quien logra borrar ESE archivo.
+- **Tests que pasaban sin medir nada:**
+  - En `sh`, una redirección fallida en `:` mata el script; usa `echo`.
+  - `cut -f1` aplica a cada línea de un mensaje multilínea; usa `head -1` primero.
+  - Un candado que el código viejo deja tomado hace que los tests siguientes pasen en falso; aísla cada test.
+- **Pruebas:** macOS 397 de 397 (doclens 206); Linux en sus 3 variantes, 341 de 341 cada una.

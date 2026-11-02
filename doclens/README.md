@@ -67,9 +67,13 @@ por render 40 Mpx, DPI 36–300, `DOCLENS_CACHE_DAYS` (30, purga de digests sin
 uso), `DOCLENS_MAX_JOBS` (3 procesos a la vez), `DOCLENS_MAX_OCR_PAGES` (50),
 `DOCLENS_MAX_SECONDS` (1800, tiempo total incluido tesseract),
 `DOCLENS_MAX_FIGURES` (200, figuras distintas; una imagen repetida en varias páginas
-se extrae una vez), `DOCLENS_MAX_DIGEST_MB` (500, disco total del digest); figuras
-de más de 40 Mpx se omiten sin decodificarlas; en el hook, CPU ≤ 900 s y memoria ≤ 4 GB en
-Linux. doc-guard decide sobre la ruta canónica (`~`, `..`, symlinks) y detecta
+se extrae una vez), `DOCLENS_MAX_DIGEST_MB` (500, disco total del digest),
+`DOCLENS_MAX_PAGE_CONTENT_KB` (1024; por encima, la página omite dibujos y tablas),
+`DOCLENS_MAX_RSS_MB` (3072, vigía de memoria, también en macOS); figuras de más de
+40 Mpx se omiten sin decodificarlas, y las de más de 8 MB se guardan reducidas (JPEG);
+tesseract solo recibe PNG re-codificados por doclens; en el hook, CPU ≤ 900 s y memoria ≤ 4 GB en
+Linux. En macOS el hook corre doclens en una caja de arena (`sandbox-exec`: sin red, escritura
+solo en el caché, con su propio temporal `<caché>/tmp`); `DOCLENS_SANDBOX=0` la desactiva. doc-guard decide sobre la ruta canónica (`~`, `..`, symlinks) y detecta
 PDFs sin extensión `.pdf` por su contenido (`%PDF-`).
 
 ## Dependencias: versiones fijas con hashes (ADR-0077)

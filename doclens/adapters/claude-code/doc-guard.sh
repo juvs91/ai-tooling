@@ -41,7 +41,10 @@ elif command -v python3 >/dev/null 2>&1 \
      && TOOL=$(printf '%s' "$INPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_name",""))' 2>/dev/null); then
   # Sin jq: decodificar el JSON de verdad (los escapes \" o \u0070 no engañan a un regex).
   # Si python3 existe pero falla, se cae al bloqueo de abajo (nunca fail-open).
-  FILE_PATH=$(printf '%s' "$INPUT" | python3 -c 'import json,sys; sys.stdout.write((json.load(sys.stdin).get("tool_input") or {}).get("file_path",""))' 2>/dev/null)
+  # Un surrogate suelto ("\udcff") pasa a U+FFFD, igual que en Node —que es quien hace el Read—
+  # y en jq: el hook revisa el MISMO archivo que se va a leer. (surrogateescape daba el byte
+  # 0xff: un nombre que APFS no admite, -f fallaba y un PDF renombrado pasaba sin revisar)
+  FILE_PATH=$(printf '%s' "$INPUT" | python3 -c 'import json,re,sys; p=(json.load(sys.stdin).get("tool_input") or {}).get("file_path",""); sys.stdout.buffer.write(re.sub("[\ud800-\udfff]", "\ufffd", p).encode("utf-8"))' 2>/dev/null)
 else
   # Sin jq ni python3: fail-closed para todo lo que pueda ser un PDF (también escapado)
   if printf '%s' "$INPUT" | grep -qiE 'pdf|\\u00'; then
@@ -52,12 +55,21 @@ else
 fi
 
 [ "$TOOL" != "Read" ] && exit 0
-[ -z "$FILE_PATH" ] && exit 0
+if [ -z "$FILE_PATH" ]; then
+  # Un Read CON file_path que no se pudo interpretar (surrogates, JSON raro) no pasa a ciegas
+  if printf '%s' "$INPUT" | grep -q '"file_path"[[:space:]]*:[[:space:]]*"[^"]'; then
+    echo "doc-guard: no se pudo interpretar la ruta del Read; por seguridad no se permite. Usa una ruta sin caracteres inválidos." >&2
+    exit 2
+  fi
+  exit 0
+fi
 
 # Extensión sobre la cadena COMPLETA (no por línea: un nombre con salto de línea
 # "a.txt<NL>b.pdf" no puede esconder el .pdf)
 ext_of() {
-  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+  # LC_ALL=C: en un locale UTF-8, tr FALLA con bytes inválidos en el nombre (salida vacía →
+  # sin extensión → exit 0: el PDF pasaba). Por bytes, A-Z → a-z siempre funciona
+  case "$(printf '%s' "$1" | LC_ALL=C tr 'A-Z' 'a-z')" in
     *.pdf) echo .pdf ;; *.png) echo .png ;; *.jpg) echo .jpg ;; *.jpeg) echo .jpeg ;;
     *.webp) echo .webp ;; *.tif) echo .tif ;; *.tiff) echo .tiff ;; *) echo "" ;;
   esac
@@ -80,6 +92,9 @@ if command -v python3 >/dev/null 2>&1; then
   [ -n "${C1:-}" ] && FILE_PATH="$C1"; [ -n "${C2:-}" ] && CACHE_REAL="$C2"
   [ -n "$(ext_of "$FILE_PATH")" ] && EXT=$(ext_of "$FILE_PATH")
 fi
+# Sin ruta canónica (sin python3), una ruta con "." o ".." no se compara léxicamente
+NONCANON=""
+[ -z "${C1:-}" ] && case "$FILE_PATH" in */../*|*/./*|*/..|*/.) NONCANON=1 ;; esac
 # Un archivo con extensión de imagen que en realidad es un PDF se trata como PDF
 case "$EXT" in
   .png|.jpg|.jpeg|.webp|.tif|.tiff)
@@ -87,9 +102,17 @@ case "$EXT" in
 esac
 # Los artifacts de doclens (md/png de un digest) se leen libremente, pero SOLO dentro del
 # caché; un PDF nunca está exento
-case "$FILE_PATH" in
-  "$CACHE_REAL"/*.inspect/*|"$CACHE"/*.inspect/*) [ "$EXT" = ".pdf" ] || exit 0 ;;
-esac
+is_big_image() {
+  case "$EXT" in .png|.jpg|.jpeg|.webp|.tif|.tiff) ;; *) return 1 ;; esac
+  [ -f "$FILE_PATH" ] && [ -n "$(find "$FILE_PATH" -prune -size +16384 2>/dev/null)" ]
+}
+if [ -z "$NONCANON" ]; then
+  case "$FILE_PATH" in
+    "$CACHE_REAL"/*.inspect/*|"$CACHE"/*.inspect/*)
+      # exentos, salvo PDFs e imágenes de más de 8 MB (pasan por la reducción)
+      [ "$EXT" = ".pdf" ] || is_big_image || exit 0 ;;
+  esac
+fi
 case "$EXT" in
   .pdf) ;;
   .png|.jpg|.jpeg|.webp|.tif|.tiff)
@@ -209,6 +232,7 @@ bounded() {  # bounded <out> <pidfile> cmd… → exit del cmd, o 124 si sigue c
   # saltos de línea) no puede parecer una línea INSPECT_DIR= de stdout
   detach sh -c ': doclens-bg; if [ -n "$DL_LIMITS" ]; then ulimit -H -t 960 2>/dev/null; ulimit -S -t 900 2>/dev/null; ulimit -f 4194304 2>/dev/null; [ "$(uname)" = Linux ] && ulimit -v 4194304 2>/dev/null; fi; pf=$1; shift; "$@"; rc=$?; rm -f "$pf"; exit $rc' doclens-bg "$pidf" "$@" > "$out" 2> "$out.err" < /dev/null &
   pid=$!; echo "$pid $(date +%s)" > "$pidf"   # PID + inicio (para decir cuánto lleva)
+  jobs_unlock                                  # el pidfile ya cuenta: los demás pueden contar
   while kill -0 "$pid" 2>/dev/null; do
     [ "$SECONDS" -ge "$DEADLINE" ] && return 124
     if [ "$n" -lt 20 ]; then sleep 0.05 2>/dev/null || sleep 1; else sleep 0.2 2>/dev/null || sleep 1; fi
@@ -218,6 +242,54 @@ bounded() {  # bounded <out> <pidfile> cmd… → exit del cmd, o 124 si sigue c
   rm -f "$pidf"
   return "$rc"
 }
+# Caja de arena (macOS, ADR-0077 4ª pasada): doclens —que parsea documentos hostiles con
+# PyMuPDF, tesseract y OpenCV— corre sin red y solo puede escribir en el caché y el
+# temporal. Contiene cualquier bug de esos parsers (y H1: leer imágenes ajenas sirve de poco
+# si no hay a dónde mandarlas). DOCLENS_SANDBOX=0 la desactiva. Linux: ulimit del envoltorio.
+SANDBOX=()
+if [ "${DOCLENS_SANDBOX:-1}" != 0 ] && [ "$(uname)" = Darwin ] && command -v sandbox-exec >/dev/null 2>&1; then
+  # El caché se crea AQUÍ: dentro de la caja doclens no podría crear ~/.cache (cuenta nueva)
+  (umask 077; mkdir -p "$CACHE_REAL") 2>/dev/null
+  SBX_CACHE=$(cd "$CACHE_REAL" 2>/dev/null && pwd -P || printf '%s' "$CACHE_REAL")
+  # Temporal PROPIO de doclens, dentro del caché, no $TMPDIR: ahí vive el estado del hook
+  # (pidfiles, salidas, candado) y un doclens comprometido no debe poder tocarlo. "tmp" sin
+  # punto: la purga del caché no lo trata como etapa huérfana
+  SBX_TMP=""
+  if [ -n "$SBX_CACHE" ] && [ -d "$SBX_CACHE" ] && [ ! -L "$SBX_CACHE" ]; then
+    (umask 077; mkdir -p "$SBX_CACHE/tmp") 2>/dev/null
+    [ -d "$SBX_CACHE/tmp" ] && [ ! -L "$SBX_CACHE/tmp" ] && [ -O "$SBX_CACHE/tmp" ] && SBX_TMP="$SBX_CACHE/tmp"
+  fi
+  case "$SBX_CACHE$SBX_TMP" in
+    *'"'*|*'\'*) ;;   # una comilla o barra invertida rompería el perfil: sin caja (raro)
+    *) [ -n "$SBX_TMP" ] && [ -n "$SBX_CACHE" ] && SANDBOX=(env TMPDIR="$SBX_TMP/" sandbox-exec -p "(version 1)
+(allow default)
+(deny network*)
+(deny file-write*)
+(allow file-write* (subpath \"$SBX_CACHE\") (literal \"/dev/null\") (regex #\"^/dev/(stdout|stderr|tty)\"))") ;;
+  esac
+fi
+JOBS_LOCK=""
+jobs_lock() {  # mkdir es atómico; adentro, un archivo con el PID del dueño
+  local l="$STATE/jobs.lock" t=$((SECONDS + 3)) o
+  while ! mkdir "$l" 2>/dev/null; do
+    # Huérfano: su dueño murió (o el candado tiene > 2 min: PID reutilizado). Lo rompe solo
+    # quien logra borrar ESE archivo de PID; si otro ya lo reemplazó por uno nuevo, el rm
+    # falla y el candado nuevo queda intacto (sin la carrera de "ver viejo y borrar")
+    for o in "$l"/*; do
+      o=${o##*/}; case "$o" in ''|*[!0-9]*) continue ;; esac
+      if ! kill -0 "$o" 2>/dev/null || [ -n "$(find "$l" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
+        rm "$l/$o" 2>/dev/null && rmdir "$l" 2>/dev/null
+      fi
+    done
+    # Vacío y viejo: el dueño murió entre mkdir y escribir su PID
+    [ -n "$(find "$l" -maxdepth 0 -empty -mmin +1 2>/dev/null)" ] && rmdir "$l" 2>/dev/null
+    [ "$SECONDS" -ge "$t" ] && return 1
+    sleep 0.05 2>/dev/null || sleep 1
+  done
+  : > "$l/$$"; JOBS_LOCK="$l"
+}
+jobs_unlock() { [ -n "$JOBS_LOCK" ] && rm -f "$JOBS_LOCK/$$" && rmdir "$JOBS_LOCK" 2>/dev/null; JOBS_LOCK=""; }
+trap jobs_unlock EXIT
 # Proceso vivo con este documento: el PID existe Y es nuestro envoltorio (doclens-bg). Un PID
 # reutilizado por el sistema no cuenta, y un proceso legítimo largo no se duplica.
 proc_args() { ps -ww -o args= -p "$1" 2>/dev/null || ps -o pid,args 2>/dev/null | awk -v p="$1" '$1 == p { $1 = ""; print }'; }
@@ -232,7 +304,11 @@ alive() {
 }
 run_doclens() {  # 0 digest en $INSPECT_DIR · 4 sigue procesando · otro: doclens falló
   local out pidf="$STATE/$DOC_KEY.pid" rc=0
+  # Candado: contar trabajos y escribir el pidfile es una sola operación; sin él, N Reads en
+  # paralelo pasaban el tope (o lanzaban dos procesos para el mismo documento) a la vez
+  jobs_lock || { BUSY=$MAX_JOBS; return 8; }
   if alive "$pidf"; then              # ya hay un proceso con este documento: no lanzar otro
+    jobs_unlock
     [ "$AGE" -ge 3600 ] && return 6   # > 1 h: probablemente colgado
     return 4
   fi
@@ -241,9 +317,9 @@ run_doclens() {  # 0 digest en $INSPECT_DIR · 4 sigue procesando · otro: docle
   # Solo cuentan trabajos de < 1 h (doclens se corta solo a los 30 min: DOCLENS_MAX_SECONDS)
   for f in "$STATE"/*.pid; do alive "$f" && [ "$AGE" -lt 3600 ] && n=$((n + 1)); done
   AGE=0
-  [ "$n" -ge "$MAX_JOBS" ] && { BUSY=$n; return 8; }
-  out=$(mktemp "$STATE/out.XXXXXX") || return 1   # salida propia de esta invocación
-  DL_LIMITS=1 bounded "$out" "$pidf" "$PY" "$DOCLENS" "$FILE_PATH" || rc=$?
+  [ "$n" -ge "$MAX_JOBS" ] && { jobs_unlock; BUSY=$n; return 8; }
+  out=$(mktemp "$STATE/out.XXXXXX") || { jobs_unlock; return 1; }   # salida propia de esta invocación
+  DL_LIMITS=1 bounded "$out" "$pidf" ${SANDBOX[@]+"${SANDBOX[@]}"} "$PY" "$DOCLENS" "$FILE_PATH" || rc=$?
   [ "$rc" = 124 ] && { AGE=0; return 4; }
   INSPECT_DIR=$(grep '^INSPECT_DIR=' "$out" 2>/dev/null | tail -n 1 | cut -d= -f2-)
   valid_inspect || INSPECT_DIR=""

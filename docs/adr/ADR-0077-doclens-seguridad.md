@@ -143,6 +143,59 @@ entre caracteres, y con un locale UTF-8 `cut` es consciente de caracteres. Ahora
 ASCII y corre con `LC_ALL=C`. Los tests ya no ponen un `python3` falso en el PATH (usan
 `DOCLENS_BASE_PYTHON`), y el respaldo sin python3 tiene su propio test.
 
+## Cuarta pasada de seguridad (independiente, sobre 1e7a0fd + caras de ADR-0079)
+
+Se aplicó encima de la detección de caras con OpenCV YuNet (ADR-0079). Hubo 6 hallazgos, todos corregidos y
+cubiertos en D28. Sus 9 tests fallan con 1e7a0fd; el test de la caja de arena tiene su control
+(`DOCLENS_SANDBOX=0`, que sí escribe fuera). El formato del digest sube a 6 y `VERSION` a 2.4.0.
+
+| # | Sev. | Hallazgo → corrección |
+|---|---|---|
+| H1 | HIGH | tesseract recibía los bytes de la figura tal cual. Cuando el archivo no es una imagen, tesseract lo toma como una **lista de rutas** y hace OCR de cada una: una figura preparada metía en el digest el texto de imágenes ajenas al documento. Ahora cada figura se decodifica con PIL (con tope de píxeles) y se re-codifica como un PNG propio de doclens (`ocr_input`), y tesseract corre con `cwd` en la etapa. |
+| H2 | MEDIUM | Un stream de contenido de pocos KB con 300 k trazos hacía que `get_drawings()` y `find_tables()` consumieran GB de RAM. Ahora, por encima de `DOCLENS_MAX_PAGE_CONTENT_KB` (1024), la página omite dibujos y tablas y deja la nota "contenido de página enorme". Además hay un vigía de RSS (`DOCLENS_MAX_RSS_MB`, 3072) que corta con rc 9 también en macOS, donde `ulimit -v` no existe. |
+| H3 | MEDIUM | El tope de `DOCLENS_MAX_JOBS` se comprobaba sin lock: 8 Reads simultáneos lanzaban 8 procesos. Ahora se toma un lock con `mkdir` (huérfano tras 1 min) entre la comprobación y el pidfile. |
+| H4 | LOW | Una figura de más de 8 MB quedaba en el digest, y la exención del caché la dejaba leer (el API la rechaza). Ahora se guarda reducida: JPEG ≤ 8 MB, porque una imagen de ruido seguía pesando 11 MB como PNG. La exención del caché ya no cubre PDFs ni imágenes de más de 8 MB. |
+| H5 | LOW | Sin jq, una ruta con un surrogate (`\udcff`) o con bytes UTF-8 inválidos dejaba `FILE_PATH` vacío o hacía fallar `tr`, y el Read pasaba (fail-open). Ahora `FILE_PATH` se escribe con `surrogateescape`, `ext_of` usa `LC_ALL=C`, y si hay un `file_path` sin decodificar se bloquea. |
+| H6 | LOW | Sin python3, `$CACHE/../repo/x.inspect/big.png` se eximía por prefijo léxico. Ahora, sin ruta canónica, `/../` o `/./` anula la exención. |
+
+Además, en esta pasada:
+
+- **OpenCV:** `imdecode` reservaba memoria antes de cualquier tope. Ahora `OPENCV_IO_MAX_IMAGE_PIXELS` = `MAX_PAGE_PIXELS`.
+- **Modelo YuNet:** su sha256 se verifica una sola vez por corrida, no en cada figura.
+- **`.gitattributes`:** marca `*.onnx` como binario.
+
+**Caja de arena (macOS):** doc-guard lanza doclens con `sandbox-exec`. El proceso queda sin red y solo puede
+escribir en el caché (con su temporal propio `<caché>/tmp`, que recibe como `TMPDIR`) y en `/dev/null`,
+`/dev/stdout`, `/dev/stderr` y `/dev/tty*`. Así, un
+bug en PyMuPDF, tesseract u OpenCV no puede persistir nada fuera ni exfiltrar. Se evaluó antes de
+aplicarla: con PDF, OCR y caras da rc 0 en 1,3 s, la escritura fuera falla con EPERM y la red no resuelve.
+`DOCLENS_SANDBOX=0` la desactiva. Si la ruta del caché contiene `"` o `\`, se corre sin caja
+para no romper el perfil. `sandbox-exec` está marcado como deprecated por Apple, pero sigue
+funcionando y es lo que usan los navegadores. En Linux siguen los `ulimit` del envoltorio; la contención
+equivalente (bwrap o landlock) queda pendiente.
+
+### Revisión enfocada de la 4ª pasada (independiente, solo sobre su diff)
+
+Se reprodujeron 6 hallazgos y otros 2 quedaron como teóricos. Todos se corrigieron y se cubrieron en D29,
+que tiene 9 tests. 6 fallan con el código anterior a esta revisión. Los otros 3 son de regresión: el candado vivo se respeta,
+existe el temporal propio, y `TMPDIR` inexistente procesa igual.
+
+| # | Sev. | Hallazgo → corrección |
+|---|---|---|
+| R1 | HIGH | La corrección de H5 seguía siendo evadible. `surrogateescape` convertía `\udcff` en el byte 0xff, pero Node (quien hace el Read) y jq lo convierten en U+FFFD. El hook revisaba un nombre que APFS no admite, `-f` fallaba y un PDF renombrado a `x�.png` llegaba al modelo. Ahora los surrogates pasan a U+FFFD, igual que en Node. |
+| R2 | MEDIUM | La caja impedía crear `~/.cache` en una cuenta nueva. El hook fallaba cerrado para siempre ("caché inseguro"). Ahora el hook crea el caché (0700) antes de armar el perfil. |
+| R3 | MEDIUM | H2 se evadía con un Form XObject: `read_contents()` solo ve el `/Contents` de la página, y 300 k trazos dentro de un `/X0 Do` pasaban. Ahora `page_is_heavy` suma el `/Contents` y todos los XObjects que la página alcanza (`get_xobjects` es recursivo), midiendo cada stream una vez por documento. |
+| R4 | LOW | Una bomba de compresión en el contenido hacía que `read_contents` lanzara una excepción sin atrapar y tumbaba el documento entero. Ahora un stream ilegible marca como pesada solo esa página. |
+| R5 | LOW | El vigía de RSS depende del GIL: no puede cortar dentro de una sola llamada larga en C. Se documenta como el mejor esfuerzo posible; en Linux sigue el `ulimit -v` del hook, que es un límite duro. |
+| R6 | LOW | `save_reduced` decodificaba a resolución completa y no tenía tope de píxeles. Ahora revisa el tamaño real de la imagen y usa `draft()` y `thumbnail()` antes de `convert()`. |
+| R7 | LOW (teórico) | Romper un candado huérfano era una carrera de "ver viejo y borrar": dos esperas podían quedarse con el candado. Ahora el candado guarda el PID del dueño, y solo lo rompe quien logra borrar ESE archivo; un candado nuevo nunca se toca. Además, un hook muerto ya no deja el tope "ocupado" durante 1 minuto. |
+| R8 | LOW (teórico) | La caja permitía escribir en todo `$TMPDIR`, que es donde vive el estado del hook (pidfiles, candado). Ahora doclens recibe su propio `TMPDIR`, `<caché>/tmp`, y el perfil solo permite escribir en el caché. |
+
+Durante esta revisión, además, se encontraron y corrigieron dos tests que pasaban sin medir nada:
+- En `sh`, una redirección que falla en `:`, que es un builtin especial, termina el script. Un stub que
+  "intentaba escribir fuera" moría en ese primer intento y el test pasaba solo.
+- `cut -f1` sobre un mensaje de varias líneas nunca daba exactamente "2".
+
 ## Modelo de confianza (lo que NO se defiende)
 
 El código del repo y del toolbox se ejecuta: el venv, `doclens/sync.sh`, `requirements` y el `local_path`

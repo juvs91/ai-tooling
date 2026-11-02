@@ -12,3 +12,6 @@ scripts/* text eol=lf
 *.png binary
 *.jpg binary
 *.pdf binary
+
+# Modelos ONNX (ADR-0079): binarios, nunca conversión de fin de línea
+*.onnx binary

@@ -310,10 +310,11 @@ echo x >> "$T/slow.calls"; sleep 4
 d="\$DOCLENS_CACHE/\$({ sha256sum "\$2" 2>/dev/null || shasum -a 256 "\$2"; } | cut -d' ' -f1).inspect"; mkdir -p "\$d"; : > "\$d/index.md"; echo "INSPECT_DIR=\$d"
 EOF
 chmod +x "$C13/doclens/.venv/bin/python"; echo "grande.pdf" > "$T/grande.pdf"; : > "$T/slow.calls"
-S0=$SECONDS; R=$(dg "$C13" "$T/grande.pdf" DOCLENS_HOOK_WAIT=1); EL=$((SECONDS - S0))
+# DOCLENS_SANDBOX=0: el stub cuenta sus llamadas en $T, fuera del caché (la caja lo impediría)
+S0=$SECONDS; R=$(dg "$C13" "$T/grande.pdf" DOCLENS_HOOK_WAIT=1 DOCLENS_SANDBOX=0); EL=$((SECONDS - S0))
 case "$R" in "2|"*"reintenta el Read"*) ok "documento lento → bloquea con 'reintenta' (exit 2)" ;; *) bad "lento: ${R%%$'\n'*}" ;; esac
 [ "$EL" -le 3 ] && ok "respeta el plazo (${EL}s, no espera al proceso)" || bad "esperó ${EL}s"
-R=$(dg "$C13" "$T/grande.pdf" DOCLENS_HOOK_WAIT=1)
+R=$(dg "$C13" "$T/grande.pdf" DOCLENS_HOOK_WAIT=1 DOCLENS_SANDBOX=0)
 eq "2º Read mientras procesa → no lanza otro proceso" "$(wc -l < "$T/slow.calls" | tr -d ' ')" 1
 sleep 4
 R=$(dg "$C13" "$T/grande.pdf"); case "$R" in "2|"*pre-procesado*) ok "al terminar en segundo plano → digest listo" ;; *) bad "después: ${R%%$'\n'*}" ;; esac
@@ -731,6 +732,175 @@ PY
   fi
 else
   echo "  - omitido: sin doclens/.venv real (figuras, disco, SIGXCPU)"
+fi
+echo "══ D28: 4ª pasada de seguridad (ADR-0077) ══"
+C28=$(consumer); stubvenv "$C28/doclens/.venv"; bash "$SYNC" "$C28" >/dev/null 2>&1; mkdir -p "$T/s4"
+# H3: el tope de trabajos se respeta con muchos Reads en paralelo
+C29=$(consumer); cp -R "$TB/doclens" "$C29/doclens"; mkdir -p "$C29/doclens/.venv/bin"
+cat > "$C29/doclens/.venv/bin/python" <<EOF
+#!/bin/sh
+[ "\$1" = -c ] && exit 0
+sleep 3; d="\$DOCLENS_CACHE/\$({ sha256sum "\$2" 2>/dev/null || shasum -a 256 "\$2"; } | cut -d' ' -f1).inspect"; mkdir -p "\$d"; : > "\$d/index.md"; echo "INSPECT_DIR=\$d"
+EOF
+chmod +x "$C29/doclens/.venv/bin/python"; TD7="$T/tmpd7"; mkdir -p "$TD7"
+for i in 1 2 3 4 5 6 7 8; do echo "par-$i" > "$T/s4/par$i.pdf"; done
+for i in 1 2 3 4 5 6 7 8; do dgj "$C29" "$T/s4/par$i.pdf" TMPDIR="$TD7" DOCLENS_HOOK_WAIT=1 >/dev/null & done; wait
+MAXV=0; for k in 1 2 3 4 5 6 7 8 9 10; do
+  n=$(ps -axo args | grep -c "[d]oclens-bg.*$T/s4/par"); [ "$n" -gt "$MAXV" ] && MAXV=$n; sleep 0.2
+done
+[ "$MAXV" -le 3 ] && ok "8 Reads en paralelo con DOCLENS_MAX_JOBS=3 → como mucho 3 procesos (vistos: $MAXV)" || bad "tope rebasado: $MAXV procesos"
+sleep 3
+# H5: sin jq, una ruta con surrogate (\udcff) no pasa a ciegas
+mkdir -p "$T/s4/sinjq"; for d in /usr/bin /bin; do for b in "$d"/*; do n=${b##*/}; [ "$n" = jq ] || [ -e "$T/s4/sinjq/$n" ] || ln -s "$b" "$T/s4/sinjq/$n"; done; done
+ln -sf "$(command -v python3)" "$T/s4/sinjq/python3"
+# APFS (macOS) rechaza nombres con UTF-8 inválido; ext4 (Linux) los admite: si se puede, se crea
+python3 -c "open(b'$T/s4/x\xff.pdf', 'wb').write(b'%PDF-1.4 x')" 2>/dev/null
+R=$(printf '%s' '{"tool_name":"Read","tool_input":{"file_path":"'"$T/s4/x"'\udcff.pdf"}}' | PATH="$T/s4/sinjq" CLAUDE_PROJECT_DIR="$C28" "$BASH" "$H/doc-guard.sh" >/dev/null 2>&1; echo $?)
+eq "sin jq: ruta con surrogate (\\udcff) → bloqueada" "$R" 2
+# H6: sin python3 (pero con jq), "$CACHE/../repo/x.inspect/big.png" no se exime léxicamente
+mkdir -p "$T/s4/sinpy"; for d in /usr/bin /bin; do for b in "$d"/*; do n=${b##*/}; case "$n" in python3|python3.*) continue ;; esac; [ -e "$T/s4/sinpy/$n" ] || ln -s "$b" "$T/s4/sinpy/$n"; done; done
+[ -e "$T/s4/sinpy/jq" ] || ln -s "$(command -v jq)" "$T/s4/sinpy/jq"
+mkdir -p "$T/s4/repo/a.inspect"; dd if=/dev/zero of="$T/s4/repo/a.inspect/big.png" bs=1048576 count=9 2>/dev/null
+R=$(printf '{"tool_name":"Read","tool_input":{"file_path":"%s/../s4/repo/a.inspect/big.png"}}' "$DOCLENS_CACHE" | PATH="$T/s4/sinpy" CLAUDE_PROJECT_DIR="$C28" "$BASH" "$H/doc-guard.sh" >/dev/null 2>&1; echo $?)
+eq "sin python3: \$CACHE/../…/x.inspect/big.png → no exento (interceptado)" "$R" 2
+if $REAL; then
+  # H1: tesseract solo recibe PNG generados por doclens, nunca bytes del documento
+  if command -v tesseract >/dev/null 2>&1; then
+    mkdir -p "$T/s4/spy"; printf '#!/bin/sh\n[ "$1" = --list-langs ] && exec %s "$@"\nhead -c 4 "$1" | od -An -c | tr -d " \\n" >> %s/spy.log; echo >> %s/spy.log\nexec %s "$@"\n' "$(command -v tesseract)" "$T/s4" "$T/s4" "$(command -v tesseract)" > "$T/s4/spy/tesseract"; chmod +x "$T/s4/spy/tesseract"
+    "$REAL_PY" -c "import fitz; s=fitz.open(); p=s.new_page(width=600,height=200); p.insert_text((40,110),'HOLA MUNDO',fontsize=40); j=p.get_pixmap(dpi=100).tobytes('jpeg'); d=fitz.open(); q=d.new_page(); q.insert_image(fitz.Rect(50,50,350,150), stream=j); d.save('$T/s4/fig.pdf')"
+    : > "$T/s4/spy.log"; env PATH="$T/s4/spy:$PATH" "$REAL_PY" "$AI_TOOLING/doclens/doclens.py" "$T/s4/fig.pdf" >/dev/null 2>&1
+    [ -s "$T/s4/spy.log" ] && ! grep -vq '^211PNG' "$T/s4/spy.log" && ok "tesseract solo recibe PNG propios (nunca los bytes de la figura)" || bad "tesseract recibió: $(sort -u "$T/s4/spy.log" | tr '\n' ' ')"
+  else
+    echo "  - omitido: sin tesseract (H1)"
+  fi
+  # H2: contenido de página enorme → sin dibujos/tablas, memoria acotada; vigía de RSS
+  "$REAL_PY" - "$T/s4/trazos.pdf" <<'PY'
+import fitz, sys, zlib
+d = fitz.open(); p = d.new_page()
+xref = d.get_new_xref()
+d.update_object(xref, "<< >>")
+d.update_stream(xref, b"0 0 m 1 1 l S\n" * 300000)
+p.set_contents(xref)
+d.save(sys.argv[1], garbage=0)
+PY
+  S0=$SECONDS; "$REAL_PY" "$AI_TOOLING/doclens/doclens.py" "$T/s4/trazos.pdf" >/dev/null 2>&1
+  grep -q 'contenido de página enorme' "$(dgst "$T/s4/trazos.pdf")/index.md" 2>/dev/null && [ $((SECONDS - S0)) -le 20 ] \
+    && ok "300k trazos en pocos KB → dibujos/tablas omitidos ($((SECONDS - S0))s)" || bad "contenido enorme procesado entero"
+  rm -rf "$(dgst "$T/s4/trazos.pdf")"
+  DOCLENS_MAX_PAGE_CONTENT_KB=999999 DOCLENS_MAX_RSS_MB=300 "$REAL_PY" "$AI_TOOLING/doclens/doclens.py" "$T/s4/trazos.pdf" >/dev/null 2>"$T/s4/rss.err"; RC=$?
+  [ "$RC" = 9 ] && grep -q 'memoria excedida' "$T/s4/rss.err" && ok "vigía de memoria corta el proceso (DOCLENS_MAX_RSS_MB)" || bad "sin vigía de memoria: rc=$RC"
+  # H4: figura de más de 8 MB → guardada reducida; y en el caché una imagen > 8 MB no está exenta
+  "$REAL_PY" -c "
+import fitz, os
+from PIL import Image
+import io
+im = Image.frombytes('RGB', (3000, 3000), os.urandom(3000 * 3000 * 3)); b = io.BytesIO(); im.save(b, format='JPEG', quality=95)
+d = fitz.open(); p = d.new_page(); p.insert_image(p.rect, stream=b.getvalue()); d.save('$T/s4/bigfig.pdf')"
+  "$REAL_PY" "$AI_TOOLING/doclens/doclens.py" "$T/s4/bigfig.pdf" >/dev/null 2>&1; BF="$(dgst "$T/s4/bigfig.pdf")"
+  BIG=$(find "$BF/figures" -type f -size +16384 2>/dev/null | head -1)
+  [ -d "$BF/figures" ] && [ -z "$BIG" ] && ok "figura de más de 8 MB → guardada reducida" || bad "figura > 8 MB en el digest: $BIG"
+  dd if=/dev/zero of="$DOCLENS_CACHE/x.inspect.big.png" bs=1 count=0 2>/dev/null
+  mkdir -p "$DOCLENS_CACHE/$(printf 'a%.0s' $(seq 1 64)).inspect"; cp "$T/s4/repo/a.inspect/big.png" "$DOCLENS_CACHE/$(printf 'a%.0s' $(seq 1 64)).inspect/huge.png"
+  R=$(dg "$C28" "$DOCLENS_CACHE/$(printf 'a%.0s' $(seq 1 64)).inspect/huge.png" | cut -d'|' -f1)
+  eq "imagen > 8 MB dentro del caché → no exenta (interceptada)" "$R" 2
+  # OpenCV: no decodifica imágenes más grandes que el tope de píxeles
+  "$REAL_PY" -c "import sys; sys.path.insert(0, '$AI_TOOLING/doclens'); import doclens, os; sys.exit(0 if os.environ.get('OPENCV_IO_MAX_IMAGE_PIXELS') == str(doclens.MAX_PAGE_PIXELS) else 1)" \
+    && ok "OpenCV con OPENCV_IO_MAX_IMAGE_PIXELS = tope de doclens" || bad "OpenCV sin tope de píxeles"
+else
+  echo "  - omitido: sin doclens/.venv real (H1, H2, H4, OpenCV)"
+fi
+# Caja de arena (macOS): el proceso de doclens no puede escribir fuera del caché ni usar la red
+if [ "$(uname)" = Darwin ] && command -v sandbox-exec >/dev/null 2>&1; then
+  cat > "$T/s4/escapa" <<EOF
+#!/bin/sh
+[ "\$1" = -c ] && exit 0
+echo fuga > "$T/s4/FUGA" 2>/dev/null
+python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9', timeout=2)" 2>/dev/null && echo red > "$T/s4/RED"
+d="\$DOCLENS_CACHE/\$({ sha256sum "\$2" 2>/dev/null || shasum -a 256 "\$2"; } | cut -d' ' -f1).inspect"; mkdir -p "\$d"; : > "\$d/index.md"; echo "INSPECT_DIR=\$d"
+EOF
+  chmod +x "$T/s4/escapa"; echo sbx > "$T/s4/sbx.pdf"
+  R=$(dg "$C28" "$T/s4/sbx.pdf" DOCLENS_PYTHON="$T/s4/escapa")
+  case "$R" in "2|"*pre-procesado*) ok "dentro de la caja de arena doclens sigue escribiendo su digest" ;; *) bad "caja de arena rompió doclens: ${R%%$'\n'*}" ;; esac
+  [ ! -e "$T/s4/FUGA" ] && ok "caja de arena: no puede escribir fuera del caché" || bad "escribió fuera del caché"
+  echo sbx2 > "$T/s4/sbx2.pdf"; rm -f "$T/s4/FUGA"
+  dg "$C28" "$T/s4/sbx2.pdf" DOCLENS_PYTHON="$T/s4/escapa" DOCLENS_SANDBOX=0 >/dev/null
+  [ -e "$T/s4/FUGA" ] && ok "DOCLENS_SANDBOX=0 la desactiva (el control prueba que el test mide algo)" || bad "sin caja tampoco escribió: el test no mide nada"
+else
+  echo "  - omitido: sin sandbox-exec (no es macOS)"
+fi
+
+echo "══ D29: revisión enfocada de la 4ª pasada (ADR-0077) ══"
+# R1: sin jq, un surrogate suelto se interpreta como U+FFFD (igual que Node, quien lee de verdad)
+printf '%%PDF-1.4 x' > "$T/s4/xFFFD.png"; mv "$T/s4/xFFFD.png" "$T/s4/x$(printf '\357\277\275').png"
+R=$(printf '%s' '{"tool_name":"Read","tool_input":{"file_path":"'"$T/s4/x"'\udcff.png"}}' | PATH="$T/s4/sinjq" CLAUDE_PROJECT_DIR="$C28" "$BASH" "$H/doc-guard.sh" >/dev/null 2>&1; echo $?)
+eq "sin jq: PDF disfrazado de .png con surrogate (\\udcff → U+FFFD) → interceptado" "$R" 2
+# R7: candado huérfano (dueño muerto) se rompe enseguida; uno vivo y fresco se respeta
+C30=$(consumer); stubvenv "$C30/doclens/.venv"; bash "$SYNC" "$C30" >/dev/null 2>&1
+SD30="$TMPDIR/doclens-hook-$(id -u)"; mkdir -p "$SD30"; chmod 700 "$SD30"
+mkdir -p "$SD30/jobs.lock"; : > "$SD30/jobs.lock/999999"; echo lk > "$T/s4/lk.pdf"
+S0=$SECONDS; R=$(dg "$C30" "$T/s4/lk.pdf" DOCLENS_SANDBOX=0 | head -1 | cut -d'|' -f1)
+[ "$R" = 2 ] && [ $((SECONDS - S0)) -le 2 ] && [ ! -e "$SD30/jobs.lock" ] && ok "candado de un hook muerto → se rompe sin esperar" || bad "candado huérfano: rc=$R, $((SECONDS - S0))s"
+rm -f "$SD30/jobs.lock/"*; rmdir "$SD30/jobs.lock" 2>/dev/null   # aislado: con el código viejo queda
+sleep 30 & LIVE=$!; mkdir -p "$SD30/jobs.lock"; : > "$SD30/jobs.lock/$LIVE"; echo lk2 > "$T/s4/lk2.pdf"
+R=$(dg "$C30" "$T/s4/lk2.pdf" DOCLENS_SANDBOX=0)
+[ -e "$SD30/jobs.lock/$LIVE" ] && case "$R" in *Reintenta*) true ;; *) false ;; esac && ok "candado de un dueño vivo → se respeta (ocupado)" || bad "rompió un candado vivo: ${R%%$'\n'*}"
+kill "$LIVE" 2>/dev/null; rm -f "$SD30/jobs.lock/"*; rmdir "$SD30/jobs.lock" 2>/dev/null
+if [ "$(uname)" = Darwin ] && command -v sandbox-exec >/dev/null 2>&1; then
+  # R2: cuenta nueva sin ~/.cache → la caja no impide crear el caché
+  echo nh > "$T/s4/nh.pdf"
+  R=$(dg "$C28" "$T/s4/nh.pdf" DOCLENS_CACHE="$T/s4/home-nuevo/.cache/doclens")
+  case "$R" in "2|"*pre-procesado*) ok "caja de arena con el caché aún sin crear → funciona" ;; *) bad "caché nuevo en la caja: ${R%%$'\n'*}" ;; esac
+  # R8: doclens no puede tocar el estado del hook (pidfiles, candado) ni el resto de $TMPDIR
+  cat > "$T/s4/toca" <<EOF
+#!/bin/sh
+# echo y no ":" — en sh, una redirección que falla en un builtin especial termina el script
+[ "\$1" = -c ] && exit 0
+echo x > "$TMPDIR/doclens-hook-$(id -u)/TOCADO" 2>/dev/null
+echo x > "$TMPDIR/TOCADO2" 2>/dev/null
+echo x > "\$TMPDIR/propio" 2>/dev/null
+d="\$DOCLENS_CACHE/\$({ sha256sum "\$2" 2>/dev/null || shasum -a 256 "\$2"; } | cut -d' ' -f1).inspect"; mkdir -p "\$d"; : > "\$d/index.md"; [ -e "\$TMPDIR/propio" ] && : > "\$d/TMP-OK"; echo "INSPECT_DIR=\$d"
+EOF
+  chmod +x "$T/s4/toca"; echo tc > "$T/s4/tc.pdf"
+  R=$(dg "$C28" "$T/s4/tc.pdf" DOCLENS_PYTHON="$T/s4/toca")
+  [ ! -e "$TMPDIR/doclens-hook-$(id -u)/TOCADO" ] && [ ! -e "$TMPDIR/TOCADO2" ] && ok "caja: doclens no puede escribir en el estado del hook ni en \$TMPDIR" || bad "doclens tocó el estado del hook"
+  [ -e "$(dgst "$T/s4/tc.pdf")/TMP-OK" ] && ok "caja: doclens sí tiene un temporal propio (\$TMPDIR apunta a él)" || bad "sin temporal propio en la caja"
+  # R8: $TMPDIR inexistente → sin caja, pero el PDF se procesa (no "¿PDF dañado?")
+  echo nt > "$T/s4/nt.pdf"
+  R=$(dg "$C28" "$T/s4/nt.pdf" TMPDIR="$T/s4/no-existe")
+  case "$R" in "2|"*pre-procesado*) ok "TMPDIR inexistente → se procesa igual (sin caja, no falla el perfil)" ;; *) bad "TMPDIR inexistente: ${R%%$'\n'*}" ;; esac
+fi
+if $REAL; then
+  # R3: trazos dentro de un Form XObject ("/X0 Do") también cuentan como contenido de página
+  "$REAL_PY" - "$T/s4/xobj.pdf" <<'PY'
+import fitz, sys
+d = fitz.open(); p = d.new_page(); p.insert_text((10, 10), "x")
+x = d.get_new_xref()
+d.update_object(x, "<< /Type /XObject /Subtype /Form /BBox [0 0 600 800] /Resources << >> >>")
+d.update_stream(x, b"".join(b"%d %d 1 1 re f\n" % (i % 500, (i // 500) % 700) for i in range(300000)))
+c = p.get_contents()[0]; d.update_stream(c, b"q /X0 Do Q"); p.set_contents(c)
+d.xref_set_key(p.xref, "Resources", "<< /XObject << /X0 %d 0 R >> >>" % x)
+d.save(sys.argv[1], deflate=True)
+PY
+  "$REAL_PY" "$AI_TOOLING/doclens/doclens.py" "$T/s4/xobj.pdf" >/dev/null 2>&1
+  grep -q 'contenido de página enorme' "$(dgst "$T/s4/xobj.pdf")/index.md" 2>/dev/null \
+    && ok "300k trazos dentro de un Form XObject → dibujos/tablas omitidos" || bad "XObject pesado procesado entero"
+  # R4 y R6: un stream que no se puede descomprimir marca la página (no tumba el documento);
+  # save_reduced respeta el tope de píxeles con la imagen REAL
+  "$REAL_PY" - "$AI_TOOLING/doclens" <<'PY' && ok "stream ilegible → página pesada; save_reduced con tope de píxeles" || bad "page_is_heavy/save_reduced sin acotar"
+import io, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, sys.argv[1]); import doclens
+from PIL import Image
+class Doc:
+    def xref_stream(self, x): raise RuntimeError("compression bomb detected")
+class Page:
+    def get_contents(self): return [7]
+    def get_xobjects(self): return []
+assert doclens.page_is_heavy(Doc(), Page(), {}) is True
+b = io.BytesIO(); Image.new("RGB", (400, 400)).save(b, format="JPEG")
+doclens.MAX_PAGE_PIXELS = 100 * 100
+assert doclens.save_reduced(b.getvalue(), Path(tempfile.mkdtemp()) / "r.jpg") is False
+PY
 fi
 cleanup_bg
 echo ""
