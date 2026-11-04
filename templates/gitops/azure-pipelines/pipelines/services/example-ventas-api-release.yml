@@ -17,7 +17,6 @@ stages:
     parameters:
       serviceName: ventas-api
       servicePath: ventas/api
-      dependsOn: [_shared/libs/auth]
       acrName: metalsaacr                      # TODO
       imageRepository: ventas/api
       azureSubscription: sc-azure-acr-wif      # TODO

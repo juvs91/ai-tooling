@@ -18,13 +18,17 @@ pipeline sandbox puede validar), pero atrapa los errores baratos:
   - cada `$(step.var)` y `stageDependencies.S.j.outputs['step.var']` apunta a un
     step con ese `name:`;
   - los pipelines de ejemplo pasan `ci-image.sh check-paths` (trigger.paths cubre
-    servicePath + dependsOn).
+    servicePath + las libs que deps.py lee del manifiesto, ADR-0080), sobre el
+    monorepo de ejemplo del simulador;
+  - ningún template recibe ya `dependsOn` de libs (la lista vive en el manifiesto).
 """
 
 from __future__ import annotations
 
 import re
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Iterator
@@ -32,6 +36,10 @@ from typing import Any, Iterator
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT / "tools" / "azure-sim"))
+
+from azsim import fixture  # noqa: E402
+
 BASE = ROOT / "templates" / "gitops" / "azure-pipelines" / "pipelines"
 FILES = sorted(BASE.rglob("*.yml"))
 
@@ -196,20 +204,37 @@ class TestAzureTemplates(unittest.TestCase):
                     self.assertIn(ref_step, names[jobname], f"el job {jobname} no tiene step name: {ref_step}")
 
     def test_example_pipelines_cover_dependencies(self) -> None:
-        for f in sorted((BASE / "services").glob("*-ci.yml")) + sorted((BASE / "libs").glob("*-ci.yml")):
-            doc = _load(f)
-            for use in _template_uses(doc):
-                params = use.get("parameters") or {}
-                path = params.get("servicePath") or params.get("workingDirectory")
-                if not path:
-                    continue
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            fixture.write(repo)
+            for cmd in (["init", "-q", "-b", "main"], ["add", "-A"],
+                        ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "fixture"]):
+                subprocess.run(["git", *cmd], cwd=repo, check=True, capture_output=True)
+            for f in sorted((BASE / "services").glob("*-ci.yml")) + sorted((BASE / "libs").glob("*-ci.yml")):
+                for use in _template_uses(_load(f)):
+                    params = use.get("parameters") or {}
+                    path = params.get("servicePath") or params.get("workingDirectory")
+                    if not path:
+                        continue
+                    with self.subTest(file=f.relative_to(BASE), template=use["template"]):
+                        deps = subprocess.run(["python3", str(ROOT / "scripts" / "deps.py"), "paths", path],
+                                              cwd=repo, capture_output=True, text=True)
+                        self.assertEqual(deps.returncode, 0, deps.stderr)
+                        r = subprocess.run(
+                            ["bash", str(ROOT / "scripts" / "ci-image.sh"), "check-paths", str(f),
+                             *deps.stdout.split()],
+                            capture_output=True, text=True,
+                        )
+                        self.assertEqual(r.returncode, 0, r.stderr)
+            svc = subprocess.run(["python3", str(ROOT / "scripts" / "deps.py"), "libs", "ventas/api"],
+                                 cwd=repo, capture_output=True, text=True)
+            self.assertEqual(svc.stdout.split(), ["_shared/libs/auth"])
+
+    def test_no_dependson_lib_parameter(self) -> None:
+        for f in FILES:
+            for use in _template_uses(_load(f)):
                 with self.subTest(file=f.relative_to(BASE), template=use["template"]):
-                    r = subprocess.run(
-                        ["bash", str(ROOT / "scripts" / "ci-image.sh"), "check-paths", str(f), path,
-                         *params.get("dependsOn", [])],
-                        capture_output=True, text=True,
-                    )
-                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.assertNotIn("dependsOn", use.get("parameters") or {})
 
     def test_release_pipelines_tag_only(self) -> None:
         for f in sorted(BASE.glob("*/*-release.yml")):

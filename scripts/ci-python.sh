@@ -7,7 +7,8 @@
 # Entradas (env:):
 #   CI_WORKING_DIRECTORY  ej: ventas/api
 #   CI_PIPELINE_FILE      YAML del pipeline (check-paths compara trigger.paths)
-#   CI_DEPENDS_ON         libs compartidas separadas por espacio
+#   CI_DEPENDS_ON         opcional: libs separadas por espacio (templates anteriores a
+#                         ADR-0080). Vacío = se leen del manifiesto con deps.py.
 #   CI_UV_VERSION         vacío = última
 # Predefinida: AGENT_TEMPDIRECTORY (destino del JUnit).
 #
@@ -20,11 +21,20 @@ source "$(dirname "${BASH_SOURCE[0]}")/ci-lib.sh"
 
 cmd_check_paths() {
   ci_require CI_PIPELINE_FILE CI_WORKING_DIRECTORY
-  local deps; mapfile -t deps < <(ci_words CI_DEPENDS_ON)
+  local deps out
+  if [[ -n "${CI_DEPENDS_ON:-}" ]]; then
+    mapfile -t deps < <(ci_words CI_DEPENDS_ON)
+  else
+    out=$(python3 "$CI_DIR/deps.py" libs "$CI_WORKING_DIRECTORY") \
+      || ci_die "no se pudieron leer las dependencias de $CI_WORKING_DIRECTORY (deps.py)"
+    mapfile -t deps < <(printf '%s' "$out" | grep -v '^$')
+  fi
   # ci-image.sh check-paths lee el YAML con PyYAML; el python del toolcache no lo trae
   python3 -c 'import yaml' 2>/dev/null \
     || python3 -m pip install --disable-pip-version-check -q pyyaml
-  bash "$CI_DIR/ci-image.sh" check-paths "$CI_PIPELINE_FILE" "$CI_WORKING_DIRECTORY" "${deps[@]}"
+  bash "$CI_DIR/ci-image.sh" check-paths "$CI_PIPELINE_FILE" "$CI_WORKING_DIRECTORY" ${deps[@]+"${deps[@]}"} \
+    || ci_die "trigger.paths.include de $CI_PIPELINE_FILE no cubre las dependencias. "\
+"Bloque correcto: python3 scripts/deps.py trigger-block $CI_WORKING_DIRECTORY"
 }
 
 cmd_install_uv() {

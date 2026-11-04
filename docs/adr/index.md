@@ -47,3 +47,4 @@
 | [ADR-0077](ADR-0077-doclens-seguridad.md) | Seguridad de doclens: digests en caché por usuario (sin symlinks ni digests plantados), sin shell en OpenCode, límites de recursos, dependencias con hashes | Accepted | 2026-11-02 | Harness |
 | [ADR-0078](ADR-0078-doclens-ocr-con-posiciones.md) | doclens 2.1.0: OCR completo con cajas por palabra (también en imágenes sueltas), spa+eng y versión de formato del digest | Accepted | 2026-11-02 | Harness |
 | [ADR-0079](ADR-0079-doclens-caras-yunet.md) | doclens 2.3.0: cajas de caras con OpenCV YuNet (modelo con sha256 verificado), formato 5 y venv que se rehace si cambia el lock | Accepted | 2026-11-02 | Harness |
+| [ADR-0080](ADR-0080-lector-unico-dependencias.md) | Lector único de dependencias (`scripts/deps.py`) desde el manifiesto de cada servicio: sparse checkout, CI de Azure y where-used | Accepted | 2026-11-04 | GitOps |

@@ -65,6 +65,28 @@ repo/
 
 **Regla de shared:** si solo un proyecto la usa, no es shared. Va dentro del proyecto.
 
+### Cómo se declara que un proyecto usa una lib (ADR-0080)
+
+Una sola vez, por ruta, en el manifiesto del proyecto. `scripts/deps.py` lo lee de git y de ahí
+salen el sparse checkout, el hash de imagen del CI, la validación de `trigger.paths` y el where-used.
+
+| Manifiesto | Declaración |
+|---|---|
+| `pyproject.toml` | `[tool.uv.sources] pkg = { path = "../../shared/libs/auth" }` o `{ workspace = true }` |
+| `package.json` | `"pkg": "file:../../shared/libs/auth"` o `"workspace:*"` |
+| `go.mod` | `replace mod => ../../shared/libs/auth` |
+| `deps.txt` | una ruta por línea (solo carpetas sin manifiesto) |
+
+La convención de nombres (`@company/<lib>`, `company-<lib>`) ya no basta: sin la fuente local
+declarada, la lib no se detecta. Requiere Python >= 3.11.
+
+```bash
+python3 scripts/deps.py paths projects/proyecto-a          # proyecto + libs (transitivas)
+python3 scripts/deps.py consumers shared/libs/auth         # where-used
+python3 scripts/deps.py trigger-block projects/proyecto-a  # bloque trigger.paths (Azure)
+python3 scripts/deps.py policy-filter projects/proyecto-a  # filtro de la policy de PR
+```
+
 ---
 
 ## Tag naming
@@ -137,12 +159,10 @@ cd monorepo
 ```bash
 ./scripts/release.sh init-multi shared/libs/auth
 # baja auth (y solo auth) — funciona sin ser consumidor de ningún proyecto (fix ADR-0049)
-#
-# IMPORTANTE: esto NO descubre automáticamente qué proyectos consumen auth — no existe
-# esa función (shared_deps_of() solo resuelve proyecto → sus shared deps, no al revés).
-# Si necesitas probar que tu cambio no rompe consumers, agrégalos tú manualmente:
-./scripts/release.sh add proyecto-a   # si sabes que proyecto-a consume auth
-./scripts/release.sh add proyecto-b   # etc.
+
+# ¿Quién usa auth? (where-used, ADR-0080 — sale de los manifiestos)
+./scripts/release.sh consumers shared/libs/auth
+# → imprime los proyectos y el comando `work` para bajar la lib con todos ellos
 ```
 
 ### Sabor 3: proyecto + toco shared
@@ -204,7 +224,10 @@ git push origin hotfix/proyecto-a/fix-critico
 |----------|---------|---------------|
 | `GITOPS_REMOTE` | auto-detect (remote de tu organización configurado en el script > `origin` > `upstream`) | Repo con remote no estándar |
 | `GITOPS_TRUNK_BRANCH` | `main` | Repo que aún usa `master` |
-| `GITOPS_SCOPE` | configurable — ver `.env` | Scope de paquetes de tu organización |
+| `GITOPS_PROJECTS_DIR` | `projects` | Proyectos en otra carpeta (`.` = raíz, ej. layout Azure `<iniciativa>/<servicio>`) |
+| `GITOPS_PROJECT_MAP` | — | `nombre:carpeta,...` cuando el nombre no coincide con la carpeta |
+| `GITOPS_SHARED_DIR` | `shared/libs` | Libs en otra carpeta (layout Azure: `_shared/libs`) |
+| `GITOPS_SCOPE` | configurable — ver `.env` | Scope de paquetes (lo usa `gitops-init.sh`; `release.sh` ya no, ADR-0080) |
 
 ```bash
 # Ejemplo para repo con master y remote no estándar
@@ -393,8 +416,8 @@ Para instalar `release.sh` manualmente sin el bootstrap:
 
 ```bash
 mkdir -p scripts
-cp /ruta/a/ai-tooling/scripts/release.sh scripts/
-chmod +x scripts/release.sh
+cp /ruta/a/ai-tooling/scripts/release.sh /ruta/a/ai-tooling/scripts/deps.py scripts/
+chmod +x scripts/release.sh scripts/deps.py
 export GITOPS_SCOPE="@mi-empresa"   # scope de paquetes de tu organización
 ```
 

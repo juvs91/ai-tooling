@@ -12,7 +12,7 @@ AI_TOOLING = Path(__file__).resolve().parents[3]
 TEMPLATES = AI_TOOLING / "templates" / "gitops" / "azure-pipelines" / "pipelines"
 SCRIPTS = AI_TOOLING / "scripts"
 CI_SCRIPTS = ("ci-lib.sh", "ci-service.sh", "ci-python.sh", "ci-pylib.sh", "ci-image.sh", "ci-acr.sh",
-              "ci_pyproject.py")
+              "ci_pyproject.py", "deps.py")
 
 SERVICE = {
     "ventas/api/pyproject.toml": """\
@@ -20,10 +20,14 @@ SERVICE = {
 name = "ventas-api"
 version = "1.0.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["metalsa-auth"]
 
 [dependency-groups]
 dev = []
+
+# Fuente única de "qué libs usa el servicio" (ADR-0080): scripts/deps.py lee esto.
+[tool.uv.sources]
+metalsa-auth = { path = "../../_shared/libs/auth", editable = true }
 """,
     "ventas/api/ventas_api.py": '''\
 """Servicio de ejemplo del simulador."""

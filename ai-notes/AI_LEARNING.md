@@ -1854,3 +1854,16 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
 - **Lección:** el caché de prueba debe crearse con 0700, porque doclens rechaza un caché abierto (por diseño).
 - **Pruebas:** D30 (11 tests); macOS 408 de 408; Linux GNU, busybox y git 2.22: 351 de 351 cada uno.
 
+
+## 2026-11-04 · Lector único de dependencias (`scripts/deps.py`, ADR-0080)
+
+- **Por qué:** la lista "qué libs usa un servicio" estaba copiada a mano en `trigger.paths`, `dependsOn` (×3) y la policy de Azure. `shared_deps_of()` la adivinaba por convención de nombres, no existía where-used y `release.sh` tenía `shared/libs` fijo (Azure usa `_shared/libs`).
+- **Decisión:** el usuario prefirió consumir las libs desde el monorepo, sin versiones publicadas. La fuente única es el manifiesto nativo, con la dependencia declarada por ruta: uv sources, `file:`/`workspace:` en package.json, `replace` en go.mod, o `deps.txt`. `deps.py` lo lee de git (no del disco), sigue la cadena y alimenta sparse checkout, hash de imagen, check de trigger y `release.sh consumers`.
+- **Lección:** `mapfile < <(cmd)` y `while … done < <(cmd)` se tragan el exit code de `cmd`. Para que un fallo de `deps.py` detenga el step, captura con `out=$(cmd) || die` y luego parte la salida.
+- **Lección:** leer el manifiesto de `HEAD:<ruta>` en vez del disco resuelve dos cosas: el servicio aún no materializado por sparse checkout, y el release que debe usar las dependencias del tag (`--ref`).
+- **Lección:** Docker Desktop no monta archivos de `/Volumes/case-sensitive`: el `-v` llega vacío y el simulador falla al montar `agent/az`. Para correr tests en contenedor, manda el árbol con `tar | docker run -i`, o corre el simulador desde una copia en `$HOME`.
+- **Pruebas:**
+  - Linux (python:3.12): 154 de 154 unit tests, incluidos 18 nuevos de `test_deps.py`.
+  - macOS: los mismos 9 fallos que en `master` (bash 3.2 sin `mapfile`, sin PyYAML local); no son regresiones.
+  - Simulador (desde una copia en `$HOME`): el run de PR pasa checkout, "Validar trigger.paths vs dependencias del manifiesto", uv, ruff, pytest y "Hash de contenido". Se detiene en `docker build` por `permission denied` a `/var/run/docker.sock` dentro del agente, que es un problema del entorno. Los otros escenarios no se corrieron.
+- **Pendiente:** portar `deps.py` y el nuevo `shared_deps_of` a `commons` (contrato compartido); correr el simulador completo donde el agente tenga acceso a docker.sock.

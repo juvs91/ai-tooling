@@ -19,9 +19,6 @@ parameters:
     type: string
   - name: servicePath          # ej: ventas/api
     type: string
-  - name: dependsOn            # misma lista que trigger.paths.include (sin servicePath)
-    type: object
-    default: []
   - name: acrName              # nombre corto del ACR, ej: metalsaacr
     type: string
   - name: imageRepository      # repositorio en ACR, ej: ventas/api
@@ -62,7 +59,6 @@ jobs:
       # Entradas de scripts/ci-service.sh (las variables del job llegan como env)
       CI_SERVICE_NAME: ${{ parameters.serviceName }}
       CI_SERVICE_PATH: ${{ parameters.servicePath }}
-      CI_DEPENDS_ON: ${{ join(' ', parameters.dependsOn) }}
       CI_ACR_NAME: ${{ parameters.acrName }}
       CI_IMAGE_REPOSITORY: ${{ parameters.imageRepository }}
       CI_DOCKERFILE: ${{ parameters.dockerfile }}

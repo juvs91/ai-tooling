@@ -8,7 +8,8 @@
 # Entradas por variables de entorno (el `env:` de cada step del YAML):
 #   CI_SERVICE_NAME      prefijo del tag git, ej: ventas-api
 #   CI_SERVICE_PATH      ej: ventas/api
-#   CI_DEPENDS_ON        libs compartidas separadas por espacio, ej: "_shared/libs/auth"
+#   CI_DEPENDS_ON        opcional: libs separadas por espacio (templates anteriores a ADR-0080).
+#                        Vacío = se leen del manifiesto del servicio con deps.py.
 #   CI_ACR_NAME, CI_IMAGE_REPOSITORY, CI_BUILD_CONTEXT (default .)
 #   CI_DOCKERFILE        vacío = <CI_SERVICE_PATH>/Dockerfile
 #   CI_CTX, CI_TAG_*, CI_SOURCE, CI_NEEDS_BUILD, CI_IMAGE_TAG, CI_ENV, CI_IMAGE_REF:
@@ -38,8 +39,26 @@ ACR="$CI_DIR/ci-acr.sh"
 
 _dockerfile() { printf '%s' "${CI_DOCKERFILE:-$CI_SERVICE_PATH/Dockerfile}"; }
 
-# Rutas que definen el contenido de la imagen: servicio + libs
-_paths() { printf '%s\n' "$CI_SERVICE_PATH"; ci_words CI_DEPENDS_ON; }
+# Rutas que definen el contenido de la imagen: servicio + libs, tal como estaban en
+# <ref> (default HEAD). Fuente: el manifiesto del servicio vía deps.py (ADR-0080);
+# CI_DEPENDS_ON, si viene, gana (pipelines con templates anteriores).
+_paths() { # [ref]
+  if [[ -n "${CI_DEPENDS_ON:-}" ]]; then
+    printf '%s\n' "$CI_SERVICE_PATH"; ci_words CI_DEPENDS_ON; return
+  fi
+  python3 "$CI_DIR/deps.py" paths "$CI_SERVICE_PATH" --ref "${1:-HEAD}"
+}
+
+# _paths_into <ref>... — llena el arreglo global `paths` con la unión de _paths en
+# cada ref. Falla el step si deps.py falla (mapfile < <(...) se tragaría el error).
+_paths_into() {
+  local out="" ref one
+  for ref in "$@"; do
+    one=$(_paths "$ref") || ci_die "no se pudieron leer las dependencias de $CI_SERVICE_PATH en $ref"
+    out+="$one"$'\n'
+  done
+  mapfile -t paths < <(printf '%s' "$out" | grep -v '^$' | sort -u)
+}
 
 _git_tag_push() { # <tag> <mensaje>
   git -c user.name="Azure Pipelines" -c user.email="pipelines@noreply" tag -a "$1" -m "$2"
@@ -59,7 +78,7 @@ cmd_validate_tag() {
 
 cmd_context() {
   ci_require CI_SERVICE_PATH
-  local ctx; mapfile -t paths < <(_paths)
+  local ctx; _paths_into HEAD
   ctx=$(bash "$IMAGE" context-hash "${paths[@]}")
   echo "contexto: $ctx"
   ci_output ctx "$ctx"
@@ -106,15 +125,16 @@ cmd_tag_hotfix() {
 cmd_plan_release() {
   ci_require CI_SERVICE_PATH BUILD_SOURCEBRANCH CI_TAG_ENV CI_TAG_NAME CI_TAG_VERSION
   local tag="${BUILD_SOURCEBRANCH#refs/tags/}" commit source needs_build rc
-  mapfile -t paths < <(_paths)
   commit=$(git rev-parse "${tag}^{commit}")
   if [[ "$CI_TAG_ENV" == "prod" ]]; then
     rc=$(bash "$IMAGE" prod-source "$CI_TAG_NAME" "$CI_TAG_VERSION")
     echo "prod se promueve desde $rc"
+    _paths_into "$rc" "$tag"   # unión: si cambió una dependencia, el contenido cambia
     bash "$IMAGE" same-content "$rc" "$tag" "${paths[@]}"
     source="${rc#*@}"
     needs_build=false
   else
+    _paths_into "$tag"
     source=$(bash "$IMAGE" context-hash --ref "$tag" "${paths[@]}")
     needs_build=true
   fi

@@ -65,12 +65,25 @@ para este servicio. Prod recibe el **mismo digest** que aprobó QA.
 
 ## Instalación en un repo
 
-1. Copiar `pipelines/` a la raíz y los scripts `scripts/ci-*.sh` + `scripts/ci_pyproject.py`
+1. Copiar `pipelines/` a la raíz y los scripts `scripts/ci-*.sh` + `scripts/ci_pyproject.py` + `scripts/deps.py`
    (o `scripts/install-hooks.sh <repo>`, que copia los scripts distributables).
-2. Por servicio: copiar los dos ejemplos, renombrar a `<iniciativa>-<servicio>-{ci,release}.yml`
-   y ajustar `serviceName`, `servicePath`, `dependsOn` (también en `trigger.paths.include`),
-   `acrName`, `imageRepository`, `azureSubscription`, `environments`.
-3. Dockerfile del servicio con contexto = **raíz del repo** y `COPY` explícito del servicio y
+2. Por servicio: declarar sus libs **una vez**, en su manifiesto (ADR-0080), p. ej. en
+   `ventas/api/pyproject.toml`:
+   ```toml
+   [tool.uv.sources]
+   metalsa-auth = { path = "../../_shared/libs/auth", editable = true }
+   ```
+   Los scripts leen la lista de ahí con `scripts/deps.py` (hash de imagen, check de trigger).
+3. Copiar los dos ejemplos, renombrar a `<iniciativa>-<servicio>-{ci,release}.yml` y ajustar
+   `serviceName`, `servicePath`, `acrName`, `imageRepository`, `azureSubscription`,
+   `environments`. El bloque `trigger.paths` (Azure no acepta parámetros ahí) y el filtro de
+   la policy de build validation se generan:
+   ```bash
+   python3 scripts/deps.py trigger-block ventas/api   # pegar en trigger: del *-ci.yml
+   python3 scripts/deps.py policy-filter ventas/api   # filtro de ruta de la policy
+   ```
+   El step "Validar trigger.paths" falla en el PR si el bloque se queda atrás.
+4. Dockerfile del servicio con contexto = **raíz del repo** y `COPY` explícito del servicio y
    sus libs (si no, un cambio en la lib no entra a la imagen).
 
 ## Configuración en Azure DevOps (una vez)

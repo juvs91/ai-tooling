@@ -19,9 +19,6 @@ parameters:
     type: string
   - name: servicePath          # ej: ventas/api
     type: string
-  - name: dependsOn            # libs compartidas, ej: [_shared/libs/auth]
-    type: object
-    default: []
   - name: acrName
     type: string
   - name: imageRepository      # ej: ventas/api
@@ -58,7 +55,6 @@ stages:
         variables:
           CI_SERVICE_NAME: ${{ parameters.serviceName }}
           CI_SERVICE_PATH: ${{ parameters.servicePath }}
-          CI_DEPENDS_ON: ${{ join(' ', parameters.dependsOn) }}
         steps:
           - template: ../steps/checkout.yml
 

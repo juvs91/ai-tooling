@@ -645,6 +645,12 @@ Dos filas nuevas desde el análisis original (2026-08-04): hallazgos de producci
 - `ai-notes/analysis/commons-gitops-analysis-2026-08-04.md` — análisis exhaustivo de
   `deacero/commons` (instancia de producción de este mismo patrón) que originó la
   homologación de la sección 16
+- `docs/adr/ADR-0080-lector-unico-dependencias.md` — nuevo (2026-11-04): `scripts/deps.py`
+  lee las libs de cada proyecto de su manifiesto. Reemplaza la detección por convención de
+  nombres de `shared_deps_of()` y agrega `release.sh consumers` (el where-used que la
+  sección 18.2 daba por inexistente)
+- `docs/knowledge/gitops-monorepo-a-escala.md` — documento para compartir con los equipos
+  (Google, sparse/cone/LFS, Azure DevOps, contras con mitigaciones)
 
 ---
 

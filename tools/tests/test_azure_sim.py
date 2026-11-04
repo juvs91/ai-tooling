@@ -88,7 +88,7 @@ class TestCompileRealTemplates(unittest.TestCase):
 
     def test_ci_conditional_steps_and_params(self) -> None:
         job = self.compile(SVC_CI)["stages"][0]["jobs"][1]
-        self.assertEqual(job["variables"]["CI_DEPENDS_ON"], "_shared/libs/auth")
+        self.assertNotIn("CI_DEPENDS_ON", job["variables"])  # libs desde el manifiesto (ADR-0080)
         self.assertEqual(job["dependsOn"], ["python_ci"])
         self.assertTrue(job["steps"][0]["persistCredentials"])  # or(autoDevTag, autoHotfixTag)
 

@@ -4,11 +4,8 @@
 parameters:
   - name: workingDirectory     # ej: ventas/api
     type: string
-  - name: pipelineFile         # este YAML, para validar trigger.paths contra dependsOn
+  - name: pipelineFile         # este YAML, para validar trigger.paths contra el manifiesto (ADR-0080)
     type: string
-  - name: dependsOn            # libs compartidas que entran al servicio, ej: [_shared/libs/auth]
-    type: object
-    default: []
   - name: pythonVersion
     type: string
     default: '3.12'
@@ -28,7 +25,6 @@ jobs:
       # Entradas de scripts/ci-python.sh (las variables del job llegan como env)
       CI_WORKING_DIRECTORY: ${{ parameters.workingDirectory }}
       CI_PIPELINE_FILE: ${{ parameters.pipelineFile }}
-      CI_DEPENDS_ON: ${{ join(' ', parameters.dependsOn) }}
       CI_UV_VERSION: ${{ parameters.uvVersion }}
     steps:
       - template: ../steps/checkout.yml
@@ -40,7 +36,7 @@ jobs:
           versionSpec: ${{ parameters.pythonVersion }}
 
       - bash: bash scripts/ci-python.sh check-paths
-        displayName: Validar trigger.paths vs dependsOn
+        displayName: Validar trigger.paths vs dependencias del manifiesto
 
       - bash: bash scripts/ci-python.sh install-uv
         displayName: Instalar uv

@@ -13,6 +13,7 @@
 #   ./scripts/release.sh status                       estado del entorno
 #   ./scripts/release.sh add     <path>               agregar al sparse set
 #   ./scripts/release.sh drop    <path>               quitar del sparse set
+#   ./scripts/release.sh consumers <lib>              qué proyectos usan una lib (where-used)
 #   ./scripts/release.sh init    <proy>               alias de work (un proyecto)
 #   ./scripts/release.sh init-multi <proy...>         alias de work (multi)
 #   ./scripts/release.sh bump    <proyecto> <1.4.2>   bump versión en el manifiesto (comitear vía PR)
@@ -25,9 +26,15 @@
 # Variables de entorno:
 #   GITOPS_REMOTE         remote autoritativo (auto-detect si no se setea)
 #   GITOPS_TRUNK_BRANCH   rama trunk (default: main)
-#   GITOPS_SCOPE          scope de paquetes internos (default: @company)
+#   GITOPS_PROJECTS_DIR   carpeta base de los proyectos (default: projects; "." = raíz)
+#   GITOPS_PROJECT_MAP    nombre:carpeta,nombre:carpeta — gana sobre GITOPS_PROJECTS_DIR
+#   GITOPS_SHARED_DIR     carpeta de libs compartidas (default: shared/libs; Azure: _shared/libs)
+#
+# Qué libs usa un proyecto sale de su manifiesto vía scripts/deps.py (ADR-0080).
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CMD="${1:-help}"
 
@@ -97,13 +104,25 @@ require_trunk() {
     || die "este comando requiere estar en $(trunk_branch) (estás en: $branch)"
 }
 
+# Raíz de las libs compartidas: shared/libs → shared, _shared/libs → _shared (ADR-0080)
+_shared_root() {
+  local d="${GITOPS_SHARED_DIR:-shared/libs}"
+  echo "${d%%/*}"
+}
+
+# Un path ya resuelto (libs compartidas o scripts) no se traduce como nombre de proyecto
+_is_literal_path() {
+  local p="$1" root; root=$(_shared_root)
+  [[ "$p" == "$root"/* || "$p" == scripts* ]]
+}
+
 _project_path() {
   local proj="$1"
   # Path literal (ya resuelto) — mismo criterio que ya usan cmd_add/cmd_drop: no le
   # antepongas el projects-dir. Sin esto, cmd_work/init-multi rompen el escenario
   # "solo shared" (equipo Platform): init-multi shared/libs/auth resolvía a
   # projects/shared/libs/auth (inexistente). Ver ADR-0049.
-  if [[ "$proj" == shared/* || "$proj" == scripts* ]]; then
+  if _is_literal_path "$proj"; then
     echo "$proj"
     return
   fi
@@ -183,29 +202,28 @@ require_semver() {
 # Soporta Node.js (package.json) y Python (pyproject.toml).
 # Usa grep -o (POSIX) para compatibilidad con macOS y Alpine/BusyBox.
 shared_deps_of() {
-  local proj="$1"
-  local scope="${GITOPS_SCOPE:-@company}"
-  # convierte @company → company para uso en sed y Python
-  local scope_name="${scope#@}"
-  local proj_dir; proj_dir=$(_project_path "$proj")
+  # Libs que usa el proyecto, leídas de su manifiesto en git (no del disco: funciona
+  # aunque el proyecto aún no esté en el sparse set). Ref: ADR-0080.
+  local proj_dir; proj_dir=$(_project_path "$1")
+  command -v python3 >/dev/null || die "python3 (>= 3.11) requerido para leer dependencias"
+  python3 "$SCRIPT_DIR/deps.py" libs "$proj_dir" \
+    || die "no se pudieron leer las dependencias de $proj_dir (scripts/deps.py)"
+}
 
-  # Node.js: detectar "@company/libname" en package.json
-  if [[ -f "$proj_dir/package.json" ]]; then
-    grep -o "\"${scope}/[^\"]*\"" "$proj_dir/package.json" 2>/dev/null \
-      | sed "s/\"${scope}\///;s/\"//" \
-      | while read -r lib; do
-          [[ -n "$lib" && -d "shared/libs/$lib" ]] && echo "shared/libs/$lib"
-        done
+cmd_consumers() {
+  local lib="${1:-}"
+  require_arg "$lib" "especifica la lib\n  uso: release.sh consumers <lib>  (ej: $(_shared_root)/libs/auth)"
+  command -v python3 >/dev/null || die "python3 (>= 3.11) requerido para leer dependencias"
+  local out
+  out=$(python3 "$SCRIPT_DIR/deps.py" consumers "${lib%/}") \
+    || die "no se pudo calcular quién usa $lib"
+  if [[ -z "$out" ]]; then
+    ok "ningún proyecto declara $lib en su manifiesto"
+    return
   fi
-
-  # Python: detectar "company-libname" en pyproject.toml dependencies
-  if [[ -f "$proj_dir/pyproject.toml" ]]; then
-    grep -oE "${scope_name}-[a-z][a-z0-9-]+" "$proj_dir/pyproject.toml" 2>/dev/null \
-      | sed "s/${scope_name}-//" \
-      | while read -r lib; do
-          [[ -n "$lib" && -d "shared/libs/$lib" ]] && echo "shared/libs/$lib"
-        done
-  fi
+  info "usan $lib:"
+  echo "$out" | sed 's/^/  /'
+  info "para trabajar con la lib y todos: ./scripts/release.sh work ${lib%/} $(echo "$out" | tr '\n' ' ')"
 }
 
 # ── sparse checkout ────────────────────────────────────────────────────────
@@ -220,9 +238,9 @@ _sparse_set() {
     | awk '!seen[$0]++' \
     | tr '\n' ' ')
 
-  git sparse-checkout init --cone 2>/dev/null || true
+  # set activa sparse + cone por sí solo (init está deprecado en git)
   # shellcheck disable=SC2086
-  git sparse-checkout set $unique_paths
+  git sparse-checkout set --cone $unique_paths
 }
 
 cmd_work() {
@@ -237,9 +255,8 @@ cmd_work() {
   local paths="scripts"
   for proj in "${projects[@]}"; do
     paths="$paths $(_project_path "$proj")"
-    while IFS= read -r dep; do
-      [[ -n "$dep" ]] && paths="$paths $dep"
-    done < <(shared_deps_of "$proj")
+    local deps; deps=$(shared_deps_of "$proj") || exit 1
+    paths="$paths $deps"
   done
 
   _sparse_set "$paths"
@@ -299,15 +316,15 @@ cmd_add() {
   local path="${1:-}"
   require_arg "$path" "especifica el path a agregar\n  uso: release.sh add <path|proyecto>"
 
-  # Normalizar: si no empieza con shared/ ni scripts, resolver via _project_path
-  if [[ "$path" != shared/* && "$path" != scripts* ]]; then
+  # Normalizar: si no es path de libs ni scripts, resolver via _project_path
+  if ! _is_literal_path "$path"; then
     path=$(_project_path "$path")
   fi
 
   # Inicializar sparse si no estaba activo
   if ! git config core.sparseCheckout 2>/dev/null | grep -q true; then
     warn "sparse checkout no estaba activo — inicializando"
-    git sparse-checkout init --cone 2>/dev/null || true
+    git sparse-checkout set --cone
   fi
 
   # Advertir si el path no existe en el árbol del repo
@@ -325,7 +342,7 @@ cmd_drop() {
   require_arg "$path" "especifica el path a quitar\n  uso: release.sh drop <path|proyecto>"
 
   # Normalizar igual que cmd_add
-  if [[ "$path" != shared/* && "$path" != scripts* ]]; then
+  if ! _is_literal_path "$path"; then
     path=$(_project_path "$path")
   fi
 
@@ -497,9 +514,8 @@ cmd_hotfix() {
     info "configurando sparse para $project"
     local proj_dir; proj_dir=$(_project_path "$project")
     local paths="scripts $proj_dir"
-    while IFS= read -r dep; do
-      [[ -n "$dep" ]] && paths="$paths $dep"
-    done < <(shared_deps_of "$project")
+    local deps; deps=$(shared_deps_of "$project") || exit 1
+    paths="$paths $deps"
     _sparse_set "$paths"
   fi
 
@@ -719,8 +735,8 @@ _replicate_sparse_checkout() {
   git config core.sparseCheckout 2>/dev/null | grep -q true || return 0
   local paths; paths=$(git sparse-checkout list)
   [[ -z "$paths" ]] && return 0
-  git -C "$wt_path" sparse-checkout init --cone 2>/dev/null || true
-  git -C "$wt_path" sparse-checkout set $paths
+  # shellcheck disable=SC2086
+  git -C "$wt_path" sparse-checkout set --cone $paths
   info "sparse checkout replicado en el worktree: $paths"
 }
 
@@ -840,6 +856,7 @@ case "$CMD" in
   status)     cmd_status ;;
   add)        cmd_add "$@" ;;
   drop)       cmd_drop "$@" ;;
+  consumers)  cmd_consumers "$@" ;;
   init)       cmd_work "$@" ;;
   init-multi) cmd_work "$@" ;;
   sync)       cmd_sync ;;
@@ -862,6 +879,7 @@ Uso: release.sh <comando> [args]
   status                       estado actual: remote, trunk, sparse paths, worktrees
   add     <path|proyecto>      agregar path al sparse set actual
   drop    <path|proyecto>      quitar path del sparse set
+  consumers <lib>              qué proyectos usan la lib (where-used, ADR-0080)
   init    <proyecto>           alias de work (un proyecto)
   init-multi <proy...>         alias de work (multi-proyecto)
 
@@ -885,7 +903,13 @@ Uso: release.sh <comando> [args]
   VARIABLES DE ENTORNO
   GITOPS_REMOTE         remote autoritativo (auto-detect: company > origin > upstream)
   GITOPS_TRUNK_BRANCH   rama trunk (default: main)
-  GITOPS_SCOPE          scope de paquetes internos (default: @company)
+  GITOPS_PROJECTS_DIR   carpeta base de proyectos (default: projects; "." = raíz)
+  GITOPS_PROJECT_MAP    nombre:carpeta,... (gana sobre GITOPS_PROJECTS_DIR)
+  GITOPS_SHARED_DIR     libs compartidas (default: shared/libs; Azure: _shared/libs)
+
+  Las libs de cada proyecto salen de su manifiesto (scripts/deps.py, ADR-0080):
+  [tool.uv.sources] en pyproject.toml, file:/workspace: en package.json,
+  replace en go.mod, o deps.txt.
 EOF
     ;;
 esac
