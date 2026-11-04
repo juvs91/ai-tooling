@@ -6,7 +6,7 @@ documento explica cómo lo resolvieron y cómo nuestro GitOps monorepo en Azure 
 las mismas ideas a una escala menor.
 
 Referencias internas: ADR-0007 (modelo), ADR-0060/0061 (Azure Pipelines), ADR-0080 (lector
-de dependencias).
+de dependencias) y ADR-0081 (migración sin romper).
 
 ---
 
@@ -241,7 +241,8 @@ python3 scripts/deps.py paths ventas/api            # servicio + libs: sparse ch
 python3 scripts/deps.py consumers _shared/libs/auth # where-used
 python3 scripts/deps.py trigger-block ventas/api    # bloque trigger.paths para el YAML
 python3 scripts/deps.py policy-filter ventas/api    # filtro de la policy de build validation
-./scripts/release.sh consumers _shared/libs/auth    # lo mismo, con el comando work sugerido
+python3 scripts/deps.py audit                       # libs pedidas por nombre sin ruta declarada
+./scripts/release.sh consumers _shared/libs/auth    # where-used, con el comando work sugerido
 ```
 
 **Si un servicio pide la librería solo por nombre** (por ejemplo `metalsa-auth>=0.1` sin
@@ -294,6 +295,9 @@ Publicar sigue sirviendo para quien está fuera del monorepo.
 | Menos libertad de herramientas y de versiones que en un multirepo | Decisión consciente: una versión desde el monorepo. Fijar versión solo en casos puntuales y a propósito |
 | No había "where-used" | `release.sh consumers <lib>` / `deps.py consumers` |
 | La lista de librerías vivía a mano en varios lugares | El manifiesto es la fuente única. `trigger.paths` y el filtro de la policy se generan y se validan en cada PR |
+| Servicios que piden la librería solo por nombre, sin ruta | Se detectan igual, con aviso y el bloque que falta. `deps.py audit` los lista; `DEPS_STRICT=1` cierra la puerta cuando todos migren |
+| `deps.py` necesita Python 3.11 y el de macOS es 3.9 | `release.sh` busca `python3.11+` y, si no hay, usa `uv`, que descarga uno |
+| Otros repos con el mismo `release.sh` (`commons`) | Pendiente: copiar `deps.py` con `install-hooks.sh` y portar los cambios de `release.sh` |
 | Reglas que dependen de disciplina (vida de ramas, limpieza de tags `-dev`) | Pendiente: un job que avise de ramas viejas y limpie tags de más de 30 días (las imágenes ya se purgan con `acr purge`) |
 | Parte del flujo no se ha probado en Azure real (tags con `@`, varios tags por push, *Branch control* con tags) | El simulador local cubre los scripts; falta correrlo en un pipeline sandbox |
 | Curva de aprendizaje: sparse checkout, trunk-based y tags por servicio | Este documento, la skill `gitops-monorepo` y `release.sh help` |
@@ -320,5 +324,5 @@ Publicar sigue sirviendo para quien está fuera del monorepo.
 - Documentación de Git, `git-sparse-checkout`. <https://git-scm.com/docs/git-sparse-checkout>
 - Microsoft, "Git partial clone now supported in Azure DevOps", 2023.
   <https://devblogs.microsoft.com/devops/git-partial-clone-now-supported-in-azure-devops/>
-- En este repo: ADR-0007, ADR-0060, ADR-0061, ADR-0080, `templates/gitops/azure-pipelines/README.md`
+- En este repo: ADR-0007, ADR-0060, ADR-0061, ADR-0080, ADR-0081, `templates/gitops/azure-pipelines/README.md`
   y la skill `.agents/skills/infrastructure/gitops-monorepo/SKILL.md`.
