@@ -1842,3 +1842,15 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   - `cut -f1` aplica a cada línea de un mensaje multilínea; usa `head -1` primero.
   - Un candado que el código viejo deja tomado hace que los tests siguientes pasen en falso; aísla cada test.
 - **Pruebas:** macOS 397 de 397 (doclens 206); Linux en sus 3 variantes, 341 de 341 cada una.
+
+## 2026-11-04 · doclens/doctor.sh: diagnóstico para Windows nativo
+
+- **Por qué:** varios compañeros usan Claude Code nativo en Windows y "les va". Pero eso no prueba que doclens funcione: puede que el hook no esté instalado, que bloquee todo o que deje pasar los PDFs.
+- **Decisión:** antes de portar, medir. `doclens/doctor.sh` se copia a cada consumer con el espejo de doclens y no modifica nada: prueba el hook sobre copias en un temporal, con caché y estado propios.
+- **Por qué no está en harness-doctor:** ese corre en cada sesión y debe ser instantáneo; este tarda segundos.
+- **Hallazgo sin Windows:** `doclens.py` usa `os.getuid`, `signal.SIGALRM` y `signal.SIGXCPU`, que no existen en Python para Windows, así que doclens casi seguro falla al arrancar en Windows nativo. El doctor lo confirma en la máquina real.
+- **Lección:** un hook roto (CRLF, error de sintaxis) también sale con 2. Parece que "bloquea el PDF", pero bloquea TODOS los Reads. Para distinguirlo hace falta un control: un `.txt` debe pasar con rc 0.
+- **Lección:** en un script, un comando en segundo plano recibe `/dev/null` como stdin. Mi `timeout` casero le mandaba al hook una petición vacía, que salía con 0. Se corrigió con `exec 3<&0` y `<&3`.
+- **Lección:** el caché de prueba debe crearse con 0700, porque doclens rechaza un caché abierto (por diseño).
+- **Pruebas:** D30 (11 tests); macOS 408 de 408; Linux GNU, busybox y git 2.22: 351 de 351 cada uno.
+

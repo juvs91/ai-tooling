@@ -110,6 +110,23 @@ uv pip compile --universal --python-version 3.9 --generate-hashes \
   bloquea con "reintenta en un momento".
 - OCR opcional (scans y texto en figuras): `brew install tesseract tesseract-lang`.
 
+## Diagnóstico y Windows
+
+`bash doclens/doctor.sh [proyecto]` revisa, en la máquina donde corre, si doc-guard y doclens
+funcionan de verdad. Para compartir el resultado: `bash doclens/doctor.sh > doclens-doctor.txt 2>&1`.
+
+El doctor no modifica nada: prueba el hook sobre copias en un temporal y no crea el venv. Revisa:
+- las herramientas (jq, el python real frente al alias de la Microsoft Store, tesseract);
+- los finales de línea CRLF;
+- el venv y las APIs POSIX que usa doclens;
+- tres pruebas en vivo: un `.txt` debe pasar; sin doclens, el PDF debe bloquearse; y con el venv, debe salir
+  el digest.
+
+**Windows nativo (Git Bash) no está soportado ni validado.** `doclens.py` usa `os.getuid`, `SIGALRM`,
+`SIGXCPU` y permisos 0700, y el hook busca el venv en `.venv/bin/python`. Lo recomendado es WSL2, que
+es Linux y ya está probado. Si alguien del equipo usa Claude Code nativo en Windows, que corra el
+doctor y comparta la salida antes de decidir un port.
+
 ## Versionado y sync
 
 - `VERSION` = versión del motor. `SIDECAR_FORMAT_VERSION` (constante en

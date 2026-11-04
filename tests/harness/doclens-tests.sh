@@ -902,6 +902,41 @@ doclens.MAX_PAGE_PIXELS = 100 * 100
 assert doclens.save_reduced(b.getvalue(), Path(tempfile.mkdtemp()) / "r.jpg") is False
 PY
 fi
+echo "══ D30: doclens/doctor.sh — diagnóstico sin efectos (Windows nativo) ══"
+C31=$(consumer); bash "$SYNC" "$C31" >/dev/null 2>&1; rm -r -f "$C31/doclens/.venv"
+(cd "$C31" && g add -A && g commit -qm sync) >/dev/null 2>&1
+mkdir -p "$C31/.claude/hooks"; cp "$H/doc-guard.sh" "$C31/.claude/hooks/"
+printf '{"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"bash doc-guard.sh"}]}]}}\n' > "$C31/.claude/settings.json"
+(cd "$C31" && g add -A && g commit -qm hook) >/dev/null 2>&1
+CA=$(ls -A "$DOCLENS_CACHE" | LC_ALL=C sort | cksum)
+OUT=$(cd "$C31" && bash doclens/doctor.sh 2>&1); RC=$?
+eq "doctor → exit 0" "$RC" 0
+[ -z "$(cd "$C31" && g status --porcelain)" ] && [ ! -e "$C31/doclens/.venv" ] && ok "doctor no modifica el proyecto ni crea el venv" || bad "doctor modificó el proyecto: $(cd "$C31" && g status --porcelain | tr '\n' ' ')"
+[ "$(ls -A "$DOCLENS_CACHE" | LC_ALL=C sort | cksum)" = "$CA" ] && ok "doctor no toca el caché del usuario" || bad "doctor escribió en el caché del usuario"
+case "$OUT" in *"OK     el hook deja pasar Reads normales"*"OK     sin doclens, el hook bloquea"*) ok "doctor: hook sano → .txt pasa y el PDF se bloquea sin doclens" ;; *) bad "prueba A: $(printf '%s' "$OUT" | grep -E 'A\)' -A2 | tr '\n' ' ')" ;; esac
+case "$OUT" in *"registrado en"*settings.json*) ok "doctor: ve el hook registrado" ;; *) bad "doctor no vio el registro del hook" ;; esac
+# CRLF y venv con forma de Windows (Scripts/python.exe): lo típico de un clon en Windows
+sed 's/$/\r/' "$C31/.claude/hooks/doc-guard.sh" > "$T/dg-crlf"; cp "$T/dg-crlf" "$C31/.claude/hooks/doc-guard.sh"
+mkdir -p "$C31/doclens/.venv/Scripts"; printf '#!/bin/sh\nexit 1\n' > "$C31/doclens/.venv/Scripts/python.exe"
+OUT=$(cd "$C31" && bash doclens/doctor.sh 2>&1)
+case "$OUT" in *"FALLA  archivos con CRLF"*doc-guard.sh*) ok "doctor detecta CRLF en el hook" ;; *) bad "doctor no vio el CRLF" ;; esac
+case "$OUT" in *"forma de Windows (Scripts/python.exe)"*) ok "doctor detecta el venv con forma de Windows" ;; *) bad "doctor no vio Scripts/python.exe" ;; esac
+case "$OUT" in *"FALLA  el hook está roto: bloquea también Reads normales"*) ok "doctor: hook roto por CRLF → detecta que bloquea TODOS los Reads" ;; *) bad "doctor no vio el hook roto: $(printf '%s' "$OUT" | grep -E '0\)' -A2 | tr '\n' ' ')" ;; esac
+cp "$H/doc-guard.sh" "$C31/.claude/hooks/"; rm -r -f "$C31/doclens/.venv"
+# Python sin APIs POSIX (simulado: así responde el Python de Windows)
+cat > "$T/pywin" <<'EOF'
+#!/bin/sh
+case "$2" in *getuid*) echo "win32 | permisos tras chmod 700: 0o777 | falta: os.getuid, SIGALRM, SIGXCPU"; exit 0 ;; esac
+exit 1
+EOF
+chmod +x "$T/pywin"
+OUT=$(cd "$C31" && DOCLENS_PYTHON="$T/pywin" bash doclens/doctor.sh 2>&1)
+case "$OUT" in *"FALLA  Python sin APIs POSIX"*os.getuid*) ok "doctor detecta un Python sin os.getuid/SIGALRM (Windows)" ;; *) bad "doctor no vio las APIs POSIX faltantes" ;; esac
+case "$OUT" in *"FALLA  doclens no produjo el digest"*) ok "doctor: prueba B falla con ese Python" ;; *) bad "prueba B no falló con un Python roto" ;; esac
+if $REAL; then
+  OUT=$(cd "$C31" && DOCLENS_PYTHON="$REAL_PY" bash doclens/doctor.sh 2>&1)
+  case "$OUT" in *"OK     doclens produce el digest de punta a punta"*) ok "doctor: prueba B con el venv real → digest correcto" ;; *) bad "prueba B real: $(printf '%s' "$OUT" | grep -E 'B\)' -A2 | tr '\n' ' ')" ;; esac
+fi
 cleanup_bg
 echo ""
 echo "══ doclens: $PASS ok, $FAIL fallos ══"
