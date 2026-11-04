@@ -15,11 +15,14 @@ Cada test arma un repo git temporal real. Cobertura:
   - --ref contra un tag viejo;
   - servicio fuera del sparse checkout (lee de git, no del disco);
   - errores: carpeta inexistente, ruta fuera del repo, uso incorrecto, Python < 3.11;
-  - trigger-block y policy-filter.
+  - trigger-block y policy-filter;
+  - compatibilidad: paquete del repo pedido sin ruta (py/node/go) se toma por
+    nombre con aviso; DEPS_STRICT=1 lo vuelve error; audit lista lo que falta.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -56,9 +59,12 @@ class DepsTestCase(unittest.TestCase):
         _git(self.repo, "add", "-A")
         _git(self.repo, "commit", "-q", "-m", msg)
 
-    def run_deps(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_deps(self, *args: str, strict: bool = False) -> subprocess.CompletedProcess[str]:
+        env = {k: v for k, v in os.environ.items() if k != "DEPS_STRICT"}
+        if strict:
+            env["DEPS_STRICT"] = "1"
         return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=self.repo,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=env)
 
     def lines(self, *args: str) -> list[str]:
         r = self.run_deps(*args)
@@ -203,6 +209,71 @@ class TestErrors(DepsTestCase):
         r = subprocess.run([sys.executable, "-c", code], cwd=self.repo, capture_output=True, text=True)
         self.assertEqual(r.returncode, 1)
         self.assertIn("requiere Python >= 3.11", r.stderr)
+
+
+class TestImplicitByName(DepsTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.libs(["auth"])
+        self.write({
+            "_shared/libs/ui/package.json": '{"name": "@metalsa/ui"}',
+            "_shared/libs/goauth/go.mod": "module example.com/goauth\n",
+            "otro/roto/pyproject.toml": "[project\n",
+        })
+
+    def test_python_requirement_without_source(self) -> None:
+        self.write({"ventas/api/pyproject.toml":
+                    '[project]\nname = "ventas-api"\ndependencies = ["Metalsa_Auth>=0.1", "requests"]\n'})
+        r = self.run_deps("libs", "ventas/api")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.split(), ["_shared/libs/auth"])
+        self.assertIn("'Metalsa_Auth' se tomó por nombre", r.stderr)
+        self.assertIn('[tool.uv.sources] Metalsa_Auth = { path = "../../_shared/libs/auth" }', r.stderr)
+
+    def test_node_and_go_without_path(self) -> None:
+        self.write({
+            "ventas/web/package.json": '{"name": "w", "dependencies": {"@metalsa/ui": "^1.0.0"}}',
+            "ventas/worker/go.mod": "module example.com/worker\n\nrequire (\n\texample.com/goauth v0.1.0\n)\n",
+        })
+        self.assertEqual(self.lines("libs", "ventas/web"), ["_shared/libs/ui"])
+        r = self.run_deps("libs", "ventas/worker")
+        self.assertEqual(r.stdout.split(), ["_shared/libs/goauth"])
+        self.assertIn("replace example.com/goauth => ../../_shared/libs/goauth", r.stderr)
+
+    def test_declared_path_is_not_flagged(self) -> None:
+        self.write({"ventas/api/pyproject.toml": (
+            '[project]\nname = "v"\ndependencies = ["metalsa-auth"]\n'
+            '[tool.uv.sources]\nmetalsa-auth = { path = "../../_shared/libs/auth" }\n')})
+        r = self.run_deps("libs", "ventas/api", strict=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("aviso", r.stderr)
+
+    def test_go_replaced_module_is_not_flagged(self) -> None:
+        self.write({"ventas/worker/go.mod": (
+            "module example.com/worker\nrequire example.com/goauth v0.1.0\n"
+            "replace example.com/goauth => ../../_shared/libs/goauth\n")})
+        r = self.run_deps("libs", "ventas/worker", strict=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.split(), ["_shared/libs/goauth"])
+
+    def test_strict_fails(self) -> None:
+        self.write({"ventas/api/pyproject.toml": '[project]\nname = "v"\ndependencies = ["metalsa-auth"]\n'})
+        r = self.run_deps("libs", "ventas/api", strict=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("DEPS_STRICT=1", r.stderr)
+
+    def test_audit(self) -> None:
+        self.write({
+            "ventas/api/pyproject.toml": '[project]\nname = "v"\ndependencies = ["metalsa-auth"]\n',
+            "ventas/web/package.json": '{"name": "w", "dependencies": {"@metalsa/ui": "workspace:*"}}',
+        })
+        out = self.lines("audit")
+        self.assertEqual(out, ["ventas/api/pyproject.toml: metalsa-auth → _shared/libs/auth",
+                               '    agrega: [tool.uv.sources] metalsa-auth = { path = "../../_shared/libs/auth" }'])
+        self.assertEqual(self.run_deps("audit", strict=True).returncode, 1)
+
+    def test_audit_clean(self) -> None:
+        self.assertEqual(self.lines("audit"), ["sin dependencias tomadas por nombre: todas declaran su ruta"])
 
 
 class TestOutputs(DepsTestCase):

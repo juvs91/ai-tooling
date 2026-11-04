@@ -201,21 +201,45 @@ require_semver() {
 # Lee qué libs de shared/ consume un proyecto.
 # Soporta Node.js (package.json) y Python (pyproject.toml).
 # Usa grep -o (POSIX) para compatibilidad con macOS y Alpine/BusyBox.
+# Intérprete para scripts/deps.py (Python >= 3.11, por tomllib). El python3 de macOS
+# es 3.9: se prueban versiones explícitas y, si no hay, uv descarga uno (ADR-0080).
+_python() {
+  local c
+  for c in python3.14 python3.13 python3.12 python3.11 python3; do
+    if command -v "$c" >/dev/null 2>&1 \
+       && "$c" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
+      echo "$c"
+      return
+    fi
+  done
+  if command -v uv >/dev/null 2>&1; then
+    echo "uv run --no-project --python 3.12 python"
+    return
+  fi
+  die "se necesita Python >= 3.11 para leer dependencias (scripts/deps.py)\n  instala uno: brew install python@3.12  —o—  instala uv: https://docs.astral.sh/uv/"
+}
+
+# deps.py con el intérprete de _python (la salida de _python se parte en palabras a propósito)
+_deps() {
+  # `|| exit 1` explícito: dentro de $(...) bash no hereda set -e
+  local py; py=$(_python) || exit 1
+  # shellcheck disable=SC2086
+  $py "$SCRIPT_DIR/deps.py" "$@"
+}
+
 shared_deps_of() {
   # Libs que usa el proyecto, leídas de su manifiesto en git (no del disco: funciona
   # aunque el proyecto aún no esté en el sparse set). Ref: ADR-0080.
   local proj_dir; proj_dir=$(_project_path "$1")
-  command -v python3 >/dev/null || die "python3 (>= 3.11) requerido para leer dependencias"
-  python3 "$SCRIPT_DIR/deps.py" libs "$proj_dir" \
+  _deps libs "$proj_dir" \
     || die "no se pudieron leer las dependencias de $proj_dir (scripts/deps.py)"
 }
 
 cmd_consumers() {
   local lib="${1:-}"
   require_arg "$lib" "especifica la lib\n  uso: release.sh consumers <lib>  (ej: $(_shared_root)/libs/auth)"
-  command -v python3 >/dev/null || die "python3 (>= 3.11) requerido para leer dependencias"
   local out
-  out=$(python3 "$SCRIPT_DIR/deps.py" consumers "${lib%/}") \
+  out=$(_deps consumers "${lib%/}") \
     || die "no se pudo calcular quién usa $lib"
   if [[ -z "$out" ]]; then
     ok "ningún proyecto declara $lib en su manifiesto"

@@ -14,6 +14,10 @@ La dependencia se declara por ruta en el manifiesto nativo de la carpeta:
   go.mod          replace mod => ../../_shared/libs/x
   deps.txt        una ruta por línea, relativa a la raíz del repo
 
+Compatibilidad: si el manifiesto pide un paquete que existe en el repo pero no
+declara su ruta (p. ej. "metalsa-auth>=0.1" sin [tool.uv.sources]), se toma por
+nombre y se avisa con el bloque que falta. Con DEPS_STRICT=1 eso es error.
+
 Lee de git (--ref, default HEAD), no del disco: funciona con sparse checkout y
 partial clone, y el release puede preguntar por las dependencias del tag.
 
@@ -23,6 +27,7 @@ Uso:
   deps.py consumers <lib> [--ref R]       carpetas que dependen de <lib> (where-used)
   deps.py trigger-block <dir> [--ref R]   bloque paths.include para el trigger de Azure
   deps.py policy-filter <dir> [--ref R]   filtro de ruta para la policy de build validation
+  deps.py audit [--ref R]                 dependencias tomadas por nombre, con el bloque que falta
 
 Exit: 0 OK, 1 error, 2 uso incorrecto.
 """
@@ -31,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import posixpath
 import re
 import subprocess
@@ -44,6 +50,10 @@ except ImportError:  # Python < 3.11: main() da el error con instrucciones
 MANIFESTS = ("pyproject.toml", "package.json", "go.mod", "deps.txt")
 NODE_DEP_KEYS = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
 GO_REPLACE = re.compile(r"=>\s*(\.{1,2}/\S*)")
+GO_REPLACE_LEFT = re.compile(r"^\s*(?:replace\s+)?(\S+)(?:\s+v\S+)?\s*=>")
+GO_REQUIRE = re.compile(r"^\s*(?:require\s+)?([^\s()]+)\s+v\S+")
+GO_MODULE = re.compile(r"^\s*module\s+(\S+)", re.M)
+PY_REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 
 class DepsError(Exception):
@@ -74,6 +84,8 @@ class Repo:
         self._dirs: set[str] | None = None
         self._blobs: dict[str, str] = {}
         self._names: dict[tuple[str, str], str] | None = None
+        # (manifiesto, paquete) → (carpeta, bloque que falta): deps tomadas por nombre
+        self.implicit: dict[tuple[str, str], tuple[str, str]] = {}
 
     def _git(self, *args: str) -> str:
         r = subprocess.run(["git", *args], capture_output=True, text=True)
@@ -110,26 +122,50 @@ class Repo:
         if path not in self.dirs():
             raise DepsError(f"{origin}: la carpeta {path} no existe en {self.ref}")
 
-    def by_name(self, kind: str, name: str, origin: str) -> str:
-        """Carpeta del paquete `name` (kind: py | node) declarado en algún manifiesto."""
+    def find(self, kind: str, name: str) -> str | None:
+        """Carpeta del paquete `name` (kind: py | node | go) definido en el repo, o None."""
         if self._names is None:
             self._names = {}
             for f in self.files():
                 base, d = posixpath.basename(f), posixpath.dirname(f)
-                if not d:
+                if not d or base not in ("pyproject.toml", "package.json", "go.mod"):
                     continue
-                if base == "pyproject.toml":
-                    n = _load_toml(self, f).get("project", {}).get("name")
-                    if n:
-                        self._names[("py", _norm_py(n))] = d
-                elif base == "package.json":
-                    n = _load_json(self, f).get("name")
-                    if n:
-                        self._names[("node", n)] = d
-        key = (kind, _norm_py(name) if kind == "py" else name)
-        if key not in self._names:
+                try:  # un manifiesto roto en otra carpeta no tumba la búsqueda
+                    if base == "pyproject.toml":
+                        n = _load_toml(self, f).get("project", {}).get("name")
+                        key = ("py", _norm_py(n)) if isinstance(n, str) else None
+                    elif base == "package.json":
+                        n = _load_json(self, f).get("name")
+                        key = ("node", n) if isinstance(n, str) else None
+                    else:
+                        m = GO_MODULE.search(self.read(f) or "")
+                        key = ("go", m.group(1)) if m else None
+                except DepsError:
+                    continue
+                if key:
+                    self._names.setdefault(key, d)
+        return self._names.get((kind, _norm_py(name) if kind == "py" else name))
+
+    def by_name(self, kind: str, name: str, origin: str) -> str:
+        d = self.find(kind, name)
+        if d is None:
             raise DepsError(f"{origin}: no hay ningún paquete '{name}' en el repo ({self.ref})")
-        return self._names[key]
+        return d
+
+    def implicit_dep(self, kind: str, name: str, d: str, f: str) -> str | None:
+        """Paquete del repo pedido sin ruta: lo cuenta y registra el bloque que falta."""
+        dep = self.find(kind, name)
+        if dep is None or dep == d:
+            return None
+        rel = posixpath.relpath(dep, d)
+        if kind == "py":
+            snippet = f'[tool.uv.sources] {name} = {{ path = "{rel}" }}'
+        elif kind == "node":
+            snippet = f'"{name}": "file:{rel}"'
+        else:
+            snippet = f"replace {name} => {rel if rel.startswith('.') else './' + rel}"
+        self.implicit[(f, name)] = (dep, snippet)
+        return dep
 
 
 def _load_toml(repo: Repo, path: str) -> dict:
@@ -147,9 +183,31 @@ def _load_json(repo: Repo, path: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _py_requirement_names(data: dict) -> list[str]:
+    project = data.get("project", {})
+    reqs = list(project.get("dependencies", []))
+    for extra in (project.get("optional-dependencies") or {}).values():
+        reqs += extra
+    for group in (data.get("dependency-groups") or {}).values():
+        reqs += [r for r in group if isinstance(r, str)]
+    names = []
+    for r in reqs:
+        m = PY_REQ_NAME.match(r) if isinstance(r, str) else None
+        if m:
+            names.append(m.group(1))
+    return names
+
+
 def _from_pyproject(repo: Repo, d: str, f: str) -> list[str]:
     out = []
-    sources = _load_toml(repo, f).get("tool", {}).get("uv", {}).get("sources", {})
+    data = _load_toml(repo, f)
+    sources = data.get("tool", {}).get("uv", {}).get("sources", {})
+    declared = {_norm_py(k) for k in sources}
+    for name in _py_requirement_names(data):
+        if _norm_py(name) not in declared:
+            dep = repo.implicit_dep("py", name, d, f)
+            if dep:
+                out.append(dep)
     for pkg, spec in sources.items():
         for s in spec if isinstance(spec, list) else [spec]:
             if not isinstance(s, dict):
@@ -172,12 +230,40 @@ def _from_package_json(repo: Repo, d: str, f: str) -> list[str]:
                 out.append(_clean(posixpath.join(d, spec.split(":", 1)[1])))
             elif spec.startswith("workspace:"):
                 out.append(repo.by_name("node", pkg, f))
+            else:
+                dep = repo.implicit_dep("node", pkg, d, f)
+                if dep:
+                    out.append(dep)
     return out
 
 
 def _from_go_mod(repo: Repo, d: str, f: str) -> list[str]:
-    return [_clean(posixpath.join(d, m.group(1)))
-            for m in GO_REPLACE.finditer(repo.read(f) or "")]
+    text = repo.read(f) or ""
+    out = [_clean(posixpath.join(d, m.group(1))) for m in GO_REPLACE.finditer(text)]
+    replaced, required, block = set(), [], ""
+    for line in text.splitlines():
+        line = line.split("//", 1)[0]
+        head = line.strip()
+        if head in ("require (", "replace ("):
+            block = head.split()[0]
+            continue
+        if head == ")":
+            block = ""
+            continue
+        if block == "replace" or head.startswith("replace "):
+            m = GO_REPLACE_LEFT.match(line)
+            if m:
+                replaced.add(m.group(1))
+        elif block == "require" or head.startswith("require "):
+            m = GO_REQUIRE.match(line)
+            if m:
+                required.append(m.group(1))
+    for mod in required:
+        if mod not in replaced:
+            dep = repo.implicit_dep("go", mod, d, f)
+            if dep:
+                out.append(dep)
+    return out
 
 
 def _from_deps_txt(repo: Repo, d: str, f: str) -> list[str]:
@@ -255,6 +341,21 @@ def cmd_consumers(repo: Repo, lib: str) -> list[str]:
     return out
 
 
+def cmd_audit(repo: Repo) -> list[str]:
+    for d in sorted({posixpath.dirname(f) for f in repo.files()
+                     if posixpath.basename(f) in MANIFESTS and posixpath.dirname(f)}):
+        try:
+            direct(repo, d)
+        except DepsError as e:
+            print(f"deps: aviso: {d} se omitió: {e}", file=sys.stderr)
+    if not repo.implicit:
+        return ["sin dependencias tomadas por nombre: todas declaran su ruta"]
+    out = []
+    for (f, pkg), (dep, snippet) in sorted(repo.implicit.items()):
+        out += [f"{f}: {pkg} → {dep}", f"    agrega: {snippet}"]
+    return out
+
+
 def cmd_trigger_block(repo: Repo, d: str) -> list[str]:
     return ["  paths:", "    include:"] + [f"      - {p}" for p in cmd_paths(repo, [d])]
 
@@ -267,9 +368,10 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="deps.py", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, nargs in (("paths", "+"), ("libs", "+"), ("consumers", 1),
-                        ("trigger-block", 1), ("policy-filter", 1)):
+                        ("trigger-block", 1), ("policy-filter", 1), ("audit", 0)):
         p = sub.add_parser(name)
-        p.add_argument("dirs", nargs=nargs)
+        if nargs:
+            p.add_argument("dirs", nargs=nargs)
         p.add_argument("--ref", default="HEAD")
     args = ap.parse_args(argv)
 
@@ -285,6 +387,7 @@ def main(argv: list[str]) -> int:
         "consumers": lambda: cmd_consumers(repo, args.dirs[0]),
         "trigger-block": lambda: cmd_trigger_block(repo, args.dirs[0]),
         "policy-filter": lambda: cmd_policy_filter(repo, args.dirs[0]),
+        "audit": lambda: cmd_audit(repo),
     }
     try:
         lines = handlers[args.cmd]()
@@ -293,6 +396,13 @@ def main(argv: list[str]) -> int:
         return 1
     for line in lines:
         print(line)
+    if args.cmd != "audit":  # audit ya los listó en stdout
+        for (f, pkg), (dep, snippet) in sorted(repo.implicit.items()):
+            print(f"deps: aviso: {f}: '{pkg}' se tomó por nombre ({dep}); declara la ruta: {snippet}",
+                  file=sys.stderr)
+    if repo.implicit and os.environ.get("DEPS_STRICT") == "1":
+        print("deps: DEPS_STRICT=1: hay dependencias sin ruta declarada (ver arriba)", file=sys.stderr)
+        return 1
     return 0
 
 

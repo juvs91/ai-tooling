@@ -251,6 +251,30 @@ class TestCiPython(PylibTestCase):
                                  CI_WORKING_DIRECTORY="ventas/api", CI_DEPENDS_ON="_shared/libs/otra")
         self.assertEqual(bad.returncode, 1)
 
+    def test_check_paths_from_manifest(self) -> None:
+        # ADR-0080: sin CI_DEPENDS_ON la lista sale del manifiesto (deps.py)
+        self.repo.write("ventas/api/pyproject.toml", '[project]\nname = "ventas-api"\nversion = "1.0.0"\n'
+                        'dependencies = ["metalsa-auth"]\n')
+        self.repo.commit("lib por nombre")
+        r, _ = self.run_script("ci-python.sh", "check-paths", CI_PIPELINE_FILE="pipelines/api-ci.yml",
+                               CI_WORKING_DIRECTORY="ventas/api")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("##vso[task.logissue type=warning]ventas/api/pyproject.toml: 'metalsa-auth' se tomó por nombre",
+                      r.stdout)
+        strict, _ = self.run_script("ci-python.sh", "check-paths", CI_PIPELINE_FILE="pipelines/api-ci.yml",
+                                    CI_WORKING_DIRECTORY="ventas/api", DEPS_STRICT="1")
+        self.assertEqual(strict.returncode, 1)
+
+    def test_check_paths_trigger_behind_manifest(self) -> None:
+        self.repo.write("_shared/libs/otra/pyproject.toml", '[project]\nname = "metalsa-otra"\n')
+        self.repo.write("ventas/api/pyproject.toml", '[project]\nname = "ventas-api"\nversion = "1.0.0"\n'
+                        '[tool.uv.sources]\nmetalsa-otra = { path = "../../_shared/libs/otra" }\n')
+        self.repo.commit("lib nueva sin trigger")
+        r, _ = self.run_script("ci-python.sh", "check-paths", CI_PIPELINE_FILE="pipelines/api-ci.yml",
+                               CI_WORKING_DIRECTORY="ventas/api")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("deps.py trigger-block ventas/api", r.stderr)
+
     def test_install_uv_pins_version(self) -> None:
         self.run_script("ci-python.sh", "install-uv", CI_UV_VERSION="0.5.1")
         self.run_script("ci-python.sh", "install-uv", CI_UV_VERSION="")

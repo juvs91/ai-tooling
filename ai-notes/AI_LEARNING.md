@@ -1867,3 +1867,11 @@ Hallazgos al correr de verdad (ninguno aparecía con fakes):
   - macOS: los mismos 9 fallos que en `master` (bash 3.2 sin `mapfile`, sin PyYAML local); no son regresiones.
   - Simulador (desde una copia en `$HOME`): el run de PR pasa checkout, "Validar trigger.paths vs dependencias del manifiesto", uv, ruff, pytest y "Hash de contenido". Se detiene en `docker build` por `permission denied` a `/var/run/docker.sock` dentro del agente, que es un problema del entorno. Los otros escenarios no se corrieron.
 - **Pendiente:** portar `deps.py` y el nuevo `shared_deps_of` a `commons` (contrato compartido); correr el simulador completo donde el agente tenga acceso a docker.sock.
+
+## 2026-11-04 · ADR-0081: migración sin romper al lector de dependencias
+
+- **Por qué:** con el lector por ruta, un servicio que pedía `metalsa-auth` sin `[tool.uv.sources]` dejaba de detectarse, y `release.sh` exigía Python ≥ 3.11 (el `python3` de macOS es 3.9.6).
+- **Decisión:** si un manifiesto pide un paquete que existe en el repo pero no declara su ruta, `deps.py` lo toma por nombre (el `[project].name`/`name`/`module` real, no un prefijo) y avisa con el bloque que falta. Agregué `deps.py audit`, warnings en `ci-python.sh` y `DEPS_STRICT=1` para cuando todo esté migrado. `release.sh` elige el intérprete (`python3.11+`, luego `uv run --python 3.12`, luego un error claro).
+- **Lección:** `set -e` no aplica dentro de `$(...)`. Un `die` en `py=$(_python)` dentro de otra sustitución no detenía nada: seguía y corría `deps.py` con el Python 3.9. Lo corregí con `py=$(_python) || exit 1`, y lo encontré probando con un PATH que solo tenía `/usr/bin`.
+- **Lección:** el índice de nombres de paquete recorre todos los manifiestos del repo. Un manifiesto roto en otra carpeta se salta en vez de tumbar la búsqueda.
+- **Pruebas:** Linux 163 de 163 (25 de `deps.py`, 2 nuevos de `ci-python`). En macOS, con `/usr/bin` + uv, `work` descarga cpython 3.12 y funciona; sin uv, sale el error con instrucciones.

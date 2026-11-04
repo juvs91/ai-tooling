@@ -244,6 +244,14 @@ python3 scripts/deps.py policy-filter ventas/api    # filtro de la policy de bui
 ./scripts/release.sh consumers _shared/libs/auth    # lo mismo, con el comando work sugerido
 ```
 
+**Si un servicio pide la librería solo por nombre** (por ejemplo `metalsa-auth>=0.1` sin
+`[tool.uv.sources]`), se detecta igual y aparece un aviso con el bloque que falta.
+`python3 scripts/deps.py audit` lista todos esos casos; cuando quede limpio, la variable
+`DEPS_STRICT=1` en el pipeline vuelve error cualquier caso nuevo.
+
+`deps.py` necesita Python 3.11 o mayor. `release.sh` lo busca solo: prueba `python3.11` y
+posteriores, y si no hay, usa `uv` (que descarga uno). Los agentes de Azure ya traen 3.12.
+
 Azure no acepta parámetros en los triggers, así que `trigger.paths.include` sigue en el YAML.
 Pero ya no se escribe a mano: se genera con `trigger-block`, y el step "Validar trigger.paths"
 falla en el PR si se queda atrás.

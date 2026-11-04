@@ -48,3 +48,4 @@
 | [ADR-0078](ADR-0078-doclens-ocr-con-posiciones.md) | doclens 2.1.0: OCR completo con cajas por palabra (también en imágenes sueltas), spa+eng y versión de formato del digest | Accepted | 2026-11-02 | Harness |
 | [ADR-0079](ADR-0079-doclens-caras-yunet.md) | doclens 2.3.0: cajas de caras con OpenCV YuNet (modelo con sha256 verificado), formato 5 y venv que se rehace si cambia el lock | Accepted | 2026-11-02 | Harness |
 | [ADR-0080](ADR-0080-lector-unico-dependencias.md) | Lector único de dependencias (`scripts/deps.py`) desde el manifiesto de cada servicio: sparse checkout, CI de Azure y where-used | Accepted | 2026-11-04 | GitOps |
+| [ADR-0081](ADR-0081-migracion-dependencias-por-nombre.md) | Migración sin romper al lector por ruta: dependencias pedidas por nombre con aviso, `deps.py audit`, `DEPS_STRICT` y selector de Python en `release.sh` | Accepted | 2026-11-04 | GitOps |

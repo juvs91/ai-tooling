@@ -82,7 +82,9 @@ para este servicio. Prod recibe el **mismo digest** que aprobó QA.
    python3 scripts/deps.py trigger-block ventas/api   # pegar en trigger: del *-ci.yml
    python3 scripts/deps.py policy-filter ventas/api   # filtro de ruta de la policy
    ```
-   El step "Validar trigger.paths" falla en el PR si el bloque se queda atrás.
+   El step "Validar trigger.paths" falla en el PR si el bloque se queda atrás. Una lib pedida
+   solo por nombre (sin `[tool.uv.sources]`) sale como warning; con la variable de pipeline
+   `DEPS_STRICT=1` es error. `python3 scripts/deps.py audit` lista las que faltan.
 4. Dockerfile del servicio con contexto = **raíz del repo** y `COPY` explícito del servicio y
    sus libs (si no, un cambio en la lib no entra a la imagen).
 

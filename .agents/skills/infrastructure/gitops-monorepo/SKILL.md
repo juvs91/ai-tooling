@@ -77,14 +77,16 @@ salen el sparse checkout, el hash de imagen del CI, la validación de `trigger.p
 | `go.mod` | `replace mod => ../../shared/libs/auth` |
 | `deps.txt` | una ruta por línea (solo carpetas sin manifiesto) |
 
-La convención de nombres (`@company/<lib>`, `company-<lib>`) ya no basta: sin la fuente local
-declarada, la lib no se detecta. Requiere Python >= 3.11.
+Si un manifiesto pide una lib del repo **por nombre** sin declarar su ruta, se detecta igual
+con un aviso y el bloque que falta. `deps.py audit` las lista todas; `DEPS_STRICT=1` las vuelve
+error. `deps.py` requiere Python >= 3.11; `release.sh` lo busca solo (o usa `uv`).
 
 ```bash
 python3 scripts/deps.py paths projects/proyecto-a          # proyecto + libs (transitivas)
 python3 scripts/deps.py consumers shared/libs/auth         # where-used
 python3 scripts/deps.py trigger-block projects/proyecto-a  # bloque trigger.paths (Azure)
 python3 scripts/deps.py policy-filter projects/proyecto-a  # filtro de la policy de PR
+python3 scripts/deps.py audit                              # libs pedidas por nombre sin ruta
 ```
 
 ---

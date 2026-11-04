@@ -10,6 +10,7 @@
 #   CI_DEPENDS_ON         opcional: libs separadas por espacio (templates anteriores a
 #                         ADR-0080). Vacío = se leen del manifiesto con deps.py.
 #   CI_UV_VERSION         vacío = última
+#   DEPS_STRICT           opcional: 1 = falla si una lib se pidió por nombre sin ruta (ADR-0080)
 # Predefinida: AGENT_TEMPDIRECTORY (destino del JUnit).
 #
 # Comandos: check-paths | install-uv | lint | test
@@ -25,16 +26,24 @@ cmd_check_paths() {
   if [[ -n "${CI_DEPENDS_ON:-}" ]]; then
     mapfile -t deps < <(ci_words CI_DEPENDS_ON)
   else
-    out=$(python3 "$CI_DIR/deps.py" libs "$CI_WORKING_DIRECTORY") \
-      || ci_die "no se pudieron leer las dependencias de $CI_WORKING_DIRECTORY (deps.py)"
+    # Los avisos de deps.py (lib tomada por nombre, sin ruta declarada) salen como
+    # warnings del pipeline; con DEPS_STRICT=1 (variable del pipeline) son error.
+    local errf; errf=$(mktemp)
+    out=$(python3 "$CI_DIR/deps.py" libs "$CI_WORKING_DIRECTORY" 2>"$errf") || {
+      cat "$errf" >&2; rm -f "$errf"
+      ci_die "no se pudieron leer las dependencias de $CI_WORKING_DIRECTORY (deps.py)"
+    }
+    while IFS= read -r line; do
+      [[ "$line" == "deps: aviso: "* ]] && ci_warn "${line#deps: aviso: }"
+    done < "$errf"
+    rm -f "$errf"
     mapfile -t deps < <(printf '%s' "$out" | grep -v '^$')
   fi
   # ci-image.sh check-paths lee el YAML con PyYAML; el python del toolcache no lo trae
   python3 -c 'import yaml' 2>/dev/null \
     || python3 -m pip install --disable-pip-version-check -q pyyaml
   bash "$CI_DIR/ci-image.sh" check-paths "$CI_PIPELINE_FILE" "$CI_WORKING_DIRECTORY" ${deps[@]+"${deps[@]}"} \
-    || ci_die "trigger.paths.include de $CI_PIPELINE_FILE no cubre las dependencias. "\
-"Bloque correcto: python3 scripts/deps.py trigger-block $CI_WORKING_DIRECTORY"
+    || ci_die "trigger.paths.include de $CI_PIPELINE_FILE no cubre las dependencias. Bloque correcto: python3 scripts/deps.py trigger-block $CI_WORKING_DIRECTORY"
 }
 
 cmd_install_uv() {

@@ -85,11 +85,9 @@ anteriores.
 
 ### Negativas / Costos
 
-- **Cambio incompatible para quien dependía de la convención de nombres.** Un servicio que
-  usa `company-auth` sin `[tool.uv.sources]` (o `@company/auth` sin `workspace:`/`file:`) deja
-  de detectarse. Hay que declarar la fuente local, que de todos modos es lo que uv/pnpm
-  necesitan para instalar desde el monorepo.
-- `release.sh work`/`hotfix` requieren Python ≥ 3.11 en la máquina del developer.
+- **Migración de la convención de nombres** (resuelta en ADR-0081, sin romper): un servicio
+  que pide `metalsa-auth` sin `[tool.uv.sources]` se sigue detectando por nombre, con aviso.
+- `deps.py` requiere Python ≥ 3.11; `release.sh` lo busca solo (ADR-0081).
 - `trigger.paths.include` y el filtro de la policy siguen existiendo como copias; el lector
   las valida o las genera, pero no las elimina.
 - `commons` comparte el contrato de `release.sh` (ADR-0034, ADR-0048). Hay que portarle
@@ -108,3 +106,8 @@ anteriores.
   `consumers`.
 - Documento para equipos: `docs/knowledge/gitops-monorepo-a-escala.md`.
 - Plan: `ai-notes/plans/2026-11-04-lector-unico-dependencias.md`.
+
+## Addendum (2026-11-04)
+
+La migración sin romper (dependencias pedidas por nombre, `deps.py audit`, `DEPS_STRICT`, selector
+de Python en `release.sh`) se decidió en [ADR-0081](ADR-0081-migracion-dependencias-por-nombre.md).
