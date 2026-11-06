@@ -21,7 +21,7 @@ setup() {
   "$REALGIT" clone -q origin.git w 2>/dev/null; cd w || exit 1
   "$REALGIT" checkout -q -b master 2>/dev/null || true
   mkdir -p scripts proj other
-  cp "$REL" scripts/release.sh; cp "$CI" scripts/ci-image.sh; cp "$AI_TOOLING/scripts/ci-lib.sh" scripts/ 2>/dev/null || true
+  cp "$REL" scripts/release.sh; cp "$CI" scripts/ci-image.sh; cp "$AI_TOOLING/scripts/ci-lib.sh" "$AI_TOOLING/scripts/deps.py" scripts/ 2>/dev/null || true
   # this repo's .gitops-env, with the projects at the root
   printf '# comment\nGITOPS_TRUNK_BRANCH=master\nGITOPS_REMOTE=origin\nGITOPS_PROJECTS_DIR=.\nGITOPS_PROJECT_MAP=other:other\n' > .gitops-env
   echo "1.2.3" > proj/VERSION; echo "0.1.0" > other/VERSION
@@ -157,6 +157,32 @@ mkdir -p scripts projects/svc; cp "$REL" scripts/release.sh; echo 3.0.0 > projec
 "$REALGIT" add -A && "$REALGIT" commit -qm init && "$REALGIT" push -q origin main 2>/dev/null; MAIN="$("$REALGIT" rev-parse HEAD)"
 rel promote svc dev; rel tag svc
 [ "$(at svc@3.0.0-dev.1)" = "$MAIN" ] && [ "$(at svc@3.0.0)" = "$MAIN" ] && res ok "R12 defaults: trunk main, projects/<svc>, no .gitops-env" || res ko "R12 defaults" "$(tail -1 "$base/out")"
+
+# R13 manifests: pyproject.toml and package.json (version read from the commit)
+setup; mkdir -p py js; printf '[project]\nname = "py"\nversion = "4.5.6"\n' > py/pyproject.toml; printf '{"name": "js", "version": "7.8.9"}\n' > js/package.json
+"$REALGIT" add -A; "$REALGIT" commit -qm m; "$REALGIT" push -q origin master; rel promote py dev; o1="$(tail -1 "$base/out")"; rel tag js
+tags | grep -qx 'py@4.5.6-dev.1' && tags | grep -qx 'js@7.8.9' && res ok "R13 pyproject.toml and package.json versions" || res ko "R13 manifests" "$o1 | $(tail -1 "$base/out")"
+
+# R14 bump writes the manifest (VERSION and pyproject.toml), unchanged
+setup; mkdir -p py; printf '[project]\nname = "py"\nversion = "1.0.0"\n' > py/pyproject.toml; rel bump proj 1.3.0; rel bump py 1.1.0
+[ "$(cat proj/VERSION)" = 1.3.0 ] && grep -q '^version = "1.1.0"' py/pyproject.toml && res ok "R14 bump writes VERSION and pyproject.toml" || res ko "R14 bump" "$(tail -1 "$base/out")"
+
+# R15 hotfix: branch from the prod tag; check reports it pending; cherry absorbs it into master; check clean
+setup; rel tag proj; rel hotfix proj 1.2.3 fix1; br="$("$REALGIT" rev-parse --abbrev-ref HEAD)"
+echo fix > fix.txt; "$REALGIT" add fix.txt; "$REALGIT" commit -qm "fix(proj): x"; "$REALGIT" tag -a proj@1.2.3-hotfix.1 -m h; "$REALGIT" push -q origin proj@1.2.3-hotfix.1
+rel check proj; pending="$(grep -c PENDIENTE "$base/out")"
+"$REALGIT" checkout -q master; rel cherry proj 1.2.3; o="$(cat "$base/out")"; rel check proj
+if [ "$br" = hotfix/proj/fix1 ] && [ "$pending" = 1 ] && "$REALGIT" ls-remote origin refs/heads/master | grep -q "$("$REALGIT" rev-parse HEAD)" && grep -q 'sin hotfixes pendientes' "$base/out"; then
+  res ok "R15 hotfix → check (pending) → cherry → check (clean)"
+else res ko "R15 hotfix flow" "branch=$br pending=$pending; $(echo "$o" | tail -2 | tr '\n' ' ')"; fi
+
+# R16 versions lists every env
+setup; rel tag proj; rel promote proj dev; rel promote proj rc; rel versions proj
+grep -q 'proj@1.2.3-dev.1 .*DEV' "$base/out" && grep -q 'proj@1.2.3-rc.1 .*QA' "$base/out" && grep -q 'proj@1.2.3 .*PROD' "$base/out" && res ok "R16 versions" || res ko "R16 versions" "$(cat "$base/out")"
+
+# R17 work / expand (sparse checkout) read the map from .gitops-env
+setup; rel work other; s1="$("$REALGIT" sparse-checkout list 2>/dev/null | tr '\n' ' ')"; rel expand; s2="$("$REALGIT" config core.sparseCheckout || echo false)"
+case "$s1" in *other*) [ "$s2" != true ] && res ok "R17 work other → sparse set with other; expand → full" || res ko "R17 expand" "$s2";; *) res ko "R17 work" "$s1 / $(tail -1 "$base/out")";; esac
 
 echo "--- $pass passed, $fail failed"
 [ "$fail" = 0 ]
