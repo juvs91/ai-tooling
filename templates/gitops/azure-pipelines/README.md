@@ -60,7 +60,7 @@ tools/azure-sim/sim down
 | tag `-hotfix.N` | `<svc>-release` | build si falta → prod (approval) → `release.sh cherry` obligatorio |
 
 La imagen se identifica por **contenido** (tree hashes git del servicio + libs), no por
-commit: `release.sh tag` taggea el HEAD de trunk, que puede no haber construido nada
+commit: `release.sh tag` taggea el commit de `<remote>/<trunk>` (ADR-0082), que puede no haber construido nada
 para este servicio. Prod recibe el **mismo digest** que aprobó QA.
 
 ## Instalación en un repo
