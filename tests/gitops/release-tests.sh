@@ -184,5 +184,19 @@ grep -q 'proj@1.2.3-dev.1 .*DEV' "$base/out" && grep -q 'proj@1.2.3-rc.1 .*QA' "
 setup; rel work other; s1="$("$REALGIT" sparse-checkout list 2>/dev/null | tr '\n' ' ')"; rel expand; s2="$("$REALGIT" config core.sparseCheckout || echo false)"
 case "$s1" in *other*) [ "$s2" != true ] && res ok "R17 work other → sparse set with other; expand → full" || res ko "R17 expand" "$s2";; *) res ko "R17 work" "$s1 / $(tail -1 "$base/out")";; esac
 
+# R18 GITOPS_PROJECT_RESOLVER (ADR-0083): a nested project's folder comes from a repo script, not from the map;
+# an unknown name falls through to GITOPS_PROJECTS_DIR, and a resolver that is a command (not a path) is refused
+setup; mkdir -p prod/deep; echo "2.0.0" > prod/deep/VERSION
+printf '#!/usr/bin/env sh\ncase "$1" in deep|dp) echo prod/deep ;; *) exit 1 ;; esac\n' > scripts/resolver.sh
+echo "GITOPS_PROJECT_RESOLVER=scripts/resolver.sh" >> .gitops-env
+"$REALGIT" add -A && "$REALGIT" commit -qm nested && "$REALGIT" push -q origin master 2>/dev/null
+rel promote deep dev; rel promote dp dev; rel promote proj dev
+tags | grep -qx 'deep@2.0.0-dev.1' && tags | grep -qx 'dp@2.0.0-dev.1' && tags | grep -qx 'proj@1.2.3-dev.1' \
+  && res ok "R18 resolver: nested folder by name and by alias; others fall through to the projects dir" \
+  || res ko "R18 resolver" "$(tags | tr '\n' ' '); $(tail -1 "$base/out")"
+setup; echo 'GITOPS_PROJECT_RESOLVER=scripts/release.sh; touch pwned' >> .gitops-env; rel promote proj dev
+[ ! -e pwned ] && grep -q 'GITOPS_PROJECT_RESOLVER debe ser' "$base/out" && res ok "R18b a resolver that is not a plain repo path is refused, never run" \
+  || res ko "R18b resolver as a command" "$(tail -1 "$base/out")"
+
 echo "--- $pass passed, $fail failed"
 [ "$fail" = 0 ]

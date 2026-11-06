@@ -31,6 +31,10 @@
 #   GITOPS_TRUNK_BRANCH   rama trunk (default: main)
 #   GITOPS_PROJECTS_DIR   carpeta base de los proyectos (default: projects; "." = raíz)
 #   GITOPS_PROJECT_MAP    nombre:carpeta,nombre:carpeta — gana sobre GITOPS_PROJECTS_DIR
+#   GITOPS_PROJECT_RESOLVER  ruta (relativa a la raíz) de un script del repo que recibe un nombre y imprime su carpeta,
+#                         exit ≠ 0 si no lo conoce; se consulta después del mapa y antes de GITOPS_PROJECTS_DIR. Es
+#                         una ruta, no un comando: no se evalúa (ADR-0083: la carpeta de un proyecto se escribe en un
+#                         solo lugar del repo, y release.sh se la pregunta)
 #   GITOPS_SHARED_DIR     carpeta de libs compartidas (default: shared/libs; Azure: _shared/libs)
 #
 # Qué libs usa un proyecto sale de su manifiesto vía scripts/deps.py (ADR-0080).
@@ -141,6 +145,14 @@ _project_path() {
     local entry
     entry=$(echo "$GITOPS_PROJECT_MAP" | tr ',' '\n' | grep "^${proj}:" | head -1)
     [[ -n "$entry" ]] && echo "${entry#*:}" && return
+  fi
+  if [[ -n "${GITOPS_PROJECT_RESOLVER:-}" ]]; then
+    local root resolver dir
+    root=$(git rev-parse --show-toplevel)
+    resolver="$GITOPS_PROJECT_RESOLVER"
+    [[ "$resolver" =~ ^[A-Za-z0-9._/-]+$ && "$resolver" != /* && "$resolver" != *..* && -f "$root/$resolver" ]] \
+      || die "GITOPS_PROJECT_RESOLVER debe ser la ruta de un script del repo, relativa a la raíz: '$resolver'"
+    if dir=$(sh "$root/$resolver" "$proj" 2>/dev/null) && [[ -n "$dir" ]]; then echo "$dir"; return; fi
   fi
   local base="${GITOPS_PROJECTS_DIR:-projects}"
   [[ -z "$base" || "$base" == "." ]] && echo "$proj" || echo "$base/$proj"
@@ -971,6 +983,7 @@ Uso: release.sh <comando> [args]
   GITOPS_TRUNK_BRANCH   rama trunk (default: main)
   GITOPS_PROJECTS_DIR   carpeta base de proyectos (default: projects; "." = raíz)
   GITOPS_PROJECT_MAP    nombre:carpeta,... (gana sobre GITOPS_PROJECTS_DIR)
+  GITOPS_PROJECT_RESOLVER  script del repo: <nombre> → carpeta (después del mapa)
   GITOPS_SHARED_DIR     libs compartidas (default: shared/libs; Azure: _shared/libs)
 
   Las libs de cada proyecto salen de su manifiesto (scripts/deps.py, ADR-0080):
