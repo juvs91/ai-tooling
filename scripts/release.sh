@@ -17,13 +17,16 @@
 #   ./scripts/release.sh init    <proy>               alias de work (un proyecto)
 #   ./scripts/release.sh init-multi <proy...>         alias de work (multi)
 #   ./scripts/release.sh bump    <proyecto> <1.4.2>   bump versión en el manifiesto (comitear vía PR)
-#   ./scripts/release.sh tag     <proyecto> [1.4.2]   crear tag de release (lee versión del manifiesto)
+#   ./scripts/release.sh tag     <proyecto> [1.4.2]   tag de release del commit de <remote>/<trunk> (versión de su manifiesto)
 #   ./scripts/release.sh hotfix  <proyecto> <1.4.2> [nombre]  branch desde prod
 #   ./scripts/release.sh cherry  <proyecto> <1.4.2>   cherry-pick a trunk
 #   ./scripts/release.sh check   [proyecto]            hotfixes pendientes
-#   ./scripts/release.sh promote <proyecto> <1.4.2> <dev|rc>  re-promote/rollback
+#   ./scripts/release.sh promote <proyecto> <dev|rc> [--at <ref>]  tag -dev.N/-rc.N de <remote>/<trunk>; --at: rollback (ADR-0082)
 #
-# Variables de entorno:
+# tag y promote etiquetan el commit de <remote>/<trunk>, nunca HEAD: corren desde cualquier rama o worktree y solo
+# liberan lo que ya entró a trunk (ADR-0082). La versión sale del manifiesto de ese commit.
+#
+# Variables de entorno (también se leen, sin ejecutarse, de .gitops-env en la raíz del repo; el entorno gana):
 #   GITOPS_REMOTE         remote autoritativo (auto-detect si no se setea)
 #   GITOPS_TRUNK_BRANCH   rama trunk (default: main)
 #   GITOPS_PROJECTS_DIR   carpeta base de los proyectos (default: projects; "." = raíz)
@@ -35,6 +38,21 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# .gitops-env de la raíz del repo: se carga solo, sin pisar lo que ya trae el entorno. Solo lee líneas
+# GITOPS_*=valor (nunca las ejecuta).
+_load_gitops_env() {
+  local root line key
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  [[ -f "$root/.gitops-env" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^(GITOPS_[A-Z_]+)=(.*)$ ]] || continue
+    key="${BASH_REMATCH[1]}"
+    [[ -n "${!key+x}" ]] || export "$key=${BASH_REMATCH[2]}"
+  done < "$root/.gitops-env"
+}
+_load_gitops_env
 
 CMD="${1:-help}"
 
@@ -97,13 +115,6 @@ require_clean() {
     || die "hay cambios sin commitear — haz commit o stash primero"
 }
 
-require_trunk() {
-  local branch; branch=$(git rev-parse --abbrev-ref HEAD)
-  local trunk; trunk=$(trunk_branch)
-  [[ "$branch" == "$trunk" ]] \
-    || die "este comando requiere estar en $(trunk_branch) (estás en: $branch)"
-}
-
 # Raíz de las libs compartidas: shared/libs → shared, _shared/libs → _shared (ADR-0080)
 _shared_root() {
   local d="${GITOPS_SHARED_DIR:-shared/libs}"
@@ -145,16 +156,6 @@ _manifest_kind_and_path() {
   elif [[ -f "$proj_dir/VERSION"       ]]; then echo "go     $proj_dir/VERSION"
   else die "no se pudo determinar el tipo de manifiesto para $1 (busqué pyproject.toml, package.json, VERSION)"
   fi
-}
-
-_manifest_current_version() {
-  local kind manifest
-  read -r kind manifest <<< "$(_manifest_kind_and_path "$1")"
-  case "$kind" in
-    python) grep -m1 '^version' "$manifest" | cut -d'"' -f2 ;;
-    node)   node -p "require('./$manifest').version" ;;
-    go)     cat "$manifest" ;;
-  esac
 }
 
 require_project_dir() {
@@ -430,6 +431,60 @@ cmd_sync() {
   fi
 }
 
+# ── commit, proyecto y versión de un release ───────────────────────────────
+# Un release etiqueta el commit de <remote>/<trunk>, nunca HEAD: funciona desde cualquier worktree o rama, con el
+# árbol sucio o sin hacer checkout de trunk, y solo etiqueta lo que ya está en el remote. --at <ref> elige otro
+# commit (rollback), que debe estar en trunk.
+_release_commit() {
+  local at="${1:-}" remote trunk sha
+  remote=$(resolve_remote); trunk=$(trunk_branch)
+  require_full_history
+  git fetch "$remote" "+refs/heads/$trunk:refs/remotes/$remote/$trunk" --tags --quiet \
+    || die "no se pudo traer $remote/$trunk"
+  if [[ -z "$at" ]]; then
+    git rev-parse "refs/remotes/$remote/$trunk^{commit}"
+    return
+  fi
+  sha=$(git rev-parse --verify --quiet "$at^{commit}") || die "no existe $at"
+  git merge-base --is-ancestor "$sha" "refs/remotes/$remote/$trunk" \
+    || die "$at no está en $remote/$trunk: solo se libera lo que ya entró a $trunk"
+  echo "$sha"
+}
+
+# El proyecto existe en ese commit (no en el árbol de trabajo)
+_require_project_at() {
+  local proj_dir; proj_dir=$(_project_path "$1")
+  [[ -n "$(git ls-tree -d "$2" -- "$proj_dir" 2>/dev/null)" ]] \
+    || die "no existe $proj_dir en $(git rev-parse --short "$2") — revisa el nombre, GITOPS_PROJECT_MAP o GITOPS_PROJECTS_DIR (.gitops-env)"
+}
+
+# Versión del manifiesto en ese commit, sin \r ni espacios
+_manifest_version_at() {
+  local proj_dir content v
+  proj_dir=$(_project_path "$1")
+  if content=$(git show "$2:$proj_dir/pyproject.toml" 2>/dev/null); then
+    v=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' <<< "$content" | head -1)
+  elif content=$(git show "$2:$proj_dir/package.json" 2>/dev/null); then
+    v=$(python3 -I -c 'import json, sys; print(json.load(sys.stdin)["version"])' <<< "$content") || v=""
+  elif content=$(git show "$2:$proj_dir/VERSION" 2>/dev/null); then
+    v=$(head -1 <<< "$content")
+  else
+    die "$1 no tiene manifiesto en $(git rev-parse --short "$2") (busqué pyproject.toml, package.json y VERSION en $proj_dir)"
+  fi
+  v="${v//$'\r'/}"; v="${v//[[:space:]]/}"
+  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "el manifiesto de $1 no tiene una versión de release limpia: '$v'\n  corre: ./scripts/release.sh bump $1 <version> (por PR)"
+  echo "$v"
+}
+
+# Sube un tag solo; si no entra (alguien subió el mismo nombre, o sin permiso: git dice cuál), lo borra en local
+# y falla
+_push_tag() {
+  git push --quiet "$1" "refs/tags/$2" && return 0
+  git tag -d "$2" >/dev/null 2>&1 || true
+  return 1
+}
+
 # ── tags y releases ────────────────────────────────────────────────────────
 
 # El manifiesto de cada proyecto es la fuente de verdad de la versión (ADR-0010
@@ -468,22 +523,12 @@ cmd_bump() {
 cmd_tag() {
   local project="${1:-}"; local expected_version="${2:-}"
   require_arg "$project" "proyecto requerido\n  uso: release.sh tag <proyecto> [version-esperada]"
-  require_project_dir "$project"
-  require_trunk
-  require_clean
 
   local remote; remote=$(resolve_remote)
   local trunk; trunk=$(trunk_branch)
-
-  require_full_history
-  git fetch "$remote" "$trunk" --tags --quiet
-
-  [[ "$(git rev-parse HEAD)" == "$(git rev-parse "$remote/$trunk")" ]] \
-    || die "$trunk local no está sincronizado — corre: ./scripts/release.sh sync"
-
-  local version; version=$(_manifest_current_version "$project")
-  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-    || die "el manifiesto de $project no tiene una versión de release limpia: '$version'\n  corre: ./scripts/release.sh bump $project <version>"
+  local sha; sha=$(_release_commit)
+  _require_project_at "$project" "$sha"
+  local version; version=$(_manifest_version_at "$project" "$sha")
 
   if [[ -n "$expected_version" && "$expected_version" != "$version" ]]; then
     die "el manifiesto tiene $version pero esperabas $expected_version\n  ¿olvidaste bumpear? ./scripts/release.sh bump $project $expected_version"
@@ -493,27 +538,21 @@ cmd_tag() {
   require_tag_not_exists "$tag"
 
   # Bloquear si hay hotfixes pendientes de cherry-pick
-  local pendiente=""
-  local tmp; tmp=$(mktemp)
-  git tag -l "${project}@*hotfix*" > "$tmp" 2>/dev/null || true
+  local pendiente="" t hsha
   while IFS= read -r t; do
     [[ -z "$t" ]] && continue
-    local sha; sha=$(git rev-parse "${t}^{commit}" 2>/dev/null || echo "")
-    [[ -z "$sha" ]] && continue
-    if ! is_applied_to "$sha" "$remote/$trunk"; then
-      pendiente="$t"
-    fi
-  done < "$tmp"
-  rm -f "$tmp"
-
+    hsha=$(git rev-parse "${t}^{commit}" 2>/dev/null || echo "")
+    [[ -z "$hsha" ]] && continue
+    is_applied_to "$hsha" "$sha" || pendiente="$t"
+  done < <(git tag -l "${project}@*hotfix*")
   [[ -z "$pendiente" ]] \
     || die "cherry-pick pendiente: $pendiente\n  corre: ./scripts/release.sh cherry $project <version>"
 
-  git tag -a "$tag" -m "Release $tag"
-  git push "$remote" "$tag"
+  git tag -a "$tag" -m "Release $tag" "$sha"
+  _push_tag "$remote" "$tag" || die "no se pudo subir $tag a $remote (arriba, la razón de git)"
 
-  ok "tag creado: $tag → $(git rev-parse --short HEAD)"
-  info "el pipeline de Bitbucket detectará el tag y desplegará a prod"
+  ok "tag creado: $tag → $(git rev-parse --short "$sha") ($remote/$trunk)"
+  info "el pipeline detecta el tag y despliega a prod"
 }
 
 cmd_hotfix() {
@@ -677,47 +716,49 @@ cmd_check() {
 }
 
 cmd_promote() {
-  local project="${1:-}"; local version="${2:-}"; local env="${3:-}"
-  require_arg "$project" "proyecto requerido\n  uso: release.sh promote <proyecto> <1.4.2> <dev|rc>"
-  require_arg "$version" "versión requerida"
-  require_arg "$env" "ambiente requerido (dev|rc)\n  nota: promote es escape hatch para rollback/re-promote, no para el flujo CI normal"
-  require_semver "$version"
-
+  local usage="uso: release.sh promote <proyecto> <dev|rc> [--at <ref>]   (o <proyecto> <X.Y.Z> <dev|rc>: la versión debe ser la del manifiesto)"
+  local project="${1:-}"; [[ $# -gt 0 ]] && shift
+  require_arg "$project" "proyecto requerido\n  $usage"
+  local version="" env="" at=""
+  if [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then version="$1"; shift; fi
+  env="${1:-}"; [[ $# -gt 0 ]] && shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --at) at="${2:-}"; [[ -n "$at" ]] || die "--at necesita un ref"; shift 2 ;;
+      *) die "argumento desconocido: $1\n  $usage" ;;
+    esac
+  done
+  require_arg "$env" "ambiente requerido (dev|rc)\n  $usage"
   [[ "$env" == "dev" || "$env" == "rc" ]] \
     || die "ambiente inválido: $env — solo se permite dev|rc (promote no maneja el tag final de prod)"
 
-  # rc solo desde trunk
-  if [[ "$env" == "rc" ]]; then
-    require_trunk
-  fi
-
-  require_clean
-
   local remote; remote=$(resolve_remote)
-  local trunk; trunk=$(trunk_branch)
+  local sha; sha=$(_release_commit "$at")
+  _require_project_at "$project" "$sha"
+  local manifest; manifest=$(_manifest_version_at "$project" "$sha")
+  if [[ -n "$version" && "$version" != "$manifest" ]]; then
+    die "el manifiesto de $project en $(git rev-parse --short "$sha") dice $manifest, no $version\n  sin versión, promote usa la del manifiesto"
+  fi
+  version="$manifest"
 
-  require_full_history
-  git fetch "$remote" --tags --quiet
-
-  # Autoincremento: buscar el N más alto del patrón proyecto@ver-env.N
-  local tmp; tmp=$(mktemp)
-  git tag -l "${project}@${version}-${env}.*" > "$tmp" 2>/dev/null || true
-  local last_n=0
-  while IFS= read -r n; do
-    [[ -n "$n" && "$n" -gt "$last_n" ]] && last_n="$n"
-  done < <(sed 's/.*\.//' "$tmp" | grep -E '^[0-9]+$')
-  rm -f "$tmp"
-
-  local N=$(( last_n + 1 ))
-  local new_tag="${project}@${version}-${env}.${N}"
-
-  require_tag_not_exists "$new_tag"
-
-  git tag -a "$new_tag" -m "Promote $new_tag (manual)"
-  git push "$remote" "$new_tag"
-
-  ok "tag creado: $new_tag → $(git rev-parse --short HEAD)"
-  warn "promote es un escape hatch — el flujo normal usa el pipeline CI para crear estos tags"
+  # El N sale de los tags del remote (no de los locales); si otro sube el mismo N antes, se recalcula
+  local attempt n last_n new_tag
+  for attempt in 1 2 3; do
+    last_n=0
+    while IFS= read -r n; do
+      [[ "$n" =~ ^[0-9]+$ && "$n" -gt "$last_n" ]] && last_n="$n"
+    done < <(git ls-remote --tags "$remote" "refs/tags/${project}@${version}-${env}.*" \
+               | sed -e 's#.*refs/tags/##' -e 's/\^{}$//' -e 's/.*\.//')
+    new_tag="${project}@${version}-${env}.$((last_n + 1))"
+    git tag -d "$new_tag" >/dev/null 2>&1 || true   # uno local con ese nombre que el remote no tiene
+    git tag -a "$new_tag" -m "Promote $new_tag" "$sha"
+    if _push_tag "$remote" "$new_tag"; then
+      ok "tag creado: $new_tag → $(git rev-parse --short "$sha")"
+      return 0
+    fi
+    warn "$new_tag ya lo subió alguien más; recalculo ($attempt/3)"
+  done
+  die "no se pudo crear un tag ${project}@${version}-${env}.N después de 3 intentos"
 }
 
 cmd_versions() {
@@ -917,14 +958,15 @@ Uso: release.sh <comando> [args]
 
   RELEASES  (ADR-0010 de commons: el manifiesto de cada proyecto es la fuente de verdad de la versión)
   bump    <proyecto> <1.4.2>            bump versión en el manifiesto (comitear vía PR)
-  tag     <proyecto> [1.4.2]            crear tag de release — lee versión del manifiesto
+  tag     <proyecto> [1.4.2]            tag de release del commit de <remote>/<trunk> — versión de su manifiesto
   hotfix  <proyecto> <1.4.2> [nombre]   branch de hotfix desde tag de prod
   cherry  <proyecto> <1.4.2>            cherry-pick del/los hotfix a trunk
   check    [proyecto]                    hotfixes pendientes (sin proy: todos)
-  promote  <proyecto> <1.4.2> <dev|rc>   escape hatch: re-promote / rollback
+  promote  <proyecto> <dev|rc> [--at <ref>]  tag -dev.N/-rc.N de <remote>/<trunk>; --at <ref>: rollback a un commit de trunk
+           (también <proyecto> <1.4.2> <dev|rc>, si 1.4.2 es la versión del manifiesto)
   versions [proyecto]                    listar tags por ambiente
 
-  VARIABLES DE ENTORNO
+  VARIABLES DE ENTORNO (o en .gitops-env de la raíz del repo; el entorno gana)
   GITOPS_REMOTE         remote autoritativo (auto-detect: company > origin > upstream)
   GITOPS_TRUNK_BRANCH   rama trunk (default: main)
   GITOPS_PROJECTS_DIR   carpeta base de proyectos (default: projects; "." = raíz)
